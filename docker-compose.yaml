@@ -1,0 +1,54 @@
+services:
+  openchamber:
+    # Pinned to a specific version tag (set by CircleCI per-commit). 
+    # Change to :v1.22.0 / :v1.21.1 etc. for explicit rollback.
+    image: sourabhjagga/openchamber-harden:v1.22.1
+    container_name: openchamber
+    pull_policy: always
+    ports:
+      - "3005:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - openchamber-config:/home/openchamber/.config/openchamber
+      - openchamber-opencode-share:/home/openchamber/.local/share/opencode
+      - openchamber-opencode-state:/home/openchamber/.local/state/opencode
+      - openchamber-opencode-config:/home/openchamber/.config/opencode
+      - openchamber-ssh:/home/openchamber/.ssh
+      - openchamber-workspaces:/home/openchamber/workspaces
+      # Persist opencode plugin cache + npx MCP cache so redeploys don't force
+      # fresh registry downloads that stall startup for minutes.
+      - openchamber-opencode-cache:/home/openchamber/.cache/opencode
+      - openchamber-npm-cache:/home/openchamber/.npm
+    environment:
+      # Docker binds OpenChamber to 0.0.0.0 for port mapping, so UI auth is required.
+      # Set this in Coolify's environment settings before starting, for example:
+      #   OPENCHAMBER_UI_PASSWORD=<strong password>
+      OPENCHAMBER_UI_PASSWORD: ${OPENCHAMBER_UI_PASSWORD:?Set OPENCHAMBER_UI_PASSWORD before exposing OpenChamber through Docker}
+    # OPENCHAMBER_HOST: 0.0.0.0  # Bind address (default in Docker entrypoint: 0.0.0.0)
+    # OPENCHAMBER_TUNNEL_PROVIDER: cloudflare
+    # OPENCHAMBER_TUNNEL_MODE: quick  # quick | managed-remote | managed-local
+    # OPENCHAMBER_TUNNEL_HOSTNAME: app.example.com  # required for managed-remote
+    # OPENCHAMBER_TUNNEL_TOKEN: your_cloudflare_token  # required for managed-remote
+    # OPENCHAMBER_TUNNEL_CONFIG: /home/openchamber/.cloudflared/config.yml  # optional for managed-local
+    # OH_MY_OPENCODE: true # enable oh-my-opencode
+    # OPENCODE_HOST: http://172.17.0.1:4096 # Connect to external OpenCode server
+    # OPENCODE_SKIP_START: true # skip start opencode
+    # OPENCHAMBER_OPENCODE_HOSTNAME: 0.0.0.0 # Bind OpenCode to all interfaces
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/3000"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  openchamber-config:
+  openchamber-opencode-share:
+  openchamber-opencode-state:
+  openchamber-opencode-config:
+  openchamber-ssh:
+  openchamber-workspaces:
+  openchamber-opencode-cache:
+  openchamber-npm-cache:
