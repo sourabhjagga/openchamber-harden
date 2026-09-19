@@ -9,10 +9,12 @@ jobs:
       - run: docker login -u "$DOCKER_LOGIN" -p "$DOCKER_PASSWORD"
       - run: |
           VERSION_TAG=$(echo "$CIRCLE_SHA1" | cut -c1-7)
-          docker build -t sourabhjagga/openchamber-harden:latest -t sourabhjagga/openchamber-harden:main -t sourabhjagga/openchamber-harden:${VERSION_TAG} .
+          APP_VERSION=$(grep -m1 '"version"' package.json | sed 's/[^0-9.]//g')
+          docker build -t sourabhjagga/openchamber-harden:latest -t sourabhjagga/openchamber-harden:main -t sourabhjagga/openchamber-harden:${VERSION_TAG} -t sourabhjagga/openchamber-harden:v${APP_VERSION} .
           docker push sourabhjagga/openchamber-harden:latest
           docker push sourabhjagga/openchamber-harden:main
           docker push sourabhjagga/openchamber-harden:${VERSION_TAG}
+          docker push sourabhjagga/openchamber-harden:v${APP_VERSION}
 
 workflows:
   build:
