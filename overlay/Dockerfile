@@ -1,0 +1,99 @@
+# syntax=docker/dockerfile:1
+FROM oven/bun:1.4.3 AS base
+WORKDIR /app
+
+FROM base AS deps
+WORKDIR /app
+COPY package.json bun.lock ./
+COPY bun-patches ./bun-patches
+COPY packages/ui/package.json ./packages/ui/
+COPY packages/web/package.json ./packages/web/
+COPY packages/electron/package.json ./packages/electron/
+COPY packages/vscode/package.json ./packages/vscode/
+COPY packages/mobile/package.json ./packages/mobile/
+COPY packages/sdk/package.json ./packages/sdk/
+RUN bun install --frozen-lockfile --ignore-scripts
+
+FROM deps AS builder
+WORKDIR /app
+COPY . .
+# The server imports @openchamber/sdk at runtime, and deps installed with
+# --ignore-scripts, so the root postinstall never built it. Build it here
+# so the runtime stage can copy the output.
+RUN bun run --cwd packages/sdk build
+RUN bun run build:web
+
+FROM oven/bun:1.4.3 AS runtime
+WORKDIR /home/openchamber
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  bash \
+  bzip2 \
+  ca-certificates \
+  curl \
+  git \
+  less \
+  openssh-client \
+  python3 \
+  && rm -rf /var/lib/apt/lists/*
+
+# Node.js: ARG default is the major, tracked by Renovate (bumps only when a
+# new major ships); setup_${NODE_VERSION}.x resolves the latest patch of that
+# line at build time.
+ARG NODE_VERSION=24
+RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
+  && apt-get install -y --no-install-recommends nodejs \
+  && rm -rf /var/lib/apt/lists/*
+
+# Replace the base image's 'bun' user (UID 1000) with 'openchamber'
+# so mounted volumes with 1000:1000 ownership work correctly.
+RUN userdel bun \
+  && groupadd -g 1000 openchamber \
+  && useradd -u 1000 -g 1000 -m -s /bin/bash openchamber \
+  && chown -R openchamber:openchamber /home/openchamber
+
+ENV NPM_CONFIG_PREFIX=/home/openchamber/.npm-global
+ENV PATH=${NPM_CONFIG_PREFIX}/bin:${PATH}
+
+# Create the runtime directories and install the OpenCode CLI as the
+# openchamber user, so every path it writes to is owned by uid 1000.
+USER openchamber
+RUN npm config set prefix /home/openchamber/.npm-global && mkdir -p /home/openchamber/.npm-global && \
+  mkdir -p \
+    /home/openchamber/.local/share/opencode \
+    /home/openchamber/.local/state/opencode \
+    /home/openchamber/.config/openchamber \
+    /home/openchamber/.config/opencode \
+    /home/openchamber/.ssh \
+    /home/openchamber/workspaces && \
+  npm install -g @opencode/cli@2.0.32
+
+# cloudflared 2026.3.0 - update digest explicitly when upgrading
+COPY --from=cloudflare/cloudflared@sha256:6d91c121b803126f7a5344005d17a9324788fc09d305b6e2560ec6040a7ae283 /usr/local/bin/cloudflared /usr/local/bin/cloudflared
+
+ENV NODE_ENV=production
+# The base image ships with the POSIX locale, which makes bash readline treat
+# every byte of a multibyte character separately in the built-in terminal.
+ENV LANG=C.UTF-8
+
+COPY scripts/docker-entrypoint.sh /home/openchamber/openchamber-entrypoint.sh
+
+COPY --from=builder --chown=openchamber:openchamber /app/node_modules ./node_modules
+COPY --from=builder --chown=openchamber:openchamber /app/packages/web/node_modules ./packages/web/node_modules
+COPY --from=builder --chown=openchamber:openchamber /app/package.json ./package.json
+COPY --from=builder --chown=openchamber:openchamber /app/packages/web/package.json ./packages/web/package.json
+COPY --from=builder --chown=openchamber:openchamber /app/packages/sdk/package.json ./packages/sdk/package.json
+COPY --from=builder --chown=openchamber:openchamber /app/packages/sdk/dist ./packages/sdk/dist
+COPY --from=builder --chown=openchamber:openchamber /app/packages/web/bin ./packages/web/bin
+COPY --from=builder --chown=openchamber:openchamber /app/packages/web/server ./packages/web/server
+COPY --from=builder --chown=openchamber:openchamber /app/packages/web/dist ./packages/web/dist
+
+# Fix upstream packaging bug: the built-in-extensions directory can ship as
+# root-only (mode 0700), which makes the server crash on startup with
+# "EACCES: permission denied, open .../built-in-extensions/registry.json"
+# because the runtime user is openchamber (uid 1000). Make it readable.
+RUN chmod -R a+rX /home/openchamber/packages/web/server/built-in-extensions 2>/dev/null || true
+
+EXPOSE 3000
+
+ENTRYPOINT ["sh", "/home/openchamber/openchamber-entrypoint.sh"]

@@ -30,12 +30,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   bash \
   bzip2 \
   ca-certificates \
+  curl \
   git \
   less \
-  nodejs \
-  npm \
   openssh-client \
   python3 \
+  && rm -rf /var/lib/apt/lists/*
+
+# Node.js: ARG default is the major, tracked by Renovate (bumps only when a
+# new major ships); setup_${NODE_VERSION}.x resolves the latest patch of that
+# line at build time.
+ARG NODE_VERSION=24
+RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
+  && apt-get install -y --no-install-recommends nodejs \
   && rm -rf /var/lib/apt/lists/*
 
 # Replace the base image's 'bun' user (UID 1000) with 'openchamber'
@@ -45,14 +52,20 @@ RUN userdel bun \
   && useradd -u 1000 -g 1000 -m -s /bin/bash openchamber \
   && chown -R openchamber:openchamber /home/openchamber
 
-# Switch to openchamber user
-USER openchamber
-
 ENV NPM_CONFIG_PREFIX=/home/openchamber/.npm-global
 ENV PATH=${NPM_CONFIG_PREFIX}/bin:${PATH}
 
+# Create the runtime directories and install the OpenCode CLI as the
+# openchamber user, so every path it writes to is owned by uid 1000.
+USER openchamber
 RUN npm config set prefix /home/openchamber/.npm-global && mkdir -p /home/openchamber/.npm-global && \
-  mkdir -p /home/openchamber/.local /home/openchamber/.config /home/openchamber/.ssh && \
+  mkdir -p \
+    /home/openchamber/.local/share/opencode \
+    /home/openchamber/.local/state/opencode \
+    /home/openchamber/.config/openchamber \
+    /home/openchamber/.config/opencode \
+    /home/openchamber/.ssh \
+    /home/openchamber/workspaces && \
   npm install -g @opencode/cli@2.0.32
 
 # cloudflared 2026.3.0 - update digest explicitly when upgrading
@@ -65,15 +78,21 @@ ENV LANG=C.UTF-8
 
 COPY scripts/docker-entrypoint.sh /home/openchamber/openchamber-entrypoint.sh
 
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/packages/web/node_modules ./packages/web/node_modules
-COPY --from=builder /app/package.json ./package.json
-COPY --from=builder /app/packages/web/package.json ./packages/web/package.json
-COPY --from=builder /app/packages/sdk/package.json ./packages/sdk/package.json
-COPY --from=builder /app/packages/sdk/dist ./packages/sdk/dist
-COPY --from=builder /app/packages/web/bin ./packages/web/bin
-COPY --from=builder /app/packages/web/server ./packages/web/server
-COPY --from=builder /app/packages/web/dist ./packages/web/dist
+COPY --from=builder --chown=openchamber:openchamber /app/node_modules ./node_modules
+COPY --from=builder --chown=openchamber:openchamber /app/packages/web/node_modules ./packages/web/node_modules
+COPY --from=builder --chown=openchamber:openchamber /app/package.json ./package.json
+COPY --from=builder --chown=openchamber:openchamber /app/packages/web/package.json ./packages/web/package.json
+COPY --from=builder --chown=openchamber:openchamber /app/packages/sdk/package.json ./packages/sdk/package.json
+COPY --from=builder --chown=openchamber:openchamber /app/packages/sdk/dist ./packages/sdk/dist
+COPY --from=builder --chown=openchamber:openchamber /app/packages/web/bin ./packages/web/bin
+COPY --from=builder --chown=openchamber:openchamber /app/packages/web/server ./packages/web/server
+COPY --from=builder --chown=openchamber:openchamber /app/packages/web/dist ./packages/web/dist
+
+# Fix upstream packaging bug: the built-in-extensions directory can ship as
+# root-only (mode 0700), which makes the server crash on startup with
+# "EACCES: permission denied, open .../built-in-extensions/registry.json"
+# because the runtime user is openchamber (uid 1000). Make it readable.
+RUN chmod -R a+rX /home/openchamber/packages/web/server/built-in-extensions 2>/dev/null || true
 
 EXPOSE 3000
 
