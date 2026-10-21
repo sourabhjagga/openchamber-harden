@@ -88,10 +88,6 @@ COPY --from=builder --chown=openchamber:openchamber /app/packages/web/bin ./pack
 COPY --from=builder --chown=openchamber:openchamber /app/packages/web/server ./packages/web/server
 COPY --from=builder --chown=openchamber:openchamber /app/packages/web/dist ./packages/web/dist
 
-# The deploy watcher asks Coolify to deploy a newly published image. It runs as
-# its own compose service, so the script has to be in the runtime image.
-COPY --from=builder --chown=openchamber:openchamber /app/.fork/deploy-watcher.mjs /deploy-watcher.mjs
-
 # Fix upstream packaging bug: the built-in-extensions directory can ship as
 # root-only (mode 0700), which makes the server crash on startup with
 # "EACCES: permission denied, open .../built-in-extensions/registry.json"

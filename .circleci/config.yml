@@ -15,6 +15,11 @@ jobs:
           docker push sourabhjagga/openchamber-harden:main
           docker push sourabhjagga/openchamber-harden:${VERSION_TAG}
           docker push sourabhjagga/openchamber-harden:v${APP_VERSION}
+      # Deploy the image that was just pushed. The host runs this over SSH
+      # with a key that can do nothing else, and the host script rolls back to
+      # the last good commit if the deployment fails. The job therefore fails
+      # when the deployment failed, even though the image was pushed.
+      - run: ./.fork/ci-trigger-deploy.sh
 
 workflows:
   build:
