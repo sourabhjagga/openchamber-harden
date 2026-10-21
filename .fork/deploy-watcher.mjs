@@ -176,14 +176,14 @@ async function deploy() {
 async function main() {
   await Bun.$`mkdir -p ${STATE_DIR}`.quiet();
   log(`watching ${WATCH_IMAGE} via ${COOLIFY_URL} (app ${APP_UUID})`);
-  let first = true;
   for (;;) {
     try {
       const digest = await publishedDigest();
       const state = await readState();
       if (digest && digest !== state.digest) {
-        if (first) {
-          // First sighting after a restart: record it, do not deploy.
+        if (!state.digest) {
+          // Nothing recorded yet: remember the current digest and do not deploy.
+          // A restart of this container must not roll production by itself.
           log(`initial digest ${digest}, recorded without deploying`);
         } else {
           log(`new digest ${digest} (was ${state.digest})`);
@@ -193,9 +193,14 @@ async function main() {
         if (!state.lastGoodCommit) state.lastGoodCommit = await lastGoodCommit().catch(() => null);
         await writeState(state);
       }
-      first = false;
     } catch (err) {
       log(`error: ${err.message}`);
+      if (/EACCES|permission denied/i.test(err.message)) {
+        log(
+          "cannot write the state file, so digests cannot be tracked and no deploy will be triggered. " +
+            "Fix the ownership of the state volume (it must be writable by uid 1000).",
+        );
+      }
     }
     await sleep(INTERVAL);
   }

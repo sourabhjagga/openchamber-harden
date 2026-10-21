@@ -74,6 +74,9 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - /data/coolify/openchamber-deploy/api_token:/run/secrets/coolify_api_token:ro
+      # The state volume must be writable by uid 1000. If it is ever removed and
+      # recreated, fix it with:
+      #   sudo docker run --rm -v <project>_openchamber-deploy-state:/v alpine chown 1000:1000 /v
       - openchamber-deploy-state:/run/deploy
     environment:
       COOLIFY_URL: http://host.docker.internal:8000
