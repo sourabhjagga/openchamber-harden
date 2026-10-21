@@ -1,9 +1,13 @@
+# One place to bump the release tag. Both the app and the deploy watcher run
+# the same image, so a release never leaves them out of step.
+x-openchamber-image: &openchamber-image sourabhjagga/openchamber-harden:v2.5.0
+
 services:
   openchamber:
     # Pinned to a specific version tag (set after each CircleCI build by retag).
     # Change to :v2.3.3, :v2.3.2, :v2.2.0 for explicit rollback — all
     # prior versions remain on DockerHub with their unique digests.
-    image: sourabhjagga/openchamber-harden:v2.5.0
+    image: *openchamber-image
     container_name: openchamber
     pull_policy: always
     ports:
@@ -47,6 +51,39 @@ services:
       start_period: 20s
     restart: unless-stopped
 
+  # Deploy watcher: asks Coolify to deploy a newly published image, and rolls
+  # back to the last good commit if that deployment fails.
+  #
+  # CircleCI pushes the image to DockerHub, but Coolify's API port is not
+  # reachable from the public internet, so the CI job cannot trigger a
+  # deployment itself. This service runs in the same compose, reaches Coolify
+  # over the host's docker network, and polls the registry for a new digest on
+  # the watched tag.
+  #
+  # The Coolify API token is mounted read-only from the host and never enters
+  # the repository or the OpenChamber container. Create it on the host with:
+  #   sudo install -d -o 1000 -g 1000 -m 0755 /data/coolify/openchamber-deploy
+  #   sudo install -o 1000 -g 1000 -m 0400 /dev/stdin \
+  #     /data/coolify/openchamber-deploy/api_token < <your coolify api token>
+  deploy-watcher:
+    image: *openchamber-image
+    pull_policy: always
+    container_name: openchamber-deploy-watcher
+    command: ["bun", "/deploy-watcher.mjs"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - /data/coolify/openchamber-deploy/api_token:/run/secrets/coolify_api_token:ro
+      - openchamber-deploy-state:/run/deploy
+    environment:
+      COOLIFY_URL: http://host.docker.internal:8000
+      COOLIFY_APPLICATION_UUID: tstvi6x0rrptvet3jonr31ta
+      # The mutable tag CircleCI pushes on every build. Watching it means no
+      # per-release edit here, and every new image triggers a deployment.
+      WATCH_IMAGE: sourabhjagga/openchamber-harden:main
+      WATCH_INTERVAL: "60"
+    restart: unless-stopped
+
 volumes:
   openchamber-config:
   openchamber-opencode-share:
@@ -56,3 +93,4 @@ volumes:
   openchamber-workspaces:
   openchamber-opencode-cache:
   openchamber-npm-cache:
+  openchamber-deploy-state:
