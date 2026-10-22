@@ -25,6 +25,9 @@ changelog-*.png
 local-dev*
 .tmp/
 /tmp/
+# Local OpenCode config for this checkout. It points at paths that only exist
+# inside the container, so it must not be committed.
+opencode.json
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
