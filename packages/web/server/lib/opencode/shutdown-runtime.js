@@ -19,6 +19,8 @@ export const createGracefulShutdownRuntime = (dependencies) => {
     scheduledTasksRuntime,
     getHealthCheckInterval,
     clearHealthCheckInterval,
+    getOrphanReapInterval,
+    clearOrphanReapInterval,
     getTerminalRuntime,
     setTerminalRuntime,
     getMessageStreamRuntime,
@@ -107,6 +109,11 @@ export const createGracefulShutdownRuntime = (dependencies) => {
     const healthCheckInterval = getHealthCheckInterval();
     if (healthCheckInterval) {
       clearHealthCheckInterval(healthCheckInterval);
+    }
+
+    const orphanReapInterval = getOrphanReapInterval();
+    if (orphanReapInterval) {
+      clearOrphanReapInterval(orphanReapInterval);
     }
 
     const terminalRuntime = getTerminalRuntime();

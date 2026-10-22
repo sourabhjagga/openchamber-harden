@@ -687,6 +687,7 @@ hmrStateRuntime.ensureUserProvidedOpenCodePassword(hmrState);
 
 // Non-HMR state (safe to reset on reload)
 let healthCheckInterval = null;
+let orphanReapInterval = null;
 let server = null;
 let expressApp = null;
 let currentRestartPromise = null;
@@ -1469,6 +1470,7 @@ Object.defineProperties(openCodeLifecycleState, {
   isExternalOpenCode: { get: () => isExternalOpenCode, set: (value) => { isExternalOpenCode = value; } },
   isShuttingDown: { get: () => isShuttingDown, set: (value) => { isShuttingDown = value; } },
   healthCheckInterval: { get: () => healthCheckInterval, set: (value) => { healthCheckInterval = value; } },
+  orphanReapInterval: { get: () => orphanReapInterval, set: (value) => { orphanReapInterval = value; } },
   expressApp: { get: () => expressApp, set: (value) => { expressApp = value; } },
   useWslForOpencode: { get: () => useWslForOpencode, set: (value) => { useWslForOpencode = value; } },
   resolvedWslBinary: { get: () => resolvedWslBinary, set: (value) => { resolvedWslBinary = value; } },
@@ -1926,6 +1928,9 @@ const bootstrapOpenCodeAtStartup = async (...args) => {
   if (openCodeLifecycleState.openCodeProcess && !openCodeLifecycleState.isExternalOpenCode) {
     startHealthMonitoring();
   }
+  // Reclaim the OpenCode servers and MCP servers that stray commands and
+  // server replacements leave behind. Runs for the life of the host.
+  openCodeLifecycleRuntime.startOrphanReapMonitoring();
   // The global watcher used to start only for desktop notifications; the
   // session-assist runtime also rides its event hub, so it now starts
   // unconditionally once OpenCode is up.
@@ -1963,6 +1968,8 @@ const gracefulShutdownRuntime = createGracefulShutdownRuntime({
   sessionRuntime,
   getHealthCheckInterval: () => healthCheckInterval,
   clearHealthCheckInterval: (value) => clearInterval(value),
+  getOrphanReapInterval: () => orphanReapInterval,
+  clearOrphanReapInterval: (value) => clearInterval(value),
   getTerminalRuntime: () => terminalRuntime,
   setTerminalRuntime: (value) => {
     terminalRuntime = value;

@@ -24,6 +24,11 @@ const HEALTH_CHECK_MAX_CONSECUTIVE_FAILURES = parsePositiveInt(
   20
 );
 const HEALTH_CHECK_INTERVAL_OVERRIDE_MS = parsePositiveInt(process.env.OPENCHAMBER_OPENCODE_HEALTH_INTERVAL_MS, 0);
+
+// How often the orphaned OpenCode and MCP servers are reclaimed. Short
+// enough that a stray CLI command cannot hold much memory for long, long
+// enough that the process scan is not itself a cost.
+const ORPHAN_REAP_INTERVAL_MS = parsePositiveInt(process.env.OPENCHAMBER_ORPHAN_REAP_INTERVAL_MS, 120000);
 const HEALTH_CHECK_RESULT_CACHE_MS = parsePositiveInt(process.env.OPENCHAMBER_OPENCODE_HEALTH_CACHE_MS, 750);
 const OPENCODE_HEALTH_PATH = '/api/info';
 const OPENCODE_REQUIRED_MAJOR_VERSION = 2;
@@ -1561,6 +1566,37 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
     }, effectiveIntervalMs);
   };
 
+  /**
+   * Reclaim the processes that pile up outside the managed server's own
+   * lifetime.
+   *
+   * Running an `opencode` command inside this container starts a second
+   * OpenCode server for the directory it runs in. That server opens an MCP
+   * connection per configured server, and the CLI exits without stopping it,
+   * so the server and its MCP servers are left running with nobody using
+   * them. On a host with many MCP servers that is over a gigabyte per stray
+   * command. The startup pass only runs once, so this repeats it while the
+   * host is up.
+   */
+  const startOrphanReapMonitoring = () => {
+    if (state.orphanReapInterval) {
+      clearInterval(state.orphanReapInterval);
+    }
+    state.orphanReapInterval = setInterval(async () => {
+      try {
+        const reapedServers = await reapOrphanedOpencodeServers({ log: (msg) => console.log(msg) });
+        const reapedMcp = await reapOrphanedMcpServers({ log: (msg) => console.log(msg) });
+        if (reapedServers > 0 || reapedMcp > 0) {
+          console.log(`[lifecycle] reaped ${reapedServers} orphaned OpenCode server(s) and ${reapedMcp} orphaned MCP server(s)`);
+        }
+      } catch (error) {
+        console.warn('[lifecycle] periodic orphan reap failed:', error?.message ?? error);
+      }
+    }, ORPHAN_REAP_INTERVAL_MS);
+    // The timer must not keep the process alive on its own.
+    state.orphanReapInterval.unref?.();
+  };
+
   return {
     /** The managed OpenCode's launch environment; null for an external OpenCode or before the first launch. */
     getManagedOpenCodeProcessEnv: () => (state.isExternalOpenCode ? null : managedProcessEnv),
@@ -1591,6 +1627,7 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
     refreshOpenCodeAfterConfigChange,
     bootstrapOpenCodeAtStartup,
     startHealthMonitoring,
+    startOrphanReapMonitoring,
     triggerHealthCheck,
     waitForPortRelease,
   };
