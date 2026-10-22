@@ -23,6 +23,30 @@ COPY . .
 RUN bun run --cwd packages/sdk build
 RUN bun run build:web
 
+# What the app runs on, without the toolchain that built it.
+#
+# The runtime copies this stage's node_modules instead of the builder's. The
+# builder needs vite, typescript, oxlint, tailwind, electron-builder and the
+# rest of the development stack; the running server needs none of them, and
+# together they are about 750 MB of the image.
+#
+# The prune is a fresh install from the lockfile, not a deletion from the
+# installed tree. Bun hardlinks the package store, so removing the top level of
+# a live tree leaves symlinks pointing into a store that is now incomplete; a
+# clean install cannot end up in that state.
+#
+# PRUNE_DEV_DEPS=false leaves the full tree in place, so a regression here is
+# undone by flipping one build argument instead of reverting the Dockerfile.
+FROM deps AS prod-deps
+ARG PRUNE_DEV_DEPS=true
+RUN if [ "$PRUNE_DEV_DEPS" = "true" ]; then \
+      rm -rf node_modules packages/*/node_modules \
+      && bun install --frozen-lockfile --ignore-scripts --production \
+      && cd packages/web \
+      && bun -e 'for (const name of ["express", "ws", "jose", "openai", "simple-git", "zod", "yaml", "node-pty", "@opencode/client"]) import.meta.resolve(name)' \
+      && printf 'pruned node_modules: %s\n' "$(du -sh /app/node_modules | cut -f1)"; \
+    fi
+
 FROM oven/bun:1.4.3 AS runtime
 WORKDIR /home/openchamber
 
@@ -216,8 +240,8 @@ ENV LANG=C.UTF-8
 
 COPY scripts/docker-entrypoint.sh /home/openchamber/openchamber-entrypoint.sh
 
-COPY --from=builder --chown=openchamber:openchamber /app/node_modules ./node_modules
-COPY --from=builder --chown=openchamber:openchamber /app/packages/web/node_modules ./packages/web/node_modules
+COPY --from=prod-deps --chown=openchamber:openchamber /app/node_modules ./node_modules
+COPY --from=prod-deps --chown=openchamber:openchamber /app/packages/web/node_modules ./packages/web/node_modules
 COPY --from=builder --chown=openchamber:openchamber /app/package.json ./package.json
 COPY --from=builder --chown=openchamber:openchamber /app/packages/web/package.json ./packages/web/package.json
 COPY --from=builder --chown=openchamber:openchamber /app/packages/sdk/package.json ./packages/sdk/package.json
