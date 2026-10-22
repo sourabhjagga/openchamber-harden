@@ -125,8 +125,7 @@ RUN npm config set prefix /home/openchamber/.npm-global && mkdir -p /home/opench
 RUN python3 -m pip install --user --break-system-packages --no-cache-dir \
     analytics-mcp==0.7.0 \
   && test -x /home/openchamber/.local/bin/analytics-mcp \
-  && python3 -c "import analytics_mcp.server" \
-  && rm -rf /root/.cache/pip
+  && python3 -c "import analytics_mcp.server"
 
 # cloudflared 2026.3.0 - update digest explicitly when upgrading
 COPY --from=cloudflare/cloudflared@sha256:6d91c121b803126f7a5344005d17a9324788fc09d305b6e2560ec6040a7ae283 /usr/local/bin/cloudflared /usr/local/bin/cloudflared
