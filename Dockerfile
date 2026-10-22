@@ -123,39 +123,6 @@ RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
   && apt-get install -y --no-install-recommends nodejs \
   && rm -rf /var/lib/apt/lists/*
 
-# A shared instance of the Doppler MCP server.
-#
-# OpenCode opens one MCP connection per project location, so a local MCP
-# server is started once per location. The Doppler server only reads
-# secrets, and every location wants the same ones, so one instance serves
-# them all. This wrapper fronts the server over HTTP and the MCP entry
-# points at that.
-#
-# The script name carries a marker the orphan sweep recognises: the bridge
-# outlives the sessions that use it, so it must not be reclaimed like a
-# stray MCP server.
-ARG SUPERGATEWAY_VERSION=4.2.0
-RUN npm install -g "supergateway@${SUPERGATEWAY_VERSION}" \
-  && printf '%s\n' \
-    '#!/bin/sh' \
-    '# Shared Doppler MCP server, reached over HTTP by every project.' \
-    'set -eu' \
-    'DOPPLER_TOKEN_FILE="$${DOPPLER_TOKEN_FILE:-/home/openchamber/.config/opencode/doppler_token}"' \
-    'DOPPLER_TOKEN="$${DOPPLER_TOKEN:-}"' \
-    'if [ -z "$$DOPPLER_TOKEN" ] && [ -r "$$DOPPLER_TOKEN_FILE" ]; then' \
-    '  DOPPLER_TOKEN="$$(tr -d "[:space:]" < "$$DOPPLER_TOKEN_FILE")"' \
-    'fi' \
-    'export DOPPLER_TOKEN' \
-    '# Not exec: the wrapper stays as the process so its own command line' \
-    '# carries the marker the orphan sweep looks for.' \
-    'supergateway \' \
-    '  --stdio "node /home/openchamber/.config/opencode/node_modules/@dopplerhq/mcp-server/dist/index.js --read-only" \' \
-    '  --port "$${OPENCHAMBER_BRIDGE_PORT:-8910}" \' \
-    '  --outputTransport streamableHttp' \
-    > /usr/local/bin/openchamber-bridge \
-  && chmod 0755 /usr/local/bin/openchamber-bridge \
-  && supergateway --version
-
 # Replace the base image's 'bun' user (UID 1000) with 'openchamber'
 # so mounted volumes with 1000:1000 ownership work correctly.
 RUN userdel bun \
@@ -163,11 +130,11 @@ RUN userdel bun \
   && useradd -u 1000 -g 1000 -m -s /bin/bash openchamber \
   && chown -R openchamber:openchamber /home/openchamber
 
+# The OpenCode CLI and the other global tools live under the runtime user's own
+# prefix, so every path they write to is owned by uid 1000.
 ENV NPM_CONFIG_PREFIX=/home/openchamber/.npm-global
 ENV PATH=${NPM_CONFIG_PREFIX}/bin:${PATH}
 
-# Create the runtime directories and install the OpenCode CLI as the
-# openchamber user, so every path it writes to is owned by uid 1000.
 USER openchamber
 RUN npm config set prefix /home/openchamber/.npm-global && mkdir -p /home/openchamber/.npm-global && \
   mkdir -p \
@@ -178,6 +145,15 @@ RUN npm config set prefix /home/openchamber/.npm-global && mkdir -p /home/opench
     /home/openchamber/.ssh \
     /home/openchamber/workspaces && \
   npm install -g @opencode/cli@2.1.2
+
+# supergateway fronts one MCP server over HTTP so every project can share a
+# single instance of it. The entry point writes the wrapper that starts it
+# and puts that wrapper on PATH. The wrapper is written at start time rather
+# than here because a RUN command would have Docker substitute the shell
+# variables in it before the script ever saw them.
+ARG SUPERGATEWAY_VERSION=4.2.0
+RUN npm install -g "supergateway@${SUPERGATEWAY_VERSION}" \
+  && supergateway --version
 
 # analytics-mcp, baked in rather than installed on first use.
 #

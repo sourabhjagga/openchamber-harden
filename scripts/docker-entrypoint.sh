@@ -69,10 +69,40 @@ OPENCHAMBER_HOST="${OPENCHAMBER_HOST:-0.0.0.0}"
 export OPENCHAMBER_HOST
 
 # The shared Doppler MCP server, started once for the whole container. Every
-# project reaches it over HTTP instead of running its own copy.
-BRIDGE_BIN="/usr/local/bin/openchamber-bridge"
+# project reaches it over HTTP instead of running a copy of its own.
+#
+# The wrapper is written here rather than in the image because a Dockerfile RUN
+# would have Docker substitute the shell variables in it before the script
+# ever saw them, and the script would then look for its token file in the
+# current directory. Writing it at start time, with a quoted heredoc, keeps
+# every variable for the script that runs it.
+BRIDGE_DIR="${HOME}/.npm-global/bin"
+BRIDGE_BIN="${BRIDGE_DIR}/openchamber-bridge"
 BRIDGE_PORT="${OPENCHAMBER_BRIDGE_PORT:-8910}"
-if [ -x "$BRIDGE_BIN" ]; then
+
+if command -v supergateway >/dev/null 2>&1; then
+  mkdir -p "$BRIDGE_DIR"
+  cat > "$BRIDGE_BIN" <<'BRIDGE_EOF'
+#!/bin/sh
+# Shared Doppler MCP server, reached over HTTP by every project.
+#
+# Not exec: the wrapper stays as the process so that its own command line
+# carries the marker the orphan sweep looks for. The sweep would otherwise
+# end this bridge like any other stray MCP server.
+set -eu
+DOPPLER_TOKEN_FILE="${DOPPLER_TOKEN_FILE:-/home/openchamber/.config/opencode/doppler_token}"
+DOPPLER_TOKEN="${DOPPLER_TOKEN:-}"
+if [ -z "$DOPPLER_TOKEN" ] && [ -r "$DOPPLER_TOKEN_FILE" ]; then
+  DOPPLER_TOKEN="$(tr -d '[:space:]' < "$DOPPLER_TOKEN_FILE")"
+fi
+export DOPPLER_TOKEN
+supergateway \
+  --stdio "node /home/openchamber/.config/opencode/node_modules/@dopplerhq/mcp-server/dist/index.js --read-only" \
+  --port "${OPENCHAMBER_BRIDGE_PORT:-8910}" \
+  --outputTransport streamableHttp
+BRIDGE_EOF
+  chmod 0755 "$BRIDGE_BIN"
+
   echo "[entrypoint] starting the shared MCP bridge on port ${BRIDGE_PORT}..."
   OPENCHAMBER_BRIDGE_PORT="$BRIDGE_PORT" nohup "$BRIDGE_BIN" >/tmp/openchamber-bridge.log 2>&1 &
   BRIDGE_WAITED=0
