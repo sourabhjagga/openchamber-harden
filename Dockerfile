@@ -144,7 +144,7 @@ RUN npm config set prefix /home/openchamber/.npm-global && mkdir -p /home/opench
     /home/openchamber/.config/opencode \
     /home/openchamber/.ssh \
     /home/openchamber/workspaces && \
-  npm install -g @opencode/cli@2.0.32
+  npm install -g @opencode/cli@2.1.2
 
 # analytics-mcp, baked in rather than installed on first use.
 #
