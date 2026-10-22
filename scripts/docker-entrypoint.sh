@@ -186,7 +186,11 @@ if [ ! -x "$SUPERGATEWAY" ]; then
   mkdir -p "${HOME}/.config/opencode/vendor"
   tar xzf "${HOME}/.mcp-vendor/supergateway.tar.gz" -C "${HOME}/.config/opencode/vendor"
 fi
-exec "$SUPERGATEWAY" \
+# Deliberately not exec: the shell has to stay as the surviving process, because
+# its own command line is what carries the openchamber-bridge marker that the
+# orphan sweep looks for. Replacing it with the supergateway process drops the
+# marker, and the sweep then ends the bridge like any other stray MCP server.
+"$SUPERGATEWAY" \
   --stdio "node /home/openchamber/.config/opencode/node_modules/@dopplerhq/mcp-server/dist/index.js --read-only" \
   --port "${OPENCHAMBER_BRIDGE_PORT:-8910}" \
   --outputTransport streamableHttp

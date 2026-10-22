@@ -47,8 +47,15 @@ const isPidAlive = (pid) => {
 // the name of the wrapper script that starts it.
 const BRIDGE_MARKER = 'openchamber-bridge';
 
+// The shared bridge asks supergateway for streamable HTTP, and nothing else in
+// this install does, so the flag identifies the bridge too. That keeps it alive
+// even if its wrapper is ever replaced by the supergateway process, which does
+// not carry the marker above.
+const BRIDGE_TRANSPORT_FLAG = '--outputTransport streamableHttp';
+
 const isBridgeProcess = (command) =>
-  typeof command === 'string' && command.includes(BRIDGE_MARKER);
+  typeof command === 'string' &&
+  (command.includes(BRIDGE_MARKER) || command.includes(BRIDGE_TRANSPORT_FLAG));
 
 // A process is an MCP server when its command line names one. This keeps the
 // cleanup away from unrelated children even when they share a parent.
