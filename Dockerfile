@@ -71,26 +71,66 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
   && uv --version \
   && uvx --version
 
-# Chromium and the tools the Server Browser extension needs.
+# The browser, and the tools the Server Browser extension needs.
 #
-# The extension drives a Chrome it starts on this host, and it looks the
+# The extension drives a browser it starts on this host, and it looks the
 # binary up under the names google-chrome, google-chrome-stable, chromium and
-# chromium-browser. The chromium-sandbox package ships the setuid-root helper
-# Chrome needs: the container blocks unprivileged user namespaces, so without
-# it Chrome refuses to start and the extension cannot serve a page.
+# chromium-browser. Two flavours can supply it, both landing at
+# /opt/browser/chrome so the wrapper below does not have to know which one ran:
+#
+#   debian    Debian's chromium. Carries the distribution's security patches,
+#             which arrive with every image rebuild.
+#   cft-shell Chrome for Testing's chrome-headless-shell, the binary Puppeteer
+#             uses for headless work. The same DevTools surface (navigation,
+#             screenshots, input, viewport, PDF, dialogs, console and network),
+#             151 MB smaller on disk and 65 MB smaller as a layer, and quicker to
+#             start. It is a pinned blob with no distribution patches, so
+#             CHROME_HEADLESS_SHELL_VERSION has to be bumped by hand; Renovate
+#             does not track it. That is the trade: 65 MB against a browser that
+#             stops receiving Debian's security updates.
+#
+# CHROMIUM_FLAVOR=debian is the default, so the switch has no effect until it is
+# set, and going back is one build argument rather than a revert.
 #
 # lsof and ps are only used for the extension's optional development-server
 # discovery, but the extension declares them in its service permissions, so
 # they have to exist for the grant to be honoured.
+ARG CHROMIUM_FLAVOR=debian
+ARG CHROME_HEADLESS_SHELL_VERSION=155.0.8059.79
+ARG CHROME_HEADLESS_SHELL_SHA256=72d938cabad9674610939c72ef2d3faf20214a4418c3b4e94c1cebca683e767b
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
-  chromium \
-  chromium-common \
-  chromium-sandbox \
   lsof \
   procps \
+  $(if [ "$CHROMIUM_FLAVOR" = "cft-shell" ]; then \
+      echo ca-certificates fonts-liberation libasound2 libatk-bridge2.0-0 libatk1.0-0 \
+        libatspi2.0-0 libcairo2 libcups2 libdbus-1-3 libexpat1 libgbm1 libglib2.0-0 \
+        libgtk-3-0 libnspr4 libnss3 libpango-1.0-0 libudev1 libvulkan1 libx11-6 \
+        libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2; \
+    else \
+      echo chromium chromium-common chromium-sandbox; \
+    fi) \
   && rm -rf /var/lib/apt/lists/* \
-  && chromium --version \
-  && test -u /usr/lib/chromium/chrome-sandbox
+  && mkdir -p /opt/browser \
+  && if [ "$CHROMIUM_FLAVOR" = "cft-shell" ]; then \
+       case "$(dpkg --print-architecture)" in \
+         arm64) CFT_PLATFORM=linux-arm64 ;; \
+         amd64) CFT_PLATFORM=linux64 ;; \
+         *) echo "no chrome-headless-shell build for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+       esac \
+       && curl -fsSL -o /tmp/chrome-headless-shell.zip \
+         "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_HEADLESS_SHELL_VERSION}/${CFT_PLATFORM}/chrome-headless-shell-${CFT_PLATFORM}.zip" \
+       && echo "${CHROME_HEADLESS_SHELL_SHA256}  /tmp/chrome-headless-shell.zip" | sha256sum -c - \
+       && python3 -c "import zipfile; zipfile.ZipFile('/tmp/chrome-headless-shell.zip').extractall('/tmp/chs')" \
+       && mv /tmp/chs/chrome-headless-shell-${CFT_PLATFORM}/* /opt/browser/ \
+       && rm -rf /tmp/chs /tmp/chrome-headless-shell.zip \
+       && find /opt/browser/locales -type f ! -name 'en-US.pak' -delete \
+       && ln -sf /opt/browser/chrome-headless-shell /opt/browser/chrome; \
+     else \
+       ln -sf /usr/bin/chromium /opt/browser/chrome \
+       && test -u /usr/lib/chromium/chrome-sandbox; \
+     fi \
+  && /opt/browser/chrome --version
 
 # A wrapper for the Server Browser extension to find on PATH.
 #
@@ -118,7 +158,8 @@ RUN <<'RUN_EOF'
 cat > /usr/local/bin/chromium <<'WRAPPER_EOF'
 #!/bin/sh
 # Start the real browser, with its own sandbox when the container allows it.
-BROWSER=/usr/bin/chromium
+# /opt/browser/chrome is whichever flavour the image installed.
+BROWSER=/opt/browser/chrome
 
 if ! unshare -U true >/dev/null 2>&1; then
   exec "$BROWSER" --no-sandbox "$@"
