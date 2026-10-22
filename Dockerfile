@@ -181,15 +181,15 @@ RUN npm config set prefix /home/openchamber/.npm-global && mkdir -p /home/opench
 # own absolute path in the shebang of every script inside it, so an install
 # that is built somewhere else and moved would not start.
 ARG ANALYTICS_MCP_VERSION=0.7.0
-ARG MARKDITDOWN_MCP_VERSION=0.0.1a8
+ARG MARKITDOWN_MCP_VERSION=0.0.1a8
 ARG SUPERGATEWAY_VERSION=4.2.0
 RUN mkdir -p /home/openchamber/.mcp-vendor \
   && mkdir -p /home/openchamber/.config/opencode/vendor \
   && uv venv /home/openchamber/.config/opencode/vendor/analytics-mcp --python /usr/bin/python3.13 \
-  && uv pip install --python /home/openchamber/.config/opencode/vendor/analytics-mcp/bin/python "analytics-mcp==${ANALYTICS_MCP_VERSION}" \
+  && uv pip install --python /home/openchamber/.config/opencode/vendor/analytics-mcp/bin/python "analytics-mcp==${ANALYTICS_MCP_VERSION:?unset}" \
   && uv venv /home/openchamber/.config/opencode/vendor/markitdown --python /usr/bin/python3.13 \
-  && uv pip install --python /home/openchamber/.config/opencode/vendor/markitdown/bin/python "markitdown-mcp==${MARKITDOWN_MCP_VERSION}" \
-  && npm install --prefix /home/openchamber/.config/opencode/vendor/supergateway "supergateway@${SUPERGATEWAY_VERSION}" \
+  && uv pip install --python /home/openchamber/.config/opencode/vendor/markitdown/bin/python "markitdown-mcp==${MARKITDOWN_MCP_VERSION:?unset}" \
+  && npm install --prefix /home/openchamber/.config/opencode/vendor/supergateway "supergateway@${SUPERGATEWAY_VERSION:?unset}" \
   && mkdir -p /home/openchamber/.config/opencode/vendor/supergateway/bin \
   && ln -sf ../node_modules/.bin/supergateway /home/openchamber/.config/opencode/vendor/supergateway/bin/supergateway \
   && test -x /home/openchamber/.config/opencode/vendor/analytics-mcp/bin/analytics-mcp \
