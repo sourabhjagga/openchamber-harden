@@ -40,10 +40,21 @@ const isPidAlive = (pid) => {
   }
 };
 
+// A bridge fronts one MCP server over HTTP so every location can share a
+// single instance. The host starts it, it outlives the sessions that use it,
+// and its command line names the server it fronts. The orphan sweep would
+// otherwise end it like any other stray MCP server, so it is recognised by
+// the name of the wrapper script that starts it.
+const BRIDGE_MARKER = 'openchamber-bridge';
+
+const isBridgeProcess = (command) =>
+  typeof command === 'string' && command.includes(BRIDGE_MARKER);
+
 // A process is an MCP server when its command line names one. This keeps the
 // cleanup away from unrelated children even when they share a parent.
 const looksLikeMcpServer = (command) => {
   if (typeof command !== 'string') return false;
+  if (isBridgeProcess(command)) return false;
   const lower = command.toLowerCase();
   if (lower.includes('mcp')) return true;
   if (lower.includes('markitdown')) return true;

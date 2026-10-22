@@ -68,6 +68,31 @@ fi
 OPENCHAMBER_HOST="${OPENCHAMBER_HOST:-0.0.0.0}"
 export OPENCHAMBER_HOST
 
+# The shared Doppler MCP server, started once for the whole container. Every
+# project reaches it over HTTP instead of running its own copy.
+BRIDGE_BIN="/usr/local/bin/openchamber-bridge"
+BRIDGE_PORT="${OPENCHAMBER_BRIDGE_PORT:-8910}"
+if [ -x "$BRIDGE_BIN" ]; then
+  echo "[entrypoint] starting the shared MCP bridge on port ${BRIDGE_PORT}..."
+  OPENCHAMBER_BRIDGE_PORT="$BRIDGE_PORT" nohup "$BRIDGE_BIN" >/tmp/openchamber-bridge.log 2>&1 &
+  BRIDGE_WAITED=0
+  while [ "$BRIDGE_WAITED" -lt 30 ]; do
+    if curl -s -o /dev/null --max-time 2 \
+      -X POST "http://127.0.0.1:${BRIDGE_PORT}/mcp" \
+      -H "Content-Type: application/json" \
+      -H "Accept: application/json, text/event-stream" \
+      -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"openchamber","version":"1"}}}'; then
+      echo "[entrypoint] MCP bridge is up"
+      break
+    fi
+    sleep 1
+    BRIDGE_WAITED=$((BRIDGE_WAITED + 1))
+  done
+  if [ "$BRIDGE_WAITED" -ge 30 ]; then
+    echo "[entrypoint] warning: the MCP bridge did not come up, see /tmp/openchamber-bridge.log" >&2
+  fi
+fi
+
 echo "[entrypoint] starting..."
 
 if [ "$#" -gt 0 ]; then
