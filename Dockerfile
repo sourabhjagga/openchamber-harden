@@ -39,13 +39,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && rm -rf /var/lib/apt/lists/*
 
 # uv, the tool the catalog's local Python MCP entries call through `uvx`
-# (markitdown-mcp, mcp-grafana). The image ships no Python package manager
-# beyond pip, and `uvx` manages its own environments, so the catalog entries
-# that shell out to it cannot spawn without this.
+# (mcp-grafana). The image ships no Python package manager beyond pip, and
+# `uvx` manages its own environments, so the catalog entries that shell out to
+# it cannot spawn without this.
 ENV UV_INSTALL_DIR=/usr/local/bin
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
   && uv --version \
   && uvx --version
+
+# markitdown-mcp in a venv that is built once, here.
+#
+# The catalog entry runs it through `uvx`, and `uvx` starts two processes per
+# spawn: a `uv tool uvx` wrapper plus the Python server. OpenCode opens one
+# MCP connection per project location, so on this host that wrapper and its
+# interpreter were the single largest consumer of memory. A venv built at image
+# build time gives the entry one plain executable to start instead.
+ENV MARKITDOWN_VENV=/opt/markitdown
+RUN uv venv "${MARKITDOWN_VENV}" --python 3.13 \
+  && uv pip install --python "${MARKITDOWN_VENV}/bin/python" markitdown-mcp \
+  && rm -rf /root/.cache/uv
 
 # Chromium and the tools the Server Browser extension needs.
 #
@@ -67,6 +79,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && rm -rf /var/lib/apt/lists/* \
   && chromium --version \
   && test -u /usr/lib/chromium/chrome-sandbox
+
+# A wrapper for the Server Browser extension to find on PATH.
+#
+# The extension looks the browser up under the names google-chrome,
+# google-chrome-stable, chromium and chromium-browser, walking PATH in order,
+# and it starts the browser without a sandbox flag. This container blocks
+# unprivileged user namespaces, so Chromium's namespace sandbox cannot start
+# and the browser aborts during startup with SIGABRT. The setuid helper that
+# Chromium's SUID sandbox would need cannot be reached at runtime either,
+# because that decision is made when the browser is built.
+#
+# /usr/local/bin comes before /usr/bin in PATH, so this wrapper is the
+# chromium the extension resolves, and it starts the real browser with the
+# sandbox disabled. The container is the isolation boundary here; the browser
+# is only used to fetch pages the agent was asked to look at.
+RUN printf '#!/bin/sh\nexec /usr/bin/chromium --no-sandbox "$@"\n' \
+      > /usr/local/bin/chromium \
+  && chmod 0755 /usr/local/bin/chromium \
+  && /usr/local/bin/chromium --version
 
 # Engram, the persistent memory server. One static Go binary, no runtime
 # dependency stack, and it is what both the `engram` MCP entry and the

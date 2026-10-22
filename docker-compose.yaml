@@ -28,9 +28,6 @@ services:
       # fresh registry downloads that stall startup for minutes.
       - openchamber-opencode-cache:/home/openchamber/.cache/opencode
       - openchamber-npm-cache:/home/openchamber/.npm
-      # Engram's memory store. It lives in ~/.engram by default, which is not
-      # a volume, so every redeploy would wipe what the agent remembered.
-      - openchamber-engram:/home/openchamber/.engram
     environment:
       # Docker binds OpenChamber to 0.0.0.0 for port mapping, so UI auth is required.
       # Set this in Coolify's environment settings before starting, for example:
@@ -66,4 +63,3 @@ volumes:
   openchamber-workspaces:
   openchamber-opencode-cache:
   openchamber-npm-cache:
-  openchamber-engram:
