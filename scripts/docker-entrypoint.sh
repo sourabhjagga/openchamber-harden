@@ -6,6 +6,14 @@ HOME="/home/openchamber"
 OPENCODE_CONFIG_DIR="${OPENCODE_CONFIG_DIR:-${HOME}/.config/opencode}"
 export OPENCODE_CONFIG_DIR
 
+# The MCP servers that every workspace shares live in the persistent volume.
+# The image carries a compressed copy of each install, so the volume can be
+# filled without a network round trip, and the launcher in front of each
+# server fills it again if the volume was ever emptied.
+VENDOR_DIR="${HOME}/.config/opencode/vendor"
+VENDOR_ARCHIVES="/opt/mcp-vendor"
+MCP_BIN_DIR="${HOME}/.config/opencode/bin"
+
 SSH_DIR="${HOME}/.ssh"
 SSH_PRIVATE_KEY_PATH="${SSH_DIR}/id_ed25519"
 SSH_PUBLIC_KEY_PATH="${SSH_PRIVATE_KEY_PATH}.pub"
@@ -68,6 +76,82 @@ fi
 OPENCHAMBER_HOST="${OPENCHAMBER_HOST:-0.0.0.0}"
 export OPENCHAMBER_HOST
 
+# The MCP servers that every workspace shares live in the persistent volume.
+# The image carries a compressed copy of each install, so the volume can be
+# filled without a network round trip, and the launcher in front of each
+# server fills it again if the volume was ever emptied.
+unpack_vendor() {
+  # unpack_vendor <name> <path inside the install that proves it is complete>
+  name="$1"
+  probe="$2"
+  archive="${VENDOR_ARCHIVES}/${name}.tar.gz"
+  target="${VENDOR_DIR}/${name}"
+  [ -f "$archive" ] || return 1
+  [ -e "${target}/${probe}" ] && return 0
+  mkdir -p "$VENDOR_DIR"
+  tar xzf "$archive" -C "$VENDOR_DIR"
+  [ -e "${target}/${probe}" ]
+}
+
+if unpack_vendor analytics-mcp bin/analytics-mcp; then
+  echo "[entrypoint] analytics-mcp is in place"
+else
+  echo "[entrypoint] warning: analytics-mcp is not available" >&2
+fi
+
+if unpack_vendor markitdown bin/markitdown-mcp; then
+  echo "[entrypoint] markitdown-mcp is in place"
+else
+  echo "[entrypoint] warning: markitdown-mcp is not available" >&2
+fi
+
+if unpack_vendor supergateway bin/supergateway; then
+  echo "[entrypoint] supergateway is in place"
+else
+  echo "[entrypoint] warning: supergateway is not available" >&2
+fi
+
+# The launcher in front of each server puts its install back if the volume
+# was emptied. It is written here, and into the volume, because the config
+# points at these paths and the volume has to survive a wipe.
+mkdir -p "$MCP_BIN_DIR"
+
+cat > "${MCP_BIN_DIR}/analytics-mcp" <<'LAUNCHER_EOF'
+#!/bin/sh
+# Launcher for the analytics-mcp server.
+#
+# The install lives in the persistent volume. If the volume was emptied, the
+# launcher puts it back from the copy in the image, so the server starts
+# without waiting on a package registry.
+set -eu
+VENDOR_DIR="${HOME}/.config/opencode/vendor"
+VENV="${VENDOR_DIR}/analytics-mcp"
+if [ ! -x "${VENV}/bin/analytics-mcp" ]; then
+  mkdir -p "$VENDOR_DIR"
+  tar xzf /opt/mcp-vendor/analytics-mcp.tar.gz -C "$VENDOR_DIR"
+fi
+exec "${VENV}/bin/analytics-mcp" "$@"
+LAUNCHER_EOF
+chmod 0755 "${MCP_BIN_DIR}/analytics-mcp"
+
+cat > "${MCP_BIN_DIR}/markitdown-mcp" <<'LAUNCHER_EOF'
+#!/bin/sh
+# Launcher for the markitdown-mcp server.
+#
+# The install lives in the persistent volume. If the volume was emptied, the
+# launcher puts it back from the copy in the image, so the server starts
+# without waiting on a package registry.
+set -eu
+VENDOR_DIR="${HOME}/.config/opencode/vendor"
+VENV="${VENDOR_DIR}/markitdown"
+if [ ! -x "${VENV}/bin/markitdown-mcp" ]; then
+  mkdir -p "$VENDOR_DIR"
+  tar xzf /opt/mcp-vendor/markitdown.tar.gz -C "$VENDOR_DIR"
+fi
+exec "${VENV}/bin/markitdown-mcp" "$@"
+LAUNCHER_EOF
+chmod 0755 "${MCP_BIN_DIR}/markitdown-mcp"
+
 # The shared Doppler MCP server, started once for the whole container. Every
 # project reaches it over HTTP instead of running a copy of its own.
 #
@@ -79,8 +163,9 @@ export OPENCHAMBER_HOST
 BRIDGE_DIR="${HOME}/.npm-global/bin"
 BRIDGE_BIN="${BRIDGE_DIR}/openchamber-bridge"
 BRIDGE_PORT="${OPENCHAMBER_BRIDGE_PORT:-8910}"
+SUPERGATEWAY_BIN="${VENDOR_DIR}/supergateway/bin/supergateway"
 
-if command -v supergateway >/dev/null 2>&1; then
+if [ -x "$SUPERGATEWAY_BIN" ]; then
   mkdir -p "$BRIDGE_DIR"
   cat > "$BRIDGE_BIN" <<'BRIDGE_EOF'
 #!/bin/sh
@@ -96,7 +181,12 @@ if [ -z "$DOPPLER_TOKEN" ] && [ -r "$DOPPLER_TOKEN_FILE" ]; then
   DOPPLER_TOKEN="$(tr -d '[:space:]' < "$DOPPLER_TOKEN_FILE")"
 fi
 export DOPPLER_TOKEN
-supergateway \
+SUPERGATEWAY="${HOME}/.config/opencode/vendor/supergateway/bin/supergateway"
+if [ ! -x "$SUPERGATEWAY" ]; then
+  mkdir -p "${HOME}/.config/opencode/vendor"
+  tar xzf /opt/mcp-vendor/supergateway.tar.gz -C "${HOME}/.config/opencode/vendor"
+fi
+exec "$SUPERGATEWAY" \
   --stdio "node /home/openchamber/.config/opencode/node_modules/@dopplerhq/mcp-server/dist/index.js --read-only" \
   --port "${OPENCHAMBER_BRIDGE_PORT:-8910}" \
   --outputTransport streamableHttp

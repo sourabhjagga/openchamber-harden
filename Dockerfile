@@ -47,18 +47,6 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
   && uv --version \
   && uvx --version
 
-# markitdown-mcp in a venv that is built once, here.
-#
-# The catalog entry runs it through `uvx`, and `uvx` starts two processes per
-# spawn: a `uv tool uvx` wrapper plus the Python server. OpenCode opens one
-# MCP connection per project location, so on this host that wrapper and its
-# interpreter were the single largest consumer of memory. A venv built at image
-# build time gives the entry one plain executable to start instead.
-ENV MARKITDOWN_VENV=/opt/markitdown
-RUN uv venv "${MARKITDOWN_VENV}" --python 3.13 \
-  && uv pip install --python "${MARKITDOWN_VENV}/bin/python" markitdown-mcp \
-  && rm -rf /root/.cache/uv
-
 # Chromium and the tools the Server Browser extension needs.
 #
 # The extension drives a Chrome it starts on this host, and it looks the
@@ -86,18 +74,49 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # google-chrome-stable, chromium and chromium-browser, walking PATH in order,
 # and it starts the browser without a sandbox flag. This container blocks
 # unprivileged user namespaces, so Chromium's namespace sandbox cannot start
-# and the browser aborts during startup with SIGABRT. The setuid helper that
-# Chromium's SUID sandbox would need cannot be reached at runtime either,
-# because that decision is made when the browser is built.
+# and the browser aborts during startup with SIGABRT.
 #
 # /usr/local/bin comes before /usr/bin in PATH, so this wrapper is the
-# chromium the extension resolves, and it starts the real browser with the
-# sandbox disabled. The container is the isolation boundary here; the browser
-# is only used to fetch pages the agent was asked to look at.
-RUN printf '#!/bin/sh\nexec /usr/bin/chromium --no-sandbox "$@"\n' \
-      > /usr/local/bin/chromium \
-  && chmod 0755 /usr/local/bin/chromium \
-  && /usr/local/bin/chromium --version
+# chromium the extension resolves.
+#
+# The wrapper decides at start up whether the browser can use its own sandbox.
+# Chromium's namespace sandbox needs to create an unprivileged user namespace,
+# which Docker's default seccomp profile blocks. The container is the
+# isolation boundary in that case. When the profile allows the namespace, the
+# browser keeps its own sandbox, which holds a hostile page inside the
+# browser instead of only inside the container.
+#
+# The browser is started here rather than exec'd, so that a browser which
+# still cannot start with its own sandbox is started again without one. The
+# browser never stays in a state where it is running without a sandbox
+# because the sandbox was assumed to work.
+RUN <<'RUN_EOF'
+cat > /usr/local/bin/chromium <<'WRAPPER_EOF'
+#!/bin/sh
+# Start the real browser, with its own sandbox when the container allows it.
+BROWSER=/usr/bin/chromium
+
+if ! unshare -U true >/dev/null 2>&1; then
+  exec "$BROWSER" --no-sandbox "$@"
+fi
+
+"$BROWSER" "$@" &
+browser_pid=$!
+
+# The browser writes its DevTools port file within a second of starting, so
+# a browser that is still alive after two seconds has started. One that is
+# gone could not use the sandbox.
+sleep 2
+if kill -0 "$browser_pid" 2>/dev/null; then
+  wait "$browser_pid"
+  exit $?
+fi
+
+exec "$BROWSER" --no-sandbox "$@"
+WRAPPER_EOF
+chmod 0755 /usr/local/bin/chromium
+RUN_EOF
+RUN /usr/local/bin/chromium --version
 
 # Engram, the persistent memory server. One static Go binary, no runtime
 # dependency stack, and it is what both the `engram` MCP entry and the
@@ -146,26 +165,43 @@ RUN npm config set prefix /home/openchamber/.npm-global && mkdir -p /home/opench
     /home/openchamber/workspaces && \
   npm install -g @opencode/cli@2.1.2
 
-# supergateway fronts one MCP server over HTTP so every project can share a
-# single instance of it. The entry point writes the wrapper that starts it
-# and puts that wrapper on PATH. The wrapper is written at start time rather
-# than here because a RUN command would have Docker substitute the shell
-# variables in it before the script ever saw them.
-ARG SUPERGATEWAY_VERSION=4.2.0
-RUN npm install -g "supergateway@${SUPERGATEWAY_VERSION}" \
-  && supergateway --version
-
-# analytics-mcp, baked in rather than installed on first use.
+# The MCP servers that every workspace shares are installed once into the
+# persistent volume rather than carried in the image.
 #
-# The MCP's launcher reinstalls the package whenever its binary is missing,
-# but ~/.local is not a volume, so every redeploy used to start with a wiped
-# install and the reinstall then failed because the image had no pip. With the
-# package baked in, the launcher finds the binary straight away and never
-# reaches for pip at all.
-RUN python3 -m pip install --user --break-system-packages --no-cache-dir \
-    analytics-mcp==0.7.0 \
-  && test -x /home/openchamber/.local/bin/analytics-mcp \
-  && python3 -c "import analytics_mcp.server"
+# OpenCode opens one MCP connection per project location, so a local MCP
+# server runs once per location. These three are the same for every location,
+# so they are installed once and shared.
+#
+# The image keeps a compressed copy of each install. The entry point unpacks
+# them into the volume when they are missing, and the launcher in front of
+# each server unpacks it again if the volume was ever emptied. Nothing here
+# needs the network, so a start up never waits on a package registry.
+#
+# The Python venvs are built at the path they will live at. A venv records its
+# own absolute path in the shebang of every script inside it, so an install
+# that is built somewhere else and moved would not start.
+ARG ANALYTICS_MCP_VERSION=0.7.0
+ARG MARKDITDOWN_MCP_VERSION=0.0.1a8
+ARG SUPERGATEWAY_VERSION=4.2.0
+RUN mkdir -p /opt/mcp-vendor \
+  && mkdir -p /home/openchamber/.config/opencode/vendor \
+  && uv venv /home/openchamber/.config/opencode/vendor/analytics-mcp --python /usr/bin/python3.13 \
+  && uv pip install --python /home/openchamber/.config/opencode/vendor/analytics-mcp/bin/python "analytics-mcp==${ANALYTICS_MCP_VERSION}" \
+  && uv venv /home/openchamber/.config/opencode/vendor/markitdown --python /usr/bin/python3.13 \
+  && uv pip install --python /home/openchamber/.config/opencode/vendor/markitdown/bin/python "markitdown-mcp==${MARKITDOWN_MCP_VERSION}" \
+  && npm install --prefix /home/openchamber/.config/opencode/vendor/supergateway "supergateway@${SUPERGATEWAY_VERSION}" \
+  && mkdir -p /home/openchamber/.config/opencode/vendor/supergateway/bin \
+  && ln -sf ../node_modules/.bin/supergateway /home/openchamber/.config/opencode/vendor/supergateway/bin/supergateway \
+  && /home/openchamber/.config/opencode/vendor/supergateway/bin/supergateway --version \
+  && tar czf /opt/mcp-vendor/analytics-mcp.tar.gz -C /home/openchamber/.config/opencode/vendor analytics-mcp \
+  && tar czf /opt/mcp-vendor/markitdown.tar.gz -C /home/openchamber/.config/opencode/vendor markitdown \
+  && tar czf /opt/mcp-vendor/supergateway.tar.gz -C /home/openchamber/.config/opencode/vendor supergateway \
+  && rm -rf /home/openchamber/.config/opencode/vendor/analytics-mcp \
+              /home/openchamber/.config/opencode/vendor/markitdown \
+              /home/openchamber/.config/opencode/vendor/supergateway \
+  && test -f /opt/mcp-vendor/analytics-mcp.tar.gz \
+  && test -f /opt/mcp-vendor/markitdown.tar.gz \
+  && test -f /opt/mcp-vendor/supergateway.tar.gz
 
 # cloudflared 2026.3.0 - update digest explicitly when upgrading
 COPY --from=cloudflare/cloudflared@sha256:6d91c121b803126f7a5344005d17a9324788fc09d305b6e2560ec6040a7ae283 /usr/local/bin/cloudflared /usr/local/bin/cloudflared

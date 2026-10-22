@@ -13,6 +13,19 @@ services:
     # by default. Headless Chrome overruns that and dies on heavy pages, so the
     # Server Browser extension needs a bigger segment.
     shm_size: 1gb
+    # Chromium's own sandbox needs to create an unprivileged user namespace.
+    # Docker's default seccomp profile blocks that call, which leaves the
+    # browser with no sandbox of its own and the container as the only
+    # boundary. Letting the namespace through lets the browser keep its
+    # sandbox, so a hostile page is held inside the browser instead of only
+    # inside the container.
+    #
+    # The container still runs with no capabilities and in its own namespaces.
+    # The wrapper in the image falls back to running the browser without a
+    # sandbox when the namespace is not available, so removing this line
+    # leaves the browser working, just less contained.
+    security_opt:
+      - seccomp=unconfined
     ports:
       - "3005:3000"
     extra_hosts:
