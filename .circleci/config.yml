@@ -10,11 +10,16 @@ jobs:
       - run: |
           VERSION_TAG=$(echo "$CIRCLE_SHA1" | cut -c1-7)
           APP_VERSION=$(grep -m1 '"version"' package.json | sed 's/[^0-9.]//g')
-          docker build -t sourabhjagga/openchamber-harden:latest -t sourabhjagga/openchamber-harden:main -t sourabhjagga/openchamber-harden:${VERSION_TAG} -t sourabhjagga/openchamber-harden:v${APP_VERSION} .
+          set -o pipefail
+          docker build -t sourabhjagga/openchamber-harden:latest -t sourabhjagga/openchamber-harden:main -t sourabhjagga/openchamber-harden:${VERSION_TAG} -t sourabhjagga/openchamber-harden:v${APP_VERSION} . 2>&1 | tee /tmp/oc-build.log
           docker push sourabhjagga/openchamber-harden:latest
           docker push sourabhjagga/openchamber-harden:main
           docker push sourabhjagga/openchamber-harden:${VERSION_TAG}
           docker push sourabhjagga/openchamber-harden:v${APP_VERSION}
+      # Publish the build log even when the build failed, so the failure can
+      # be read without opening CircleCI.
+      - run: ./.fork/upload-build-log.sh
+        when: always
       # Deploy the image that was just pushed. The host runs this over SSH
       # with a key that can do nothing else, and the host script rolls back to
       # the last good commit if the deployment fails. The job therefore fails
