@@ -11,7 +11,7 @@ export OPENCODE_CONFIG_DIR
 # filled without a network round trip, and the launcher in front of each
 # server fills it again if the volume was ever emptied.
 VENDOR_DIR="${HOME}/.config/opencode/vendor"
-VENDOR_ARCHIVES="/opt/mcp-vendor"
+VENDOR_ARCHIVES="${HOME}/.mcp-vendor"
 MCP_BIN_DIR="${HOME}/.config/opencode/bin"
 
 SSH_DIR="${HOME}/.ssh"
@@ -128,7 +128,7 @@ VENDOR_DIR="${HOME}/.config/opencode/vendor"
 VENV="${VENDOR_DIR}/analytics-mcp"
 if [ ! -x "${VENV}/bin/analytics-mcp" ]; then
   mkdir -p "$VENDOR_DIR"
-  tar xzf /opt/mcp-vendor/analytics-mcp.tar.gz -C "$VENDOR_DIR"
+  tar xzf "${HOME}/.mcp-vendor/analytics-mcp.tar.gz" -C "$VENDOR_DIR"
 fi
 exec "${VENV}/bin/analytics-mcp" "$@"
 LAUNCHER_EOF
@@ -146,7 +146,7 @@ VENDOR_DIR="${HOME}/.config/opencode/vendor"
 VENV="${VENDOR_DIR}/markitdown"
 if [ ! -x "${VENV}/bin/markitdown-mcp" ]; then
   mkdir -p "$VENDOR_DIR"
-  tar xzf /opt/mcp-vendor/markitdown.tar.gz -C "$VENDOR_DIR"
+  tar xzf "${HOME}/.mcp-vendor/markitdown.tar.gz" -C "$VENDOR_DIR"
 fi
 exec "${VENV}/bin/markitdown-mcp" "$@"
 LAUNCHER_EOF
@@ -184,7 +184,7 @@ export DOPPLER_TOKEN
 SUPERGATEWAY="${HOME}/.config/opencode/vendor/supergateway/bin/supergateway"
 if [ ! -x "$SUPERGATEWAY" ]; then
   mkdir -p "${HOME}/.config/opencode/vendor"
-  tar xzf /opt/mcp-vendor/supergateway.tar.gz -C "${HOME}/.config/opencode/vendor"
+  tar xzf "${HOME}/.mcp-vendor/supergateway.tar.gz" -C "${HOME}/.config/opencode/vendor"
 fi
 exec "$SUPERGATEWAY" \
   --stdio "node /home/openchamber/.config/opencode/node_modules/@dopplerhq/mcp-server/dist/index.js --read-only" \

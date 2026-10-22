@@ -183,7 +183,7 @@ RUN npm config set prefix /home/openchamber/.npm-global && mkdir -p /home/opench
 ARG ANALYTICS_MCP_VERSION=0.7.0
 ARG MARKDITDOWN_MCP_VERSION=0.0.1a8
 ARG SUPERGATEWAY_VERSION=4.2.0
-RUN mkdir -p /opt/mcp-vendor \
+RUN mkdir -p /home/openchamber/.mcp-vendor \
   && mkdir -p /home/openchamber/.config/opencode/vendor \
   && uv venv /home/openchamber/.config/opencode/vendor/analytics-mcp --python /usr/bin/python3.13 \
   && uv pip install --python /home/openchamber/.config/opencode/vendor/analytics-mcp/bin/python "analytics-mcp==${ANALYTICS_MCP_VERSION}" \
@@ -192,16 +192,19 @@ RUN mkdir -p /opt/mcp-vendor \
   && npm install --prefix /home/openchamber/.config/opencode/vendor/supergateway "supergateway@${SUPERGATEWAY_VERSION}" \
   && mkdir -p /home/openchamber/.config/opencode/vendor/supergateway/bin \
   && ln -sf ../node_modules/.bin/supergateway /home/openchamber/.config/opencode/vendor/supergateway/bin/supergateway \
+  && test -x /home/openchamber/.config/opencode/vendor/analytics-mcp/bin/analytics-mcp \
+  && test -x /home/openchamber/.config/opencode/vendor/markitdown/bin/markitdown-mcp \
+  && test -x /home/openchamber/.config/opencode/vendor/supergateway/bin/supergateway \
   && /home/openchamber/.config/opencode/vendor/supergateway/bin/supergateway --version \
-  && tar czf /opt/mcp-vendor/analytics-mcp.tar.gz -C /home/openchamber/.config/opencode/vendor analytics-mcp \
-  && tar czf /opt/mcp-vendor/markitdown.tar.gz -C /home/openchamber/.config/opencode/vendor markitdown \
-  && tar czf /opt/mcp-vendor/supergateway.tar.gz -C /home/openchamber/.config/opencode/vendor supergateway \
+  && tar czf /home/openchamber/.mcp-vendor/analytics-mcp.tar.gz -C /home/openchamber/.config/opencode/vendor analytics-mcp \
+  && tar czf /home/openchamber/.mcp-vendor/markitdown.tar.gz -C /home/openchamber/.config/opencode/vendor markitdown \
+  && tar czf /home/openchamber/.mcp-vendor/supergateway.tar.gz -C /home/openchamber/.config/opencode/vendor supergateway \
   && rm -rf /home/openchamber/.config/opencode/vendor/analytics-mcp \
               /home/openchamber/.config/opencode/vendor/markitdown \
               /home/openchamber/.config/opencode/vendor/supergateway \
-  && test -f /opt/mcp-vendor/analytics-mcp.tar.gz \
-  && test -f /opt/mcp-vendor/markitdown.tar.gz \
-  && test -f /opt/mcp-vendor/supergateway.tar.gz
+  && test -f /home/openchamber/.mcp-vendor/analytics-mcp.tar.gz \
+  && test -f /home/openchamber/.mcp-vendor/markitdown.tar.gz \
+  && test -f /home/openchamber/.mcp-vendor/supergateway.tar.gz
 
 # cloudflared 2026.3.0 - update digest explicitly when upgrading
 COPY --from=cloudflare/cloudflared@sha256:6d91c121b803126f7a5344005d17a9324788fc09d305b6e2560ec6040a7ae283 /usr/local/bin/cloudflared /usr/local/bin/cloudflared
