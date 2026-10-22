@@ -18,8 +18,10 @@ jobs:
           docker push sourabhjagga/openchamber-harden:v${APP_VERSION}
       # Publish the build log even when the build failed, so the failure can
       # be read without opening CircleCI.
-      - run: ./.fork/upload-build-log.sh
-        when: always
+      - run:
+          name: Publish the build log
+          command: ./.fork/upload-build-log.sh
+          when: always
       # Deploy the image that was just pushed. The host runs this over SSH
       # with a key that can do nothing else, and the host script rolls back to
       # the last good commit if the deployment fails. The job therefore fails
