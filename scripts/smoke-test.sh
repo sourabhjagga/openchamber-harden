@@ -216,7 +216,7 @@ section "runtime modules"
 cat > "$TMP/specifiers.py" <<'PY_EOF'
 import json, os, re
 
-pattern = re.compile(r"""(?:^|[^\w$.])(?:from\s*|import\s*\(\s*|require\s*\(\s*)['"]([^'"\n]{1,80})['"]""")
+bare = re.compile(r"""(?:^|[^\w$.])(?:from\s*|import\s*\(\s*|require\s*\(\s*)['"]([^'"\n]{1,80})['"]""")
 builtins = {
     'assert', 'buffer', 'child_process', 'cluster', 'console', 'constants', 'crypto', 'dgram',
     'dns', 'domain', 'events', 'fs', 'http', 'http2', 'https', 'module', 'net', 'os', 'path',
@@ -224,30 +224,52 @@ builtins = {
     'string_decoder', 'timers', 'tls', 'tty', 'url', 'util', 'v8', 'vm', 'worker_threads', 'zlib',
 }
 
-found = set()
-for base in ('/home/openchamber/packages/web/server', '/home/openchamber/packages/web/bin'):
-    for directory, _, files in os.walk(base):
-        if '/test' in directory:
-            continue
-        for name in files:
-            if not name.endswith(('.js', '.mjs', '.cjs')) or '.test.' in name or '.spec.' in name:
+def scan(path):
+    """Bare specifiers and relative imports of one file, comments ignored."""
+    specs, relatives = set(), set()
+    with open(path, encoding='utf-8', errors='ignore') as handle:
+        for line in handle:
+            stripped = line.strip()
+            if stripped.startswith(('*', '//', '/*')):
                 continue
-            with open(os.path.join(directory, name), encoding='utf-8', errors='ignore') as handle:
-                for line in handle:
-                    stripped = line.strip()
-                    # Comments talk about imports too; only code counts.
-                    if stripped.startswith(('*', '//', '/*')):
-                        continue
-                    for match in pattern.finditer(line):
-                        spec = match.group(1)
-                        if spec.startswith(('.', '/', '#', 'node:', 'bun:', 'data:')):
-                            continue
-                        head = '/'.join(spec.split('/')[:2]) if spec.startswith('@') else spec.split('/')[0]
-                        if head in builtins:
-                            continue
-                        if not re.fullmatch(r'@?[a-z0-9][\w.\-]*(/[a-z0-9][\w.\-]*)?', spec, re.I):
-                            continue
-                        found.add(spec)
+            for match in bare.finditer(line):
+                spec = match.group(1)
+                if spec.startswith(('.', '/')):
+                    relatives.add(spec)
+                elif not spec.startswith(('#', 'node:', 'bun:', 'data:')):
+                    specs.add(spec)
+    return specs, relatives
+
+def resolve(from_file, spec):
+    base = os.path.normpath(os.path.join(os.path.dirname(from_file), spec))
+    for candidate in (base, base + '.js', base + '.mjs', base + '.cjs',
+                      os.path.join(base, 'index.js'), os.path.join(base, 'index.mjs')):
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+# Only what the server actually loads counts. Walking the directory instead
+# would pull in test suites nothing imports, and their vitest/vite imports are
+# absent from a production install by design.
+entries = ['/home/openchamber/packages/web/bin/cli.js', '/home/openchamber/packages/web/server/index.js']
+seen, queue, found = set(), [e for e in entries if os.path.isfile(e)], set()
+while queue:
+    current = queue.pop()
+    if current in seen:
+        continue
+    seen.add(current)
+    specs, relatives = scan(current)
+    for spec in specs:
+        head = '/'.join(spec.split('/')[:2]) if spec.startswith('@') else spec.split('/')[0]
+        if head in builtins:
+            continue
+        if not re.fullmatch(r'@?[a-z0-9][\w.\-]*(/[a-z0-9][\w.\-]*)?', spec, re.I):
+            continue
+        found.add(spec)
+    for spec in relatives:
+        target = resolve(current, spec)
+        if target and target not in seen:
+            queue.append(target)
 
 print(json.dumps(sorted(found)))
 PY_EOF
