@@ -13,6 +13,18 @@ services:
     # by default. Headless Chrome overruns that and dies on heavy pages, so the
     # Server Browser extension needs a bigger segment.
     shm_size: 1gb
+    # One runaway browser session or agent turn must not take the host's memory
+    # and process table with it. The app idles near 1.3GB, so 6GB leaves room
+    # for Chromium plus a build and still leaves the host headroom.
+    mem_limit: 6g
+    pids_limit: 4096
+    # The app logs every request; without rotation the json-file log grows for
+    # the life of the container.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     # Chromium's own sandbox needs to create an unprivileged user namespace.
     # Docker's default seccomp profile blocks that call, which leaves the
     # browser with no sandbox of its own and the container as the only
