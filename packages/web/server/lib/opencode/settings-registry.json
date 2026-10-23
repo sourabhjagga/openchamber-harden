@@ -190,6 +190,10 @@
       "scope": "instance",
       "computed": true
     },
+    "overviewFeatureAvailable": {
+      "scope": "instance",
+      "computed": true
+    },
     "routingFeatureAvailable": {
       "scope": "instance",
       "computed": true
@@ -243,6 +247,9 @@
       "scope": "instance"
     },
     "tunnelMode": {
+      "scope": "instance"
+    },
+    "tunnelHttpsPort": {
       "scope": "instance"
     },
     "tunnelBootstrapTtlMs": {
@@ -486,6 +493,9 @@
     "enterToSendConfigured": {
       "scope": "profile"
     },
+    "mobileReturnKeySends": {
+      "scope": "profile"
+    },
     "persistChatDraft": {
       "scope": "profile"
     },
@@ -569,7 +579,22 @@
     "smallModelOverride": {
       "scope": "profile"
     },
+    "smallModelVariant": {
+      "scope": "profile"
+    },
     "walkthroughModelOverride": {
+      "scope": "profile"
+    },
+    "walkthroughModelVariant": {
+      "scope": "profile"
+    },
+    "fallbackModel": {
+      "scope": "profile"
+    },
+    "fallbackVariant": {
+      "scope": "profile"
+    },
+    "accountSwitchProviders": {
       "scope": "profile"
     },
     "zenModel": {

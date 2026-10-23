@@ -10,13 +10,17 @@ import { pluginPanelI18n } from './plugin-panel.i18n';
 import { surfacePanelI18n } from './surface-panel.i18n';
 import { fileArtifactsI18n } from './file-artifacts.i18n';
 import { fileContentSearchI18n } from './file-content-search.i18n';
+import { fileEditorAidsI18n } from './file-editor-aids.i18n';
 import { htmlRenderI18n } from './html-render.i18n';
 import { sessionNoticesI18n } from './session-notices.i18n';
 import { usageStatsI18n } from './usage-stats.i18n';
 import { webSearchI18n } from './websearch.i18n';
 import { sessionWarmingI18n } from './session-warming.i18n';
+import { overviewI18n } from './overview.i18n';
 import { isolatedSpacesI18n } from './isolated-spaces.i18n';
 import { sourceBoardI18n } from './source-board.i18n';
+import { stacksI18n } from './stacks.i18n';
+import { changeReviewI18n } from './change-review.i18n';
 import { projectActionsI18n } from './project-actions.i18n';
 import { gitIdentityEditorI18n } from './git-identity-editor.i18n';
 import { environmentI18n } from './environment.i18n';
@@ -55,6 +59,7 @@ export const dict: Record<I18nKey, string> = {
   'commitComparison.mode': 'Commit',
   'pullRequestComparison.select': 'Selecionar pull request',
   'pullRequestComparison.pickAbove': 'Escolha um pull request acima',
+  'pullRequestComparison.diffUnavailable': "{provider} não fornece o diff de pull requests, então não dá para mostrá-los nem percorrê-los aqui",
   'pullRequestComparison.partial': 'Não foi possível carregar alguns pull requests',
   'commitComparison.select': 'Selecionar commit',
   'commitComparison.search': 'Buscar commits...',
@@ -154,13 +159,17 @@ export const dict: Record<I18nKey, string> = {
   ...surfacePanelI18n['pt-BR'],
   ...fileArtifactsI18n['pt-BR'],
   ...fileContentSearchI18n['pt-BR'],
+  ...fileEditorAidsI18n['pt-BR'],
   ...htmlRenderI18n['pt-BR'],
   ...sessionNoticesI18n['pt-BR'],
   ...usageStatsI18n['pt-BR'],
   ...webSearchI18n['pt-BR'],
   ...sessionWarmingI18n['pt-BR'],
+  ...overviewI18n['pt-BR'],
   ...isolatedSpacesI18n['pt-BR'],
   ...sourceBoardI18n['pt-BR'],
+  ...stacksI18n['pt-BR'],
+  ...changeReviewI18n['pt-BR'],
   ...projectActionsI18n['pt-BR'],
   ...gitIdentityEditorI18n['pt-BR'],
   ...environmentI18n['pt-BR'],
@@ -707,6 +716,7 @@ export const dict: Record<I18nKey, string> = {
   "sessions.sidebar.session.work.markDone": "Marcar como concluído",
   "sessions.sidebar.session.work.doneSuggested": "Parece concluído",
   "sessions.sidebar.session.work.updateFailed": "Não foi possível atualizar a sessão",
+  "sessions.sidebar.session.work.folderDeleted": "A pasta desta sessão foi excluída",
   "sessions.sidebar.session.pin.pinFailed": "Não foi possível fixar a sessão",
   "sessions.sidebar.session.pin.unpinFailed": "Não foi possível desafixar a sessão",
   "chat.work.doneHint.text": "Este trabalho parece concluído.",
@@ -1192,6 +1202,7 @@ export const dict: Record<I18nKey, string> = {
   "gitView.sync.syncCounts": "{behind}↓ {ahead}↑",
   "gitView.branch.actionsUnavailable": "Ações de branch não disponíveis neste estado do repositório",
   "gitView.conflict.noDetailsAvailable": "Não há detalhes de conflito disponíveis",
+  "magicPrompts.toast.loadFailed": "Não foi possível carregar os prompts mágicos. Nada foi enviado.",
   "gitView.empty.notGitRepository": "Este diretório não é um repositório Git",
   "gitView.empty.notGitRepositoryDescription": "Inicialize Git neste diretório ou abra um repositório.",
   "gitView.empty.selectSessionOrDirectory": "Selecione uma sessão ou diretório para ver o status do Git",
@@ -1251,7 +1262,6 @@ export const dict: Record<I18nKey, string> = {
   "gitView.pr.mergeMethod.rebase": "Rebase e merge",
   "gitView.pr.mergeMethod.squash": "Squash e merge",
   "gitView.pr.notMergeable": "Não é possível fazer merge",
-  "gitView.pr.numberLabel": "PR # {number}",
   "gitView.pr.segment.checks": "Verificações",
   "gitView.pr.comments.addAll": "Anexar tudo ao chat",
   "gitView.pr.placeholder.additionalContext": "Quaisquer restrições, notas de lançamento ou contexto para revisão...",
@@ -1375,6 +1385,7 @@ export const dict: Record<I18nKey, string> = {
   'gitView.mr.comparison.mode': 'MR',
   'gitView.mr.comparison.select': 'Selecionar merge request',
   'gitView.mr.comparison.pickAbove': 'Escolha um merge request acima',
+  'gitView.mr.comparison.diffUnavailable': "{provider} não fornece o diff de merge requests, então não dá para mostrá-los nem percorrê-los aqui",
   'gitView.mr.comparison.partial': 'Não foi possível carregar alguns merge requests',
   'gitView.mr.comparison.searchPlaceholder': 'Pesquisar MRs',
   'gitView.mr.comparison.loading': 'Carregando MR...',
@@ -1384,9 +1395,6 @@ export const dict: Record<I18nKey, string> = {
   'gitView.mr.comparison.loadMoreFailed': 'Não foi possível carregar mais MRs',
   'gitView.mr.walkthroughScope': 'MR !{number}',
   'gitView.mr.createHint': 'Crie e gerencie MRs desta branch.',
-  'header.gitlab.connectedWithLogin': 'GitLab: {login}',
-  'header.gitlab.connected': 'GitLab conectado',
-  'header.gitlab.accountsTitle': 'Contas do GitLab',
   "contextPanel.mode.context": "Contexto",
   "contextPanel.mode.preview": "Prévia",
   "contextPanel.mode.browser": "Navegador",
@@ -2240,8 +2248,8 @@ export const dict: Record<I18nKey, string> = {
   "session.newWorktree.remoteBranches": "Branches remotas",
   "session.newWorktree.branchName": "Nome da branch",
   "session.newWorktree.branchNamePlaceholder": "feature/my-awesome-feature",
-  "session.newWorktree.actions.startFromGitHubIssuePr": "Iniciar de Issue/PR de GitHub",
-  'session.newWorktree.actions.startFromGitLabIssueMr': 'Uma issue ou merge request do GitLab',
+  'session.newWorktree.actions.startFromRepository.pullRequest': 'Iniciar de Issue/PR de {provider}',
+  'session.newWorktree.actions.startFromRepository.mergeRequest': 'Uma issue ou merge request do {provider}',
   "session.newWorktree.worktreeDirectory": "Diretório do worktree",
   "session.newWorktree.worktreeDirectoryPlaceholder": "my-worktree-directory",
   "session.newWorktree.resetToMatchBranchName": "Redefinir para coincidir com o nome da branch",
@@ -2249,7 +2257,6 @@ export const dict: Record<I18nKey, string> = {
   "session.newWorktree.selectSourceBranch": "Selecionar branch de origem",
   "session.newWorktree.selectSourceBranchPlaceholder": "Selecionar branch de origem...",
   "session.newWorktree.issueNumber": "Issue #{number}",
-  "session.newWorktree.prNumber": "PR #{number}",
   "session.newWorktree.includeDiffBadge": "+diff",
   "session.newWorktree.fromSource": "de {source}",
   "session.newWorktree.actions.cancel": "Cancelar",
@@ -2417,6 +2424,7 @@ export const dict: Record<I18nKey, string> = {
   "chat.queuedMessage.send": "send",
   "chat.queuedMessage.removeAria": "Excluir da fila",
   "chat.queuedMessage.goal": "Inicia um objetivo ao ser enviada",
+  "chat.queuedMessage.sendsAsAgent": "Será enviada como {agent}.",
   "chat.queuedMessage.reorderAria": "Arraste para reordenar",
   "chat.queuedMessage.toast.queueFailed": "Não foi possível enfileirar a mensagem. Ela voltou para o campo de texto.",
   "chat.queuedMessage.toast.takeFailed": "Não foi possível carregar a mensagem da fila. Tente novamente.",
@@ -2554,7 +2562,6 @@ export const dict: Record<I18nKey, string> = {
   "chat.chatInput.linked.issue.removeAria": "Excluir issue vinculado",
   "chat.chatInput.linked.pr.openInBrowserAria": "Abrir PR no navegador",
   "chat.chatInput.linked.mr.openInBrowserAria": "Abrir merge request no navegador",
-  "chat.chatInput.linked.pr.number": "PR #{number}",
   "chat.chatInput.linked.pr.removeAria": "Excluir PR vinculada",
   "chat.chatInput.linked.mr.removeAria": "Remover merge request vinculado",
   "chat.chatInput.placeholder.shell": "Digite um comando de shell...",
@@ -2739,6 +2746,7 @@ export const dict: Record<I18nKey, string> = {
   "chat.modelControls.noAgentSelected": "Nenhum agente selecionado.",
   "chat.modelControls.resetToDefault": "Reiniciar ao valor padrão",
   "chat.modelControls.searchModels": "Pesquisar modelos",
+  "chat.modelControls.modelListAria": "Modelos",
   "chat.modelControls.searchAgents": "Pesquisar agentes",
   "chat.modelControls.noModelsFound": "Nenhum modelo encontrado",
   "chat.modelControls.favorites": "Favoritos",
@@ -3567,8 +3575,7 @@ export const dict: Record<I18nKey, string> = {
   'chat.workStatus.pinned.unpinFailed': 'Não foi possível desafixar a mensagem',
   'chat.workStatus.action.openContext': 'Abrir painel de contexto',
   'chat.workStatus.section.linkedIssues': 'Vinculados',
-  'chat.workStatus.linkedIssues.open': 'Abrir #{number} no GitHub',
-  'chat.workStatus.linkedIssues.openGitLab': 'Abrir {reference} no GitLab',
+  'chat.workStatus.linkedIssues.openOnProvider': 'Abrir {reference} no {provider}',
   'chat.workStatus.linkedIssues.unlink': 'Remover vínculo',
   'chat.workStatus.linkedIssues.unlinkFailed': 'Não foi possível remover o vínculo',
   'chat.workStatus.linkedIssues.link': 'Vincular à sessão',
@@ -3624,14 +3631,11 @@ export const dict: Record<I18nKey, string> = {
   'settings.mcp.page.connection.hintCommand': 'Executa nesta máquina. Cole um comando inteiro e ele será dividido em um argumento por linha.',
   'settings.mcp.page.connection.hintLink': 'Conecta a um servidor hospedado por outra pessoa. Cole o endereço https dele.',
   'mobile.changes.noRemote': 'No remote available',
-  'header.github.connectedWithLogin': 'GitHub: {login}',
-  'header.github.connected': 'GitHub conectado',
-  'header.github.avatarWithLogin': '{login} avatar',
-  'header.github.avatar': 'GitHub avatar',
-  'header.gitlab.avatar': 'GitLab avatar',
-  'header.github.accountsTitle': 'Contas do GitHub',
-  'header.github.accountSource.oauth': 'OAuth',
-  'header.github.accountSource.cli': 'CLI',
+  'header.sourceControl.connectedWithLogin': '{provider}: {login}',
+  'header.sourceControl.connected': '{provider} conectado',
+  'header.sourceControl.avatarWithLogin': '{login} avatar',
+  'header.sourceControl.avatar': '{provider} avatar',
+  'header.sourceControl.accountsTitle': 'Contas do {provider}',
   'gitView.toast.branchCreatedLocally': 'Branch created locally, but failed to set upstream.',
   'gitView.toast.pushedToUpstream': 'Pushed to {name}',
   'gitView.toast.pulledFromRemote': 'Alterações trazidas de {name}',
@@ -3855,4 +3859,8 @@ export const dict: Record<I18nKey, string> = {
   'sessions.scheduledTasks.dialog.toast.alreadyRunning': 'Esta tarefa já tem uma execução em andamento',
   'sessions.scheduledTasks.dialog.toast.alreadyQueued': 'Esta tarefa já está na fila e será executada quando houver uma vaga',
   'chat.modelControls.agentFavoriteAdd': 'Adicionar aos favoritos. Com favoritos, o Tab alterna só entre eles',
+  'notifications.error.bodyFallback': 'Ocorreu um erro',
+  'notifications.question.bodyFallback': 'O agente está aguardando sua resposta',
+  'notifications.permission.bodyFallback': 'O agente está aguardando sua aprovação',
+  'notifications.permission.title': 'Permissão necessária',
 };

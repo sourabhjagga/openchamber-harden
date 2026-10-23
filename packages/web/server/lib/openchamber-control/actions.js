@@ -64,6 +64,7 @@ export const OPENCHAMBER_WEB_ACTION_DEFINITIONS = Object.freeze([
   { action: 'browser.snapshot', title: 'Read the open page', description: 'url, title, visible text, interactive elements with selectors, logged errors, and open tabs with their ids and who opened each; selector reads one part' },
   { action: 'browser.click', title: 'Click on the open page', description: 'By selector, or text for a link or button label' },
   { action: 'browser.type', title: 'Type into the open page', description: 'Type value into selector' },
+  { action: 'browser.select', title: 'Select an option on the open page', description: 'One exact option by label or value in the native select matched by selector' },
   { action: 'browser.scroll', title: 'Scroll the open page', description: 'By direction, or to bring selector into view' },
   { action: 'browser.back', title: 'Go back in the browser panel', description: 'No parameters' },
   { action: 'browser.forward', title: 'Go forward in the browser panel', description: 'No parameters' },
@@ -108,8 +109,8 @@ export const OPENCHAMBER_MEMORY_ACTIONS = Object.freeze(
  * own file tools on the path list gives.
  */
 export const OPENCHAMBER_KNOWLEDGE_ACTION_DEFINITIONS = Object.freeze([
-  { action: 'knowledge.list', title: 'List project knowledge', description: 'Notes with text, todos with state, plans with their file paths. List before adding, to avoid duplicates' },
-  { action: 'knowledge.save', title: 'Save project knowledge', description: 'Requires kind and body; with id it replaces. A plan body is the whole markdown, and the answer gives its path. A todo update may send only completed' },
+  { action: 'knowledge.list', title: 'List project knowledge', description: 'Notes with text, todos with state and links, plans with their file paths and session. Optional planId and ready filters. List before adding, to avoid duplicates' },
+  { action: 'knowledge.save', title: 'Save project knowledge', description: 'Requires kind and body; with id it replaces. A plan body is the whole markdown, and the answer gives its path. An update may send only the fields it changes: completed, planId or dependsOn; sessionId on a plan, without body' },
   { action: 'knowledge.delete', title: 'Delete project knowledge', description: 'Requires kind and id' },
   { action: 'knowledge.show', title: 'Show a plan to the user', description: 'Open a plan for the user to read, comment on and send to a session; requires kind plan and id' },
 ]);

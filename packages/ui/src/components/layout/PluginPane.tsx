@@ -49,6 +49,7 @@ import { guestGenerateResults, lateGenerateResult, type GenerateOwner } from '@/
 import { useConfigStore } from '@/stores/useConfigStore';
 import { openGuestCommit, readCurrentBranch } from '@/lib/guests/open-commit';
 import { openGuestSurface } from '@/lib/guests/open-surface';
+import { openGuestUrl } from '@/lib/guests/open-url';
 import { getRegisteredRuntimeAPIs } from '@/contexts/runtimeAPIRegistry';
 import { isVSCodeRuntime } from '@/lib/desktop';
 import { isMobileSurfaceRuntime } from '@/lib/runtimeSurface';
@@ -668,7 +669,12 @@ export const PluginPane: React.FC<PluginPaneProps> = ({
           if (!guestEnabledRef.current) return;
           showGuestToast(request);
         },
-        openUrl: openExternalUrl,
+        // Local addresses (a dev server, a container port) open in the browser panel, like chat links.
+        openUrl: (url) => openGuestUrl(
+          url,
+          directoryRef.current || effectiveDirectoryRef.current || null,
+          !isVSCodeRuntime() && !isMobileSurfaceRuntime(),
+        ),
         openSurface: (surfaceMode) => openGuestSurface({
           mode: surfaceMode,
           // A status section in a chat draft without a project has no

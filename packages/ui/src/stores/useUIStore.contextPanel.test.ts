@@ -663,12 +663,22 @@ describe('useUIStore openContextSurface', () => {
     expect(activeTab?.targetPath).toBe('/repo/b.ts');
   });
 
-  test('reopening the file surface reveals the file tree when it was left hidden', () => {
+  test('reopening the file surface with no file open reveals the hidden file tree', () => {
     useUIStore.setState({ contextEditorTreeVisible: false });
 
     useUIStore.getState().openContextSurface(directory, 'file');
 
     expect(useUIStore.getState().contextEditorTreeVisible).toBe(true);
+  });
+
+  test('reopening the file surface with a file open keeps the file tree hidden', () => {
+    useUIStore.getState().openContextFile(directory, '/repo/a.ts');
+    useUIStore.getState().openContextPanelTab(directory, { mode: 'diff' });
+    useUIStore.setState({ contextEditorTreeVisible: false });
+
+    useUIStore.getState().openContextSurface(directory, 'file');
+
+    expect(useUIStore.getState().contextEditorTreeVisible).toBe(false);
   });
 
   test('opening the terminal surface clears a stale target on the singleton tab', () => {

@@ -338,6 +338,8 @@ const ComposerTab: React.FC = () => {
   const setEnterToSend = useUIStore((state) => state.setEnterToSend);
   const enterToSendConfigured = useUIStore((state) => state.enterToSendConfigured);
   const setEnterToSendConfigured = useUIStore((state) => state.setEnterToSendConfigured);
+  const mobileReturnKeySends = useUIStore((state) => state.mobileReturnKeySends);
+  const setMobileReturnKeySends = useUIStore((state) => state.setMobileReturnKeySends);
   const followUpBehavior = useMessageQueueStore((state) => state.followUpBehavior);
   const setFollowUpBehavior = useMessageQueueStore((state) => state.setFollowUpBehavior);
   const largeTextPasteBehavior = useUIStore((state) => state.largeTextPasteBehavior);
@@ -362,6 +364,11 @@ const ComposerTab: React.FC = () => {
     setEnterToSend(enabled);
     setEnterToSendConfigured(true);
     void updateDesktopSettings({ enterToSend: enabled, enterToSendConfigured: true });
+  };
+
+  const handleMobileReturnKeySendsChange = (enabled: boolean) => {
+    setMobileReturnKeySends(enabled);
+    void updateDesktopSettings({ mobileReturnKeySends: enabled });
   };
 
   const handleInputHistoryLimitChange = (value: number) => {
@@ -395,6 +402,16 @@ const ComposerTab: React.FC = () => {
               />
             </SettingsFieldRow>
           )}
+          {isMobile ? (
+            <SettingsCheckboxRow
+              checked={mobileReturnKeySends}
+              onChange={handleMobileReturnKeySendsChange}
+              label={t('settings.openchamber.visual.field.mobileReturnKeySends')}
+              ariaLabel={t('settings.openchamber.visual.field.mobileReturnKeySendsAria')}
+              info={t('settings.openchamber.visual.field.mobileReturnKeySendsHint')}
+              settingsItem="chat.mobile-return-key-sends"
+            />
+          ) : null}
           <SettingsFieldRow
             label={t('settings.openchamber.visual.section.followUpBehavior')}
             settingsItem="chat.follow-up-behavior"

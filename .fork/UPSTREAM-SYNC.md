@@ -9,8 +9,9 @@ Read this whole file before touching the working tree.
 
 - Fork: `sourabhjagga/openchamber-harden` (`origin`)
 - Upstream: `openchamber/openchamber` (`upstream`)
-- Last synced upstream tag: **v2.5.0** (`ad73d11a6`)
-- Fork commits ahead of that base: **23** (listed in Appendix A)
+- Last synced upstream tag: **v2.5.1** (`3e9ef4db1`)
+- Fork commits ahead of that base: **24** (listed in Appendix A), plus the
+  merge commit that brought v2.5.1 in
 
 ---
 
@@ -43,7 +44,7 @@ Image tags pushed on every build:
 `docker-compose.yaml` pins the tag in one place:
 
 ```yaml
-x-openchamber-image: &openchamber-harden sourabhjagga/openchamber-harden:v2.5.0
+x-openchamber-image: &openchamber-harden sourabhjagga/openchamber-harden:v2.5.1
 ```
 
 Coolify reads that compose file from git, so **the version in `package.json`
@@ -68,7 +69,6 @@ different rule; the rule column is what actually matters.
 | 7 | CI/CD | `.circleci/config.yml`, `.fork/*.sh`, `docker-compose.yaml` | This fork ships an image, not npm/desktop/mobile artifacts | **Keep ours** |
 | 8 | Upstream workflows | `.github/workflows/*` | Upstream workflows need upstream's GitHub App, Blacksmith runners, and publish artifacts nobody here consumes | **Take upstream, then run `.fork/sync-upstream-workflows.sh`** |
 | 9 | Renovate | `renovate.json` | Dependency PRs for `bun.lock` | **Take upstream**, then re-apply fork additions |
-| — | Dead files | `overlay/Dockerfile`, `overlay/renovate.json` | Leftovers from the first sync; nothing references them (verified) | Delete when convenient, never merge them |
 
 Details for the two groups that need real thought (1–2 and 6) follow.
 
@@ -209,7 +209,7 @@ docker inspect --format '{{.Config.Image}} {{.State.StartedAt}}' openchamber
 
 ## 4. Sync steps
 
-**Merge, do not rebase.** 15 of the 23 fork commits touch `Dockerfile`;
+**Merge, do not rebase.** 15 of the 24 fork commits touch `Dockerfile`;
 rebasing means resolving the same Dockerfile hunks up to 15 times. A merge
 resolves them once. (The v2.5.0 sync was replayed linearly, which is why the
 merge-base sits exactly on that tag — that style does not scale here.)
@@ -257,8 +257,12 @@ finished (the deploy script propagates the host's exit code).
 
 ## 5. Conflict playbook
 
-The conflict surface is small. At v2.5.0 → `upstream/main` it was **8 files
-out of 1220** changed upstream. Expect a similar shape.
+The conflict surface is small. At v2.5.0 → v2.5.1 upstream changed 9 files this
+fork cares about, of 1928 changed upstream: `Dockerfile`, `package.json`,
+`renovate.json`, `AGENTS.md`, and five workflows the fork deletes. The
+workflow edits come back as modify/delete conflicts and the `Dockerfile` as a
+content conflict; `packages/web/server/index.js`, `lifecycle.js` and the
+entrypoint took the merge cleanly. Expect a similar shape.
 
 | File | Resolution |
 |---|---|
@@ -427,7 +431,21 @@ that a chat still answers — a CLI/SDK mismatch shows up there first.
   `.fork/sync-upstream-workflows.sh`. `.fork/sync-upstream-workflows.sh
   --restore` puts upstream's copies back if the script itself drifted.
 - **CI has no path filter** (§11), so a documentation-only commit still
-  restarts production.
+  restarts production. Put the fork's doc updates in the merge commit.
+- **Run the checks with the Bun version `packageManager` names.** v2.5.1 moved
+  to bun@1.4.4 and `type-check` is now `bun check -b`, which 1.4.3 does not
+  have. A local 1.4.3 reports a tool error that reads like a broken script.
+- **The five workflows upstream edits return as modify/delete conflicts** on
+  every sync, because the fork deletes them. Keep them deleted and re-run the
+  sync script.
+- **A new `packages/sdk/examples/*` workspace needs no `deps` `COPY`.** The
+  glob resolves from the lockfile and the install works without those example
+  manifests. Prove it without Docker by reproducing the stage: copy
+  `package.json`, `bun.lock`, `bun-patches/` and the six named manifests into a
+  temp dir, then run `bun install --frozen-lockfile --ignore-scripts`.
+- **`git remote -v` prints the token** embedded in `origin`'s URL. Do not run
+  it into a transcript. The token itself should be rotated and moved out of
+  `.git/config`.
 
 ---
 
@@ -461,9 +479,10 @@ that wrongly halts a real build silently leaves production on an old image.
 
 ---
 
-## Appendix A — fork commits (23)
+## Appendix A — fork commits (24)
 
-Ordered oldest → newest, each mapped to the group in §2.
+Ordered oldest → newest, each mapped to the group in §2. The sync merge
+commit that lands upstream v2.5.1 sits on top of these and is not counted.
 
 | Commit | Subject | Group |
 |---|---|---|
@@ -490,6 +509,8 @@ Ordered oldest → newest, each mapped to the group in §2.
 | `6506a5a5c` | perf(image): run on production dependencies only | 1 |
 | `0937b928f` | test(smoke): follow the server's real import graph | 7 |
 | `3875d5638` | feat(image): make the browser flavour a build argument | 2 |
+| `f8b5a5d2b` | docs(fork): record every fork change and the upstream sync procedure | doc |
+| merge | sync: bring in upstream v2.5.1 (`@opencode/cli@2.1.3`, Bun 1.4.4); drops the dead `overlay/` | sync |
 
 ## Appendix B — file ownership
 
@@ -508,7 +529,6 @@ Ordered oldest → newest, each mapped to the group in §2.
 | `packages/web/server/lib/opencode/mcp-process-cleanup*.js` | fork | new files, no upstream counterpart |
 | `packages/web/server/lib/opencode/shutdown-runtime.js` | **both** | one added getter/clearer |
 | `package.json` / `bun.lock` | upstream | except `@opencode/client`, which must match the CLI pin |
-| `overlay/*` | dead | unreferenced; delete when convenient |
 | `AGENTS.md`, `CLAUDE.md`, `README.md` | upstream | do not put fork notes here, it conflicts every sync |
 
 ---

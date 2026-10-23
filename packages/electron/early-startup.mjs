@@ -450,6 +450,9 @@ export const buildMainWindowOptions = ({ bounds, backgroundColor, additionalArgu
     titleBarStyle: usesCustomTitleBar ? 'hidden' : 'default',
     titleBarOverlay: false,
     trafficLightPosition: process.platform === 'darwin' ? macTrafficLightPosition() : undefined,
+    // macOS otherwise spends the first click on an inactive window activating
+    // it, so a button pressed while coming from another app needs two clicks.
+    acceptFirstMouse: true,
     webPreferences: {
       additionalArguments,
       preload: resolvePreloadPath(),

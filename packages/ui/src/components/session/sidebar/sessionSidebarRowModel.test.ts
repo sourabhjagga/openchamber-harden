@@ -229,6 +229,60 @@ describe('buildSessionSidebarRowModel', () => {
     }
   });
 
+  for (const listGrouping of ['project', 'time'] as const) {
+    test(`single-project List grouped by ${listGrouping} keeps its picker and only the selected project`, () => {
+      const second: ProjectSection = { project: { id: 'project-b', normalizedPath: '/other' }, groups: [group([])] };
+      const input = args([project([group([])]), second]);
+      input.viewMode = 'timeline';
+      input.listGrouping = listGrouping;
+      input.singleProjectMode = true;
+      input.singleProjectId = 'project-b';
+      input.collapsedProjects = new Set(['project-b']);
+      input.collapsedActivities = new Set(['timeline']);
+      input.timelineItems = [timelineItem('a'), timelineItem('b', { projectId: 'project-b' })];
+      input.workItems = [timelineItem('working')];
+
+      const model = buildSessionSidebarRowModel(input);
+      expect(model.rows.filter((row) => row.kind === 'project-header')).toMatchObject([
+        { section: second, collapsed: false },
+      ]);
+      expect(model.rows.flatMap((row) => row.kind === 'session' ? [row.node.session.id] : [])).toEqual(['working', 'b']);
+      expect(model.selectionEntries.map((entry) => entry.id)).toEqual(['working', 'b']);
+      expect(model.rows.find((row) => row.kind === 'session' && row.node.session.id === 'b')).toMatchObject({ renderContext: listGrouping === 'time' ? 'timeline-by-time' : 'timeline' });
+
+      input.singleProjectId = 'project-a';
+      expect(buildSessionSidebarRowModel(input).rows.flatMap((row) => row.kind === 'session' ? [row.node.session.id] : [])).toEqual(['working', 'a']);
+
+      input.mode = 'search';
+      input.normalizedQuery = 'b';
+      input.timelineItems = [timelineItem('b', { projectId: 'project-b' })];
+      input.workItems = [];
+      input.sections = [second];
+      const searched = buildSessionSidebarRowModel(input);
+      expect(searched.rows.filter((row) => row.kind === 'project-header')).toHaveLength(1);
+      expect(searched.rows.some((row) => row.kind === 'session')).toBe(false);
+      expect(searched.rows.at(-1)).toMatchObject({ kind: 'empty', emptyKind: 'search' });
+      expect(searched.searchMatchCount).toBe(0);
+    });
+  }
+
+  test('single-project time List keeps the empty project picker and only its load status', () => {
+    const second: ProjectSection = { project: { id: 'project-b', normalizedPath: '/other' }, groups: [group([])] };
+    const input = args([project([group([])]), second]);
+    input.viewMode = 'timeline';
+    input.listGrouping = 'time';
+    input.singleProjectMode = true;
+    input.singleProjectId = 'project-b';
+    input.groupStatusByKey = new Map([
+      ['project-a:main', { state: 'load-failed', directory: '/repo', canGrantAccess: false }],
+      ['project-b:main', { state: 'loading', directory: '/other', canGrantAccess: false }],
+    ]);
+    expect(buildSessionSidebarRowModel(input).rows).toMatchObject([
+      { kind: 'project-header', section: second },
+      { kind: 'status', groupKey: 'project-b:main' },
+    ]);
+  });
+
   test('timeline shows a space without chats as its group header until its first chat', () => {
     const space = { id: 'space1', name: 'fresh', state: 'complete' as const, projectDirectory: '/repo', directory: '/spaces/space1/repo' };
     const empty = group([], { id: 'space-empty', label: 'fresh', isMain: false, directory: '/spaces/space1/repo', space });

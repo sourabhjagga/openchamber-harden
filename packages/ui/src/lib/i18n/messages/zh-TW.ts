@@ -10,13 +10,17 @@ import { pluginPanelI18n } from './plugin-panel.i18n';
 import { surfacePanelI18n } from './surface-panel.i18n';
 import { fileArtifactsI18n } from './file-artifacts.i18n';
 import { fileContentSearchI18n } from './file-content-search.i18n';
+import { fileEditorAidsI18n } from './file-editor-aids.i18n';
 import { htmlRenderI18n } from './html-render.i18n';
 import { sessionNoticesI18n } from './session-notices.i18n';
 import { usageStatsI18n } from './usage-stats.i18n';
 import { webSearchI18n } from './websearch.i18n';
 import { sessionWarmingI18n } from './session-warming.i18n';
+import { overviewI18n } from './overview.i18n';
 import { isolatedSpacesI18n } from './isolated-spaces.i18n';
 import { sourceBoardI18n } from './source-board.i18n';
+import { stacksI18n } from './stacks.i18n';
+import { changeReviewI18n } from './change-review.i18n';
 import { projectActionsI18n } from './project-actions.i18n';
 import { gitIdentityEditorI18n } from './git-identity-editor.i18n';
 import { environmentI18n } from './environment.i18n';
@@ -55,6 +59,7 @@ export const dict: Record<I18nKey, string> = {
   'commitComparison.mode': '提交',
   'pullRequestComparison.select': '選擇拉取請求',
   'pullRequestComparison.pickAbove': '請在上方選擇拉取請求',
+  'pullRequestComparison.diffUnavailable': "{provider} 不提供拉取請求的差異，因此無法在此顯示或逐步講解",
   'pullRequestComparison.partial': '部分拉取請求無法載入',
   'commitComparison.select': '選擇提交',
   'commitComparison.search': '搜尋提交...',
@@ -144,13 +149,17 @@ export const dict: Record<I18nKey, string> = {
   ...surfacePanelI18n['zh-TW'],
   ...fileArtifactsI18n['zh-TW'],
   ...fileContentSearchI18n['zh-TW'],
+  ...fileEditorAidsI18n['zh-TW'],
   ...htmlRenderI18n['zh-TW'],
   ...sessionNoticesI18n['zh-TW'],
   ...usageStatsI18n['zh-TW'],
   ...webSearchI18n['zh-TW'],
   ...sessionWarmingI18n['zh-TW'],
+  ...overviewI18n['zh-TW'],
   ...isolatedSpacesI18n['zh-TW'],
   ...sourceBoardI18n['zh-TW'],
+  ...stacksI18n['zh-TW'],
+  ...changeReviewI18n['zh-TW'],
   ...projectActionsI18n['zh-TW'],
   ...gitIdentityEditorI18n['zh-TW'],
   ...environmentI18n['zh-TW'],
@@ -404,14 +413,11 @@ export const dict: Record<I18nKey, string> = {
   'mobile.settings.placeholder.title': '設定',
   'mobile.settings.placeholder.description': '行動版連線與應用程式設定會顯示在這裡。',
   'header.services.remoteUpdate.title': '遠端實例更新',
-  'header.github.connectedWithLogin': 'GitHub：{login}',
-  'header.github.connected': 'GitHub 已連線',
-  'header.github.avatarWithLogin': '{login} 頭像',
-  'header.github.avatar': 'GitHub 頭像',
-  'header.gitlab.avatar': 'GitLab 頭像',
-  'header.github.accountsTitle': 'GitHub 帳戶',
-  'header.github.accountSource.oauth': 'OAuth',
-  'header.github.accountSource.cli': 'CLI',
+  'header.sourceControl.connectedWithLogin': '{provider}：{login}',
+  'header.sourceControl.connected': '{provider} 已連線',
+  'header.sourceControl.avatarWithLogin': '{login} 頭像',
+  'header.sourceControl.avatar': '{provider} 頭像',
+  'header.sourceControl.accountsTitle': '{provider} 帳戶',
   'header.services.remoteUpdate.checking': '正在檢查更新...',
   'header.services.remoteUpdate.upToDate': '此實例已是最新。',
   'header.services.remoteUpdate.available': '此實例可更新到版本 {version}。',
@@ -726,6 +732,7 @@ export const dict: Record<I18nKey, string> = {
   'sessions.sidebar.session.work.markDone': '標記為完成',
   'sessions.sidebar.session.work.doneSuggested': '看起來已完成',
   'sessions.sidebar.session.work.updateFailed': '無法更新工作階段',
+  'sessions.sidebar.session.work.folderDeleted': '此工作階段的資料夾已被刪除',
   'sessions.sidebar.session.pin.pinFailed': '無法釘選工作階段',
   'sessions.sidebar.session.pin.unpinFailed': '無法取消釘選工作階段',
   'chat.work.doneHint.text': '這項工作看起來已完成。',
@@ -1220,6 +1227,7 @@ export const dict: Record<I18nKey, string> = {
   'gitView.sync.syncCounts': '{behind}↓ {ahead}↑',
   'gitView.branch.actionsUnavailable': '目前儲存庫狀態下分支操作無法使用',
   'gitView.conflict.noDetailsAvailable': '沒有可用的衝突詳情',
+  'magicPrompts.toast.loadFailed': '無法載入魔法提示詞。未傳送任何內容。',
   'gitView.empty.notGitRepository': '目前目錄不是 Git 儲存庫',
   'gitView.empty.notGitRepositoryDescription': '請在此目錄初始化 Git，或開啟一個 Git 儲存庫。',
   'gitView.empty.selectSessionOrDirectory': '請選擇會话或目錄以查看 Git 狀態',
@@ -1279,7 +1287,6 @@ export const dict: Record<I18nKey, string> = {
   'gitView.pr.mergeMethod.rebase': 'Rebase 並合併',
   'gitView.pr.mergeMethod.squash': '壓縮並合併',
   'gitView.pr.notMergeable': '不可合併',
-  'gitView.pr.numberLabel': 'PR #{number}',
   'gitView.pr.segment.checks': '檢查',
   'gitView.pr.comments.addAll': '全部附加到聊天',
   'gitView.pr.placeholder.additionalContext': '補充約束、發布說明或評審上下文...',
@@ -1406,6 +1413,7 @@ export const dict: Record<I18nKey, string> = {
   'gitView.mr.comparison.mode': '合併請求',
   'gitView.mr.comparison.select': '選擇合併請求',
   'gitView.mr.comparison.pickAbove': '請在上方選擇合併請求',
+  'gitView.mr.comparison.diffUnavailable': "{provider} 不提供合併請求的差異，因此無法在此顯示或逐步講解",
   'gitView.mr.comparison.partial': '部分合併請求無法載入',
   'gitView.mr.comparison.searchPlaceholder': '搜尋合併請求',
   'gitView.mr.comparison.loading': '正在載入合併請求...',
@@ -1415,9 +1423,6 @@ export const dict: Record<I18nKey, string> = {
   'gitView.mr.comparison.loadMoreFailed': '載入更多合併請求失敗',
   'gitView.mr.walkthroughScope': 'MR !{number}',
   'gitView.mr.createHint': '從目前分支建立並管理合併請求。',
-  'header.gitlab.connectedWithLogin': 'GitLab：{login}',
-  'header.gitlab.connected': 'GitLab 已連線',
-  'header.gitlab.accountsTitle': 'GitLab 帳戶',
   'contextPanel.mode.context': '上下文',
   'contextPanel.mode.preview': '預覽',
   'contextPanel.mode.browser': '瀏覽器',
@@ -2249,8 +2254,8 @@ export const dict: Record<I18nKey, string> = {
   'session.newWorktree.remoteBranches': '遠端分支',
   'session.newWorktree.branchName': '分支名稱',
   'session.newWorktree.branchNamePlaceholder': 'feature/my-awesome-feature',
-  'session.newWorktree.actions.startFromGitHubIssuePr': '從 GitHub Issue/PR 開始',
-  'session.newWorktree.actions.startFromGitLabIssueMr': 'GitLab 議題或合併請求',
+  'session.newWorktree.actions.startFromRepository.pullRequest': '從 {provider} Issue/PR 開始',
+  'session.newWorktree.actions.startFromRepository.mergeRequest': '{provider} 議題或合併請求',
   'session.newWorktree.worktreeDirectory': 'Worktree 目錄',
   'session.newWorktree.worktreeDirectoryPlaceholder': 'my-worktree-directory',
   'session.newWorktree.resetToMatchBranchName': '重設為與分支名稱一致',
@@ -2258,7 +2263,6 @@ export const dict: Record<I18nKey, string> = {
   'session.newWorktree.selectSourceBranch': '選擇來源分支',
   'session.newWorktree.selectSourceBranchPlaceholder': '選擇來源分支...',
   'session.newWorktree.issueNumber': 'Issue #{number}',
-  'session.newWorktree.prNumber': 'PR #{number}',
   'session.newWorktree.includeDiffBadge': '+diff',
   'session.newWorktree.fromSource': '來自 {source}',
   'session.newWorktree.actions.cancel': '取消',
@@ -2426,6 +2430,7 @@ export const dict: Record<I18nKey, string> = {
   'chat.queuedMessage.send': 'send',
   'chat.queuedMessage.removeAria': '從佇列移除',
   'chat.queuedMessage.goal': '傳送時啟動目標',
+  'chat.queuedMessage.sendsAsAgent': '將以 {agent} 傳送。',
   'chat.queuedMessage.reorderAria': '拖曳以重新排序',
   'chat.queuedMessage.toast.queueFailed': '無法將訊息加入佇列，已放回輸入框。',
   'chat.queuedMessage.toast.takeFailed': '無法載入佇列中的訊息，請再試一次。',
@@ -2563,7 +2568,6 @@ export const dict: Record<I18nKey, string> = {
   'chat.chatInput.linked.issue.removeAria': '移除已關聯的 Issue',
   'chat.chatInput.linked.pr.openInBrowserAria': '在瀏覽器中開啟 Pull Request',
   'chat.chatInput.linked.mr.openInBrowserAria': '在瀏覽器中開啟合併請求',
-  'chat.chatInput.linked.pr.number': 'PR #{number}',
   'chat.chatInput.linked.pr.removeAria': '移除已關聯的 Pull Request',
   'chat.chatInput.linked.mr.removeAria': '移除連結的合併請求',
   'chat.chatInput.placeholder.shell': '輸入 shell 命令...',
@@ -2760,6 +2764,7 @@ export const dict: Record<I18nKey, string> = {
   'chat.modelControls.noAgentSelected': '未選擇 Agent。',
   'chat.modelControls.resetToDefault': '重設為預設',
   'chat.modelControls.searchModels': '搜尋模型',
+  'chat.modelControls.modelListAria': '模型',
   'chat.modelControls.searchAgents': '搜尋 Agent',
   'chat.modelControls.noModelsFound': '找不到模型',
   'chat.modelControls.favorites': '我的最愛',
@@ -3578,8 +3583,7 @@ export const dict: Record<I18nKey, string> = {
   'chat.workStatus.pinned.unpinFailed': '無法取消釘選訊息',
   'chat.workStatus.action.openContext': '開啟上下文面板',
   'chat.workStatus.section.linkedIssues': '已關聯',
-  'chat.workStatus.linkedIssues.open': '在 GitHub 上開啟 #{number}',
-  'chat.workStatus.linkedIssues.openGitLab': '在 GitLab 上開啟 {reference}',
+  'chat.workStatus.linkedIssues.openOnProvider': '在 {provider} 上開啟 {reference}',
   'chat.workStatus.linkedIssues.unlink': '移除關聯',
   'chat.workStatus.linkedIssues.unlinkFailed': '無法移除關聯',
   'chat.workStatus.linkedIssues.link': '關聯到工作階段',
@@ -3854,4 +3858,8 @@ export const dict: Record<I18nKey, string> = {
   'sessions.scheduledTasks.dialog.toast.alreadyRunning': '此任務已有一次執行正在進行',
   'sessions.scheduledTasks.dialog.toast.alreadyQueued': '此任務已在佇列中等待，有空位時就會執行',
   'chat.modelControls.agentFavoriteAdd': '加入最愛。有最愛時，Tab 只在最愛之間切換',
+  'notifications.error.bodyFallback': '發生錯誤',
+  'notifications.question.bodyFallback': '智慧體正在等待你的回覆',
+  'notifications.permission.bodyFallback': '智慧體正在等待你的核准',
+  'notifications.permission.title': '需要權限',
 };

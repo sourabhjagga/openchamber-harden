@@ -599,6 +599,7 @@ export const Header: React.FC = () => {
   const isIntegrationsCatalogSurfaceOpen = useUIStore((state) => state.isIntegrationsCatalogOpen);
   const isUsageStatsSurfaceOpen = useUIStore((state) => state.isUsageStatsPageOpen);
   const isSourceBoardSurfaceOpen = useUIStore((state) => state.isSourceBoardOpen);
+  const isOverviewSurfaceOpen = useUIStore((state) => state.isOverviewOpen);
   const worktreesSurfaceProjectId = useUIStore((state) => state.worktreesPageProjectId);
   const spacesSurfaceProjectId = useUIStore((state) => (state.isolatedSpacesEnabled ? state.spacesPageProjectId : null));
   const runOverviewKey = useUIStore((state) => state.runOverviewKey);
@@ -626,6 +627,9 @@ export const Header: React.FC = () => {
     if (isSourceBoardSurfaceOpen) {
       return { title: t('sourceBoard.title'), subtitle: null };
     }
+    if (isOverviewSurfaceOpen) {
+      return { title: t('overview.title'), subtitle: null };
+    }
     if (worktreesSurfaceProjectId) {
       return {
         title: t('sessions.worktreesPage.title', { project: surfaceProjectLabel ?? '' }),
@@ -639,7 +643,7 @@ export const Header: React.FC = () => {
       return { title: overviewRunTitle ?? t('multirun.overview.headerTitle'), subtitle: t('multirun.overview.headerTitle') };
     }
     return null;
-  }, [guestPage, isArchiveSurfaceOpen, isIntegrationsCatalogSurfaceOpen, overviewRunTitle, runOverviewKey, isScheduledSurfaceOpen, isSourceBoardSurfaceOpen, isUsageStatsSurfaceOpen, spacesSurfaceProjectId, surfaceProjectLabel, t, worktreesSurfaceProjectId]);
+  }, [guestPage, isArchiveSurfaceOpen, isIntegrationsCatalogSurfaceOpen, overviewRunTitle, runOverviewKey, isScheduledSurfaceOpen, isSourceBoardSurfaceOpen, isOverviewSurfaceOpen, isUsageStatsSurfaceOpen, spacesSurfaceProjectId, surfaceProjectLabel, t, worktreesSurfaceProjectId]);
 
 
   const currentSessionOpenDirectory = sessionDirectory || normalize(selectedSessionDirectory || '') || worktreeDirectory;

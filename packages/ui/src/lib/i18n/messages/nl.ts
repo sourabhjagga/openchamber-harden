@@ -9,13 +9,17 @@ import { pluginPanelI18n } from './plugin-panel.i18n';
 import { surfacePanelI18n } from './surface-panel.i18n';
 import { fileArtifactsI18n } from './file-artifacts.i18n';
 import { fileContentSearchI18n } from './file-content-search.i18n';
+import { fileEditorAidsI18n } from './file-editor-aids.i18n';
 import { htmlRenderI18n } from './html-render.i18n';
 import { sessionNoticesI18n } from './session-notices.i18n';
 import { usageStatsI18n } from './usage-stats.i18n';
 import { webSearchI18n } from './websearch.i18n';
 import { sessionWarmingI18n } from './session-warming.i18n';
+import { overviewI18n } from './overview.i18n';
 import { isolatedSpacesI18n } from './isolated-spaces.i18n';
 import { sourceBoardI18n } from './source-board.i18n';
+import { stacksI18n } from './stacks.i18n';
+import { changeReviewI18n } from './change-review.i18n';
 import { projectActionsI18n } from './project-actions.i18n';
 import { gitIdentityEditorI18n } from './git-identity-editor.i18n';
 import { environmentI18n } from './environment.i18n';
@@ -54,6 +58,7 @@ export const dict = {
   'commitComparison.mode': 'Commit',
   'pullRequestComparison.select': 'Kies een pull request',
   'pullRequestComparison.pickAbove': 'Kies hierboven een pull request',
+  'pullRequestComparison.diffUnavailable': "{provider} levert geen diffs van pull requests, dus die kunnen hier niet worden getoond of doorgelopen",
   'pullRequestComparison.partial': 'Sommige pull requests konden niet worden geladen',
   'commitComparison.select': 'Kies een commit',
   'commitComparison.search': 'Commits zoeken...',
@@ -143,13 +148,17 @@ export const dict = {
   ...surfacePanelI18n.nl,
   ...fileArtifactsI18n.nl,
   ...fileContentSearchI18n.nl,
+  ...fileEditorAidsI18n.nl,
   ...htmlRenderI18n.nl,
   ...sessionNoticesI18n.nl,
   ...usageStatsI18n.nl,
   ...webSearchI18n.nl,
   ...sessionWarmingI18n.nl,
+  ...overviewI18n.nl,
   ...isolatedSpacesI18n.nl,
   ...sourceBoardI18n.nl,
+  ...stacksI18n.nl,
+  ...changeReviewI18n.nl,
   ...projectActionsI18n.nl,
   ...gitIdentityEditorI18n.nl,
   ...environmentI18n.nl,
@@ -697,6 +706,7 @@ export const dict = {
   'sessions.sidebar.session.work.markDone': 'Markeer als afgerond',
   'sessions.sidebar.session.work.doneSuggested': 'Lijkt afgerond',
   'sessions.sidebar.session.work.updateFailed': 'Sessie kon niet worden bijgewerkt',
+  'sessions.sidebar.session.work.folderDeleted': 'De map van deze sessie is verwijderd',
   'sessions.sidebar.session.pin.pinFailed': 'Sessie kon niet worden vastgezet',
   'sessions.sidebar.session.pin.unpinFailed': 'Sessie kon niet worden losgemaakt',
   'chat.work.doneHint.text': 'Dit werk lijkt afgerond.',
@@ -1192,6 +1202,7 @@ export const dict = {
   'gitView.sync.syncCounts': '{behind}↓ {ahead}↑',
   'gitView.branch.actionsUnavailable': 'Branchacties niet beschikbaar in deze repositorystatus',
   'gitView.conflict.noDetailsAvailable': 'Geen conflictgegevens beschikbaar',
+  'magicPrompts.toast.loadFailed': 'Magic Prompts konden niet worden geladen. Er is niets verzonden.',
   'gitView.empty.notGitRepository': 'Deze map is geen Git-repository',
   'gitView.empty.notGitRepositoryDescription': 'Initialiseer Git in deze map of open een repository.',
   'gitView.empty.selectSessionOrDirectory': 'Selecteer een sessie of map om de Git-status te bekijken',
@@ -1251,7 +1262,6 @@ export const dict = {
   'gitView.pr.mergeMethod.rebase': 'Rebasen en mergen',
   'gitView.pr.mergeMethod.squash': 'Squashen en mergen',
   'gitView.pr.notMergeable': 'Niet te mergen',
-  'gitView.pr.numberLabel': 'PR #{number}',
   'gitView.pr.segment.checks': 'Checks',
   'gitView.pr.comments.addAll': 'Alles aan chat toevoegen',
   'gitView.pr.placeholder.additionalContext': 'Beperkingen, uitrolnotities of context voor de reviewer...',
@@ -1378,6 +1388,7 @@ export const dict = {
   'gitView.mr.comparison.mode': 'Merge requests',
   'gitView.mr.comparison.select': 'Kies een merge request',
   'gitView.mr.comparison.pickAbove': 'Kies hierboven een merge request',
+  'gitView.mr.comparison.diffUnavailable': "{provider} levert geen diffs van merge requests, dus die kunnen hier niet worden getoond of doorgelopen",
   'gitView.mr.comparison.partial': 'Sommige merge requests konden niet worden geladen',
   'gitView.mr.comparison.searchPlaceholder': 'Merge requests zoeken',
   'gitView.mr.comparison.loading': 'Merge requests laden...',
@@ -1387,9 +1398,6 @@ export const dict = {
   'gitView.mr.comparison.loadMoreFailed': 'Kan niet meer merge requests laden',
   'gitView.mr.walkthroughScope': 'MR !{number}',
   'gitView.mr.createHint': 'Maak en beheer merge requests vanuit deze branch.',
-  'header.gitlab.connectedWithLogin': 'GitLab: {login}',
-  'header.gitlab.connected': 'GitLab verbonden',
-  'header.gitlab.accountsTitle': 'GitLab-accounts',
   'contextPanel.mode.context': 'Context',
   'contextPanel.mode.preview': 'Voorbeeld',
   'contextPanel.mode.browser': 'Browser',
@@ -2019,14 +2027,11 @@ export const dict = {
   'inlineComment.actions.editComment': 'Commentaar bewerken',
   'inlineComment.actions.deleteComment': 'Commentaar verwijderen',
   'inlineComment.toast.selectSessionToSave': 'Selecteer een sessie om het commentaar op te slaan',
-  'header.github.connectedWithLogin': 'GitHub: {login}',
-  'header.github.connected': 'GitHub verbonden',
-  'header.github.avatarWithLogin': 'Avatar van {login}',
-  'header.github.avatar': 'GitHub-avatar',
-  'header.gitlab.avatar': 'GitLab-avatar',
-  'header.github.accountsTitle': 'GitHub-accounts',
-  'header.github.accountSource.oauth': 'OAuth',
-  'header.github.accountSource.cli': 'CLI',
+  'header.sourceControl.connectedWithLogin': '{provider}: {login}',
+  'header.sourceControl.connected': '{provider} verbonden',
+  'header.sourceControl.avatarWithLogin': 'Avatar van {login}',
+  'header.sourceControl.avatar': '{provider}-avatar',
+  'header.sourceControl.accountsTitle': '{provider}-accounts',
   'header.services.openWithCurrent': 'Instantie, gebruik en MCP openen (huidig: {current})',
   'header.services.open': 'Diensten, gebruik en MCP openen',
   'header.services.title': 'Diensten',
@@ -2274,8 +2279,8 @@ export const dict = {
   'session.newWorktree.remoteBranches': 'Remote branches',
   'session.newWorktree.branchName': 'Branchnaam',
   'session.newWorktree.branchNamePlaceholder': 'feature/my-awesome-feature',
-  'session.newWorktree.actions.startFromGitHubIssuePr': 'Starten vanuit GitHub-issue/PR',
-  'session.newWorktree.actions.startFromGitLabIssueMr': 'Een GitLab-issue of merge request',
+  'session.newWorktree.actions.startFromRepository.pullRequest': 'Starten vanuit {provider}-issue/PR',
+  'session.newWorktree.actions.startFromRepository.mergeRequest': 'Een {provider}-issue of merge request',
   'session.newWorktree.worktreeDirectory': 'Worktreemap',
   'session.newWorktree.worktreeDirectoryPlaceholder': 'my-worktree-directory',
   'session.newWorktree.resetToMatchBranchName': 'Resetten naar branchnaam',
@@ -2283,7 +2288,6 @@ export const dict = {
   'session.newWorktree.selectSourceBranch': 'Bronbranch selecteren',
   'session.newWorktree.selectSourceBranchPlaceholder': 'Selecteer bronbranch...',
   'session.newWorktree.issueNumber': 'Issue #{number}',
-  'session.newWorktree.prNumber': 'PR #{number}',
   'session.newWorktree.includeDiffBadge': '+diff',
   'session.newWorktree.fromSource': 'uit {source}',
   'session.newWorktree.actions.cancel': 'Annuleren',
@@ -2451,6 +2455,7 @@ export const dict = {
   'chat.queuedMessage.send': 'verzenden',
   'chat.queuedMessage.removeAria': 'Uit de wachtrij verwijderen',
   'chat.queuedMessage.goal': 'Start een goal bij verzenden',
+  'chat.queuedMessage.sendsAsAgent': 'Wordt verzonden als {agent}.',
   'chat.queuedMessage.reorderAria': 'Sleep om te herschikken',
   'chat.queuedMessage.toast.queueFailed': 'Kan het bericht niet in de wachtrij plaatsen. Het staat weer in het invoerveld.',
   'chat.queuedMessage.toast.takeFailed': 'Kan het bericht uit de wachtrij niet laden. Probeer het opnieuw.',
@@ -2586,7 +2591,6 @@ export const dict = {
   'chat.chatInput.linked.byAuthor': 'door {author}',
   'chat.chatInput.linked.issue.openInBrowserAria': 'Issue in de browser openen',
   'chat.chatInput.linked.issue.removeAria': 'Gekoppeld issue verwijderen',
-  'chat.chatInput.linked.pr.number': 'PR #{number}',
   'chat.chatInput.linked.pr.openInBrowserAria': 'Pull request in de browser openen',
   'chat.chatInput.linked.mr.openInBrowserAria': 'Merge request openen in browser',
   'chat.chatInput.linked.pr.removeAria': 'Gekoppelde pull request verwijderen',
@@ -2785,6 +2789,7 @@ export const dict = {
   'chat.modelControls.noAgentSelected': 'Geen agent geselecteerd.',
   'chat.modelControls.resetToDefault': 'Terugzetten naar standaard',
   'chat.modelControls.searchModels': 'Modellen zoeken',
+  'chat.modelControls.modelListAria': 'Modellen',
   'chat.modelControls.searchAgents': 'Agents zoeken',
   'chat.modelControls.noModelsFound': 'Geen modellen gevonden',
   'chat.modelControls.favorites': 'Favorieten',
@@ -3578,8 +3583,7 @@ export const dict = {
   'chat.workStatus.pinned.unpinFailed': 'Kan de vastzetting niet opheffen',
   'chat.workStatus.action.openContext': 'Contextpaneel openen',
   'chat.workStatus.section.linkedIssues': 'Gekoppeld',
-  'chat.workStatus.linkedIssues.open': '#{number} openen op GitHub',
-  'chat.workStatus.linkedIssues.openGitLab': '{reference} openen op GitLab',
+  'chat.workStatus.linkedIssues.openOnProvider': '{reference} openen op {provider}',
   'chat.workStatus.linkedIssues.unlink': 'Koppeling verwijderen',
   'chat.workStatus.linkedIssues.unlinkFailed': 'Kan de koppeling niet verwijderen',
   'chat.workStatus.linkedIssues.link': 'Koppelen aan sessie',
@@ -3854,4 +3858,8 @@ export const dict = {
   'sessions.scheduledTasks.dialog.toast.alreadyRunning': 'Deze taak heeft al een run bezig',
   'sessions.scheduledTasks.dialog.toast.alreadyQueued': 'Deze taak staat al in de wachtrij en draait zodra er plek vrijkomt',
   'chat.modelControls.agentFavoriteAdd': 'Toevoegen aan favorieten. Met favorieten wisselt Tab alleen daartussen',
+  'notifications.error.bodyFallback': 'Er is een fout opgetreden',
+  'notifications.question.bodyFallback': 'De agent wacht op je antwoord',
+  'notifications.permission.bodyFallback': 'De agent wacht op je goedkeuring',
+  'notifications.permission.title': 'Toestemming vereist',
 } as const;

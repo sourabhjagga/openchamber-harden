@@ -31,7 +31,6 @@ type Props = {
   expansionKey: string;
   expanded: boolean;
   forceExpanded: boolean;
-  notifyOnSubtasks: boolean;
   toggleParent: (key: string) => void;
 };
 
@@ -58,7 +57,6 @@ function RunSidebarRowComponent({
   expansionKey,
   expanded,
   forceExpanded,
-  notifyOnSubtasks,
   toggleParent,
 }: Props): React.ReactNode {
   const { t } = useI18n();
@@ -78,7 +76,7 @@ function RunSidebarRowComponent({
     ? t('sessions.sidebar.run.laneCountSingle', { count: laneCount })
     : t('sessions.sidebar.run.laneCountPlural', { count: laneCount });
   const activityNodes = React.useMemo(() => [...laneNodes], [laneNodes]);
-  const activity = <CollapsedSessionActivityIndicator nodes={activityNodes} blockingSessionIds={blockingSessionIds} includeUnreadSubtasks={notifyOnSubtasks} />;
+  const activity = <CollapsedSessionActivityIndicator nodes={activityNodes} blockingSessionIds={blockingSessionIds} />;
   // Muted like an idle session title; the run's state shows in its mark.
   const titleClassName = isActive ? 'text-interactive-selection-foreground' : 'text-muted-foreground';
   const openOverview = () => useUIStore.getState().setRunOverviewKey(run.key);

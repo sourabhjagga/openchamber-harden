@@ -250,6 +250,11 @@ One run is never a result: repeat a scenario and aggregate with
 `node scripts/perf/aggregate-runs.mjs <run directories…>`.
 `perf/code-300cps` and `perf/code-1200cps` stream one 240-line code block,
 because what a growing fence costs does not show in fences of five lines.
+`perf/showcase-20000cps` answers with one of every Markdown construct the chat
+renders (headings, lists, tasks, quotes, a table, inline and display math,
+a disclosure, a Mermaid diagram, fenced code with and without a language,
+raw HTML that must stay text). It is not a timing stimulus: open its session
+on two builds and compare screenshots when a change touches the renderer.
 `perf/think-30s` stays silent for thirty seconds and then answers in one word:
 it holds the app in its working state with nothing streaming, which is what an
 agent thinking or running a tool looks like to the UI.
@@ -451,7 +456,8 @@ that is not listed.
 Clicks sidebar session rows with real mouse input and measures, per click:
 
 - `ack`: the clicked row is highlighted as active (the first visible reaction);
-- `content`: messages that were not in the DOM before are in it. They may still
+- `content`: messages that were not rendered before are rendered (a timeline kept
+  in the DOM under `display: none` counts as not rendered). They may still
   be invisible: a freshly opened timeline stays at opacity 0 while renderers
   hold their provisional first paint (`data-timeline-reveal="pending"`), then
   fades in;
@@ -604,6 +610,18 @@ The next known cost: `getLoginShellEnvSnapshot` in
 synchronously on the Electron main thread during OpenCode bootstrap, although
 Desktop already merged the same probe into `process.env`, so the user's shell
 startup is paid twice.
+
+## JSON tree layout regression
+
+`json-tree-view.browser.test.mjs` loads the real JSON view and UI stylesheet in an isolated Vite fixture. It checks a Files-height container around the 200-row virtualization boundary and at 26,000 entries, tail reachability, collapse/expand, resize, hide/show, toolbar focus, and chat's absolute height caps. Both the fixture server and Chrome's debugging port stay on loopback. It reads no application state and stops the processes it started.
+
+```bash
+node --test scripts/perf/json-tree-view.browser.test.mjs
+# When Chrome is outside the standard locations:
+OPENCHAMBER_TEST_CHROME=/path/to/chrome node --test scripts/perf/json-tree-view.browser.test.mjs
+```
+
+The test reports a skip if Chrome is unavailable. An explicit invalid Chrome path fails. This is layout correctness coverage; measure Files performance in the built app.
 
 ## profile:heap
 

@@ -9,13 +9,17 @@ import { pluginPanelI18n } from './plugin-panel.i18n';
 import { surfacePanelI18n } from './surface-panel.i18n';
 import { fileArtifactsI18n } from './file-artifacts.i18n';
 import { fileContentSearchI18n } from './file-content-search.i18n';
+import { fileEditorAidsI18n } from './file-editor-aids.i18n';
 import { htmlRenderI18n } from './html-render.i18n';
 import { sessionNoticesI18n } from './session-notices.i18n';
 import { usageStatsI18n } from './usage-stats.i18n';
 import { webSearchI18n } from './websearch.i18n';
 import { sessionWarmingI18n } from './session-warming.i18n';
+import { overviewI18n } from './overview.i18n';
 import { isolatedSpacesI18n } from './isolated-spaces.i18n';
 import { sourceBoardI18n } from './source-board.i18n';
+import { stacksI18n } from './stacks.i18n';
+import { changeReviewI18n } from './change-review.i18n';
 import { projectActionsI18n } from './project-actions.i18n';
 import { gitIdentityEditorI18n } from './git-identity-editor.i18n';
 import { environmentI18n } from './environment.i18n';
@@ -54,6 +58,7 @@ export const dict = {
   'commitComparison.mode': 'Commit',
   'pullRequestComparison.select': 'Sélectionner une pull request',
   'pullRequestComparison.pickAbove': 'Choisissez une pull request ci-dessus',
+  'pullRequestComparison.diffUnavailable': "{provider} ne fournit pas le diff des pull requests : impossible de les afficher ou de les parcourir ici",
   'pullRequestComparison.partial': "Certaines pull requests n'ont pas pu être chargées",
   'commitComparison.select': 'Choisir un commit',
   'commitComparison.search': 'Rechercher des commits...',
@@ -143,13 +148,17 @@ export const dict = {
   ...surfacePanelI18n.fr,
   ...fileArtifactsI18n.fr,
   ...fileContentSearchI18n.fr,
+  ...fileEditorAidsI18n.fr,
   ...htmlRenderI18n.fr,
   ...sessionNoticesI18n.fr,
   ...usageStatsI18n.fr,
   ...webSearchI18n.fr,
   ...sessionWarmingI18n.fr,
+  ...overviewI18n.fr,
   ...isolatedSpacesI18n.fr,
   ...sourceBoardI18n.fr,
+  ...stacksI18n.fr,
+  ...changeReviewI18n.fr,
   ...projectActionsI18n.fr,
   ...gitIdentityEditorI18n.fr,
   ...environmentI18n.fr,
@@ -465,14 +474,11 @@ export const dict = {
   'sessions.archivePage.restoreSessionAria': 'Restaurer {title}',
   'sessions.switcher.openAria': 'Sélecteur de session ouvert',
   'header.sessionTabs.stripAria': 'Sessions ouvertes',
-  'header.github.connectedWithLogin': 'GitHub : {login}',
-  'header.github.connected': 'GitHub connecté',
-  'header.github.avatarWithLogin': 'Avatar {login}',
-  'header.github.avatar': 'Avatar GitHub',
-  'header.gitlab.avatar': 'Avatar GitLab',
-  'header.github.accountsTitle': 'Comptes GitHub',
-  'header.github.accountSource.oauth': 'OAuth',
-  'header.github.accountSource.cli': 'CLI',
+  'header.sourceControl.connectedWithLogin': '{provider} : {login}',
+  'header.sourceControl.connected': '{provider} connecté',
+  'header.sourceControl.avatarWithLogin': 'Avatar {login}',
+  'header.sourceControl.avatar': 'Avatar {provider}',
+  'header.sourceControl.accountsTitle': 'Comptes {provider}',
   'header.sessionTabs.tabMenuAria': 'Actions de l\'onglet de session',
   'header.sessionTabs.closeTab': 'Fermer l\'onglet',
   'header.sessionTabs.closeOtherTabs': 'Fermer les autres onglets',
@@ -527,6 +533,7 @@ export const dict = {
   'sessions.sidebar.session.work.markDone': 'Marquer comme terminé',
   'sessions.sidebar.session.work.doneSuggested': 'Semble terminé',
   'sessions.sidebar.session.work.updateFailed': 'Impossible de mettre à jour la session',
+  'sessions.sidebar.session.work.folderDeleted': 'Le dossier de cette session a été supprimé',
   'sessions.sidebar.session.pin.pinFailed': 'Impossible d\'épingler la session',
   'sessions.sidebar.session.pin.unpinFailed': 'Impossible de désépingler la session',
   'chat.work.doneHint.text': 'Ce travail semble terminé.',
@@ -1014,6 +1021,7 @@ export const dict = {
   'gitView.sync.syncCounts': '{behind}↓ {ahead}↑',
   'gitView.branch.actionsUnavailable': 'Actions de branchement indisponibles dans cet état du dépôt',
   'gitView.conflict.noDetailsAvailable': 'Aucun détail de conflit disponible',
+  'magicPrompts.toast.loadFailed': 'Impossible de charger les prompts magiques. Rien n’a été envoyé.',
   'gitView.empty.notGitRepository': 'Ce répertoire n\'est pas un dépôt Git',
   'gitView.empty.notGitRepositoryDescription': 'Initialisez Git dans ce répertoire ou ouvrez un dépôt.',
   'gitView.empty.selectSessionOrDirectory': 'Sélectionnez une session ou un répertoire pour afficher l\'état de Git',
@@ -1064,7 +1072,6 @@ export const dict = {
   'gitView.pr.mergeMethod.rebase': 'Rebaser et fusionner',
   'gitView.pr.mergeMethod.squash': 'Squasher et fusionner',
   'gitView.pr.notMergeable': 'Non fusionnable',
-  'gitView.pr.numberLabel': 'PR #{number}',
   'gitView.pr.segment.checks': 'Vérifications',
   'gitView.pr.comments.addAll': 'Tout joindre au chat',
   'gitView.pr.placeholder.additionalContext': 'Toute contrainte, note de déploiement ou contexte du réviseur...',
@@ -1192,6 +1199,7 @@ export const dict = {
   'gitView.mr.comparison.mode': 'MR',
   'gitView.mr.comparison.select': 'Sélectionner une merge request',
   'gitView.mr.comparison.pickAbove': 'Choisissez une merge request ci-dessus',
+  'gitView.mr.comparison.diffUnavailable': "{provider} ne fournit pas le diff des merge requests : impossible de les afficher ou de les parcourir ici",
   'gitView.mr.comparison.partial': 'Certaines merge requests n\'ont pas pu être chargées',
   'gitView.mr.comparison.searchPlaceholder': 'Rechercher des MR',
   'gitView.mr.comparison.loading': 'Chargement des MR...',
@@ -1201,9 +1209,6 @@ export const dict = {
   'gitView.mr.comparison.loadMoreFailed': 'Échec du chargement d\'autres MR',
   'gitView.mr.walkthroughScope': 'MR !{number}',
   'gitView.mr.createHint': 'Créez et gérez les MR depuis cette branche.',
-  'header.gitlab.connectedWithLogin': 'GitLab : {login}',
-  'header.gitlab.connected': 'GitLab connecté',
-  'header.gitlab.accountsTitle': 'Comptes GitLab',
   'contextPanel.mode.context': 'Contexte',
   'contextPanel.mode.preview': 'Aperçu',
   'contextPanel.mode.browser': 'Navigateur',
@@ -2010,8 +2015,8 @@ export const dict = {
   'session.newWorktree.remoteBranches': 'Branches du dépôt distant',
   'session.newWorktree.branchName': 'Nom de la branche',
   'session.newWorktree.branchNamePlaceholder': 'fonctionnalité/ma-fonctionnalité-géniale',
-  'session.newWorktree.actions.startFromGitHubIssuePr': 'À partir d\'une issue/PR GitHub',
-  'session.newWorktree.actions.startFromGitLabIssueMr': 'Un ticket ou une merge request GitLab',
+  'session.newWorktree.actions.startFromRepository.pullRequest': "À partir d'une issue/PR {provider}",
+  'session.newWorktree.actions.startFromRepository.mergeRequest': 'Un ticket ou une merge request {provider}',
   'session.newWorktree.worktreeDirectory': 'Répertoire du worktree',
   'session.newWorktree.worktreeDirectoryPlaceholder': 'mon-répertoire-worktree',
   'session.newWorktree.resetToMatchBranchName': 'Réinitialiser pour correspondre au nom de la branche',
@@ -2019,7 +2024,6 @@ export const dict = {
   'session.newWorktree.selectSourceBranch': 'Sélectionnez la branche source',
   'session.newWorktree.selectSourceBranchPlaceholder': 'Sélectionnez la branche source...',
   'session.newWorktree.issueNumber': 'Issue #{number}',
-  'session.newWorktree.prNumber': 'PR #{number}',
   'session.newWorktree.includeDiffBadge': '+diff',
   'session.newWorktree.fromSource': 'de {source}',
   'session.newWorktree.actions.cancel': 'Annuler',
@@ -2156,6 +2160,7 @@ export const dict = {
   'chat.queuedMessage.send': 'envoyer',
   'chat.queuedMessage.removeAria': 'Supprimer de la file d\'attente',
   'chat.queuedMessage.goal': 'Démarre un objectif à l\'envoi',
+  'chat.queuedMessage.sendsAsAgent': 'Envoyé en tant que {agent}.',
   'chat.queuedMessage.reorderAria': 'Glisser pour réorganiser',
   'chat.queuedMessage.toast.queueFailed': 'Impossible de mettre le message en file d\'attente. Il est de retour dans l\'éditeur.',
   'chat.queuedMessage.toast.takeFailed': 'Impossible de charger le message en file d\'attente. Veuillez réessayer.',
@@ -2282,7 +2287,6 @@ export const dict = {
   'chat.chatInput.linked.issue.removeAria': 'Supprimer l\'issue liée',
   'chat.chatInput.linked.pr.openInBrowserAria': 'Ouvrir la PR dans le navigateur',
   'chat.chatInput.linked.mr.openInBrowserAria': 'Ouvrir la merge request dans le navigateur',
-  'chat.chatInput.linked.pr.number': 'PR #{number}',
   'chat.chatInput.linked.pr.removeAria': 'Supprimer la PR liée',
   'chat.chatInput.linked.mr.removeAria': 'Retirer la merge request liée',
   'chat.chatInput.placeholder.shell': 'Entrez la commande shell...',
@@ -2462,6 +2466,7 @@ export const dict = {
   'chat.modelControls.noAgentSelected': 'Aucun agent sélectionné.',
   'chat.modelControls.resetToDefault': 'Réinitialiser aux valeurs par défaut',
   'chat.modelControls.searchModels': 'Rechercher des modèles',
+  'chat.modelControls.modelListAria': 'Modèles',
   'chat.modelControls.searchAgents': 'Rechercher des agents',
   'chat.modelControls.noModelsFound': 'Aucun modèle trouvé',
   'chat.modelControls.favorites': 'Favoris',
@@ -3577,8 +3582,7 @@ export const dict = {
   'chat.workStatus.pinned.unpinFailed': 'Impossible de détacher le message',
   'chat.workStatus.action.openContext': 'Ouvrir le panneau de contexte',
   'chat.workStatus.section.linkedIssues': 'Liés',
-  'chat.workStatus.linkedIssues.open': 'Ouvrir #{number} sur GitHub',
-  'chat.workStatus.linkedIssues.openGitLab': 'Ouvrir {reference} sur GitLab',
+  'chat.workStatus.linkedIssues.openOnProvider': 'Ouvrir {reference} sur {provider}',
   'chat.workStatus.linkedIssues.unlink': 'Retirer le lien',
   'chat.workStatus.linkedIssues.unlinkFailed': 'Impossible de retirer le lien',
   'chat.workStatus.linkedIssues.link': 'Lier à la session',
@@ -3853,4 +3857,8 @@ export const dict = {
   'sessions.scheduledTasks.dialog.toast.alreadyRunning': 'Cette tâche a déjà une exécution en cours',
   'sessions.scheduledTasks.dialog.toast.alreadyQueued': 'Cette tâche attend déjà dans la file et s’exécutera dès qu’une place se libère',
   'chat.modelControls.agentFavoriteAdd': 'Ajouter aux favoris. Avec des favoris, Tab ne passe que par eux',
+  'notifications.error.bodyFallback': 'Une erreur est survenue',
+  'notifications.question.bodyFallback': 'L\'agent attend votre réponse',
+  'notifications.permission.bodyFallback': 'L\'agent attend votre autorisation',
+  'notifications.permission.title': 'Autorisation requise',
 } as const;

@@ -609,6 +609,11 @@ const getDesktopFilesApi = (): FilesAPI | null => {
   return null
 }
 
+// Callers key the answer by the runtime key read at call time, so the route
+// resolves at call time too. `this.baseUrl` follows a switch only once the
+// client is rebound, which the desktop's boot-time host restore does last.
+const FS_HOME_ROUTE = "/api/fs/home"
+
 // /api/fs/home parsing boundary. Older servers answer without chatsRoot;
 // only a valid home response may use the legacy chats-root fallback.
 const fsAbsolutePathSchema = z.string().trim().regex(/^(?:\/|[A-Za-z]:[\\/]|\\\\)/)
@@ -1027,6 +1032,14 @@ class OpencodeService {
    */
   async renameSession(id: string, title: string, directory?: string | null): Promise<void> {
     await call("session.update", () => this.clientFor(directory).session.update({ sessionID: id, title }))
+  }
+
+  /**
+   * Records that the turn which ended at `idle` was seen. OpenCode keeps the
+   * watermark monotone and leaves a turn that ended later unread.
+   */
+  async viewSession(id: string, idle: number, directory?: string | null): Promise<void> {
+    await call("session.view", () => this.clientFor(directory).session.view({ sessionID: id, idle }))
   }
 
   async moveSession(id: string, toDirectory: string, options?: { delivery?: SessionInboxDelivery }): Promise<void> {
@@ -2347,7 +2360,7 @@ class OpencodeService {
     }
 
     try {
-      const response = await runtimeFetch(`${this.baseUrl}/fs/home`, {
+      const response = await runtimeFetch(FS_HOME_ROUTE, {
         method: "GET",
         headers: {
           Accept: "application/json",
@@ -2375,7 +2388,7 @@ class OpencodeService {
   // Both roots must describe the same server response, including on desktop.
   // Failure is distinct from an older server omitting chatsRoot.
   async getFilesystemHomeInfo(): Promise<z.infer<typeof fsHomeResponseSchema>> {
-    const response = await runtimeFetch(`${this.baseUrl}/fs/home`, {
+    const response = await runtimeFetch(FS_HOME_ROUTE, {
       method: "GET",
       headers: {
         Accept: "application/json",

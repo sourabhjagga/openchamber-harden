@@ -1,6 +1,6 @@
 import React from 'react';
 import { cn } from '@/lib/utils';
-import { selectSkillsForDirectory, useSkillsStore } from '@/stores/useSkillsStore';
+import { selectAvailableSkillsForDirectory, useSkillsStore } from '@/stores/useSkillsStore';
 import { useEffectiveDirectory } from '@/hooks/useEffectiveDirectory';
 import { useUIStore } from '@/stores/useUIStore';
 import { ScrollableOverlay } from '@/components/ui/ScrollableOverlay';
@@ -46,7 +46,7 @@ export const SkillAutocomplete = React.forwardRef<SkillAutocompleteHandle, Skill
   // Skills of the directory the composer sends to (session directory, or the
   // Chats root for a chat draft), not of the project the app was on last.
   const effectiveDirectory = useEffectiveDirectory();
-  const skills = useSkillsStore((s) => selectSkillsForDirectory(s, effectiveDirectory));
+  const skills = useSkillsStore((s) => selectAvailableSkillsForDirectory(s, effectiveDirectory));
   const loadSkills = useSkillsStore((s) => s.loadSkills);
 
   React.useEffect(() => {

@@ -275,10 +275,15 @@ export const createOpenChamberControlService = (dependencies) => {
     });
   };
 
-  // The store answers asynchronously; its archive timestamp, or null.
-  const archivedAt = async (sessionID) => {
-    if (!archiveStore) return null;
-    return (await archiveStore.archivedAt(sessionID)) ?? null;
+  // OpenCode holds archive state; the archive file holds it for sessions whose
+  // directory is gone, and its entry wins: a timestamp archives, null restores.
+  const withArchiveEntry = async (session) => {
+    if (!archiveStore || !session?.id) return session;
+    const entry = await archiveStore.entry(session.id);
+    if (entry === undefined) return session;
+    if (entry !== null) return { ...session, time: { ...session.time, archived: entry } };
+    const { archived: _archived, ...time } = session.time ?? {};
+    return { ...session, time };
   };
 
   const projects = async () => {
@@ -723,6 +728,19 @@ export const createOpenChamberControlService = (dependencies) => {
       parameters.submit = input.submit === true;
     }
 
+    if (action === 'browser.select') {
+      const selector = asNonEmptyString(input.selector);
+      if (!selector) throw new OpenChamberControlError('selector is required for browser.select', 400);
+      const hasLabel = typeof input.label === 'string';
+      const hasValue = typeof input.value === 'string';
+      if (hasLabel === hasValue) {
+        throw new OpenChamberControlError('browser.select requires exactly one of label or value', 400);
+      }
+      parameters.selector = selector;
+      if (hasLabel) parameters.label = input.label;
+      else parameters.value = input.value;
+    }
+
     if (action === 'browser.scroll') {
       const selector = asNonEmptyString(input.selector);
       const direction = asNonEmptyString(input.direction);
@@ -942,12 +960,7 @@ export const createOpenChamberControlService = (dependencies) => {
             if (directory) listInput.directory = directory;
             if (cursor) listInput.cursor = cursor;
             const response = await client.session.list(listInput);
-            // Archive is OpenChamber state; overlay it so callers keep reading
-            // it off the session the way OpenCode used to report it.
-            const page = await Promise.all((Array.isArray(response?.data) ? response.data : []).map(async (session) => {
-              const archived = await archivedAt(session?.id);
-              return archived ? { ...session, time: { ...session.time, archived } } : session;
-            }));
+            const page = await Promise.all((Array.isArray(response?.data) ? response.data : []).map(withArchiveEntry));
             for (const session of page) {
               const id = asNonEmptyString(session?.id);
               if (id) {

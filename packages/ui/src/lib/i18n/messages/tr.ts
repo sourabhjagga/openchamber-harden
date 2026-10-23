@@ -9,13 +9,17 @@ import { pluginPanelI18n } from './plugin-panel.i18n';
 import { surfacePanelI18n } from './surface-panel.i18n';
 import { fileArtifactsI18n } from './file-artifacts.i18n';
 import { fileContentSearchI18n } from './file-content-search.i18n';
+import { fileEditorAidsI18n } from './file-editor-aids.i18n';
 import { htmlRenderI18n } from './html-render.i18n';
 import { sessionNoticesI18n } from './session-notices.i18n';
 import { usageStatsI18n } from './usage-stats.i18n';
 import { webSearchI18n } from './websearch.i18n';
 import { sessionWarmingI18n } from './session-warming.i18n';
+import { overviewI18n } from './overview.i18n';
 import { isolatedSpacesI18n } from './isolated-spaces.i18n';
 import { sourceBoardI18n } from './source-board.i18n';
+import { stacksI18n } from './stacks.i18n';
+import { changeReviewI18n } from './change-review.i18n';
 import { projectActionsI18n } from './project-actions.i18n';
 import { gitIdentityEditorI18n } from './git-identity-editor.i18n';
 import { environmentI18n } from './environment.i18n';
@@ -54,6 +58,7 @@ export const dict = {
   'commitComparison.mode': 'Commit',
   'pullRequestComparison.select': 'Çekme isteği seçin',
   'pullRequestComparison.pickAbove': 'Yukarıdan bir çekme isteği seçin',
+  'pullRequestComparison.diffUnavailable': "{provider} çekme isteklerinin farklarını sunmuyor, bu yüzden burada gösterilemez veya adım adım incelenemez",
   'pullRequestComparison.partial': 'Bazı çekme istekleri yüklenemedi',
   'commitComparison.select': 'Commit seç',
   'commitComparison.search': 'Commit ara...',
@@ -82,13 +87,17 @@ export const dict = {
   ...surfacePanelI18n.tr,
   ...fileArtifactsI18n.tr,
   ...fileContentSearchI18n.tr,
+  ...fileEditorAidsI18n.tr,
   ...htmlRenderI18n.tr,
   ...sessionNoticesI18n.tr,
   ...usageStatsI18n.tr,
   ...webSearchI18n.tr,
   ...sessionWarmingI18n.tr,
+  ...overviewI18n.tr,
   ...isolatedSpacesI18n.tr,
   ...sourceBoardI18n.tr,
+  ...stacksI18n.tr,
+  ...changeReviewI18n.tr,
   ...projectActionsI18n.tr,
   ...gitIdentityEditorI18n.tr,
   ...environmentI18n.tr,
@@ -615,6 +624,7 @@ export const dict = {
   'sessions.sidebar.session.work.markDone': 'Tamamlandı olarak işaretle',
   'sessions.sidebar.session.work.doneSuggested': 'Tamamlanmış görünüyor',
   'sessions.sidebar.session.work.updateFailed': 'Oturum güncellenemedi',
+  'sessions.sidebar.session.work.folderDeleted': 'Bu oturumun klasörü silindi',
   'sessions.sidebar.session.pin.pinFailed': 'Oturum sabitlenemedi',
   'sessions.sidebar.session.pin.unpinFailed': 'Oturumun sabitlemesi kaldırılamadı',
   'chat.work.doneHint.text': 'Bu iş tamamlanmış görünüyor.',
@@ -1101,6 +1111,7 @@ export const dict = {
   'gitView.sync.syncCounts': '{behind}↓ {ahead}↑',
   'gitView.branch.actionsUnavailable': 'Bu repository durumunda branch işlemleri kullanılamıyor',
   'gitView.conflict.noDetailsAvailable': 'Çakışma detayları mevcut değil',
+  'magicPrompts.toast.loadFailed': 'Sihirli Promptlar yüklenemedi. Hiçbir şey gönderilmedi.',
   'gitView.empty.notGitRepository': 'Bu dizin bir Git repository\'si değil',
   'gitView.empty.notGitRepositoryDescription': 'Bu dizinde Git\'i başlatın veya bir repository açın.',
   'gitView.empty.retryDiscovery': 'Yeniden dene',
@@ -1149,7 +1160,6 @@ export const dict = {
   'gitView.pr.mergeMethod.rebase': 'Rebase edip merge et',
   'gitView.pr.mergeMethod.squash': 'Squash edip merge et',
   'gitView.pr.notMergeable': 'Merge edilemez',
-  'gitView.pr.numberLabel': 'PR #{number}',
   'gitView.pr.segment.checks': 'Kontroller',
   'gitView.pr.comments.addAll': 'Tümünü sohbete ekle',
   'gitView.pr.placeholder.additionalContext': 'Kısıtlar, dağıtım notları veya inceleyici bağlamı...',
@@ -1268,6 +1278,7 @@ export const dict = {
   'gitView.mr.comparison.mode': 'Merge Request\'ler',
   'gitView.mr.comparison.select': 'Merge request seçin',
   'gitView.mr.comparison.pickAbove': 'Yukarıdan bir merge request seçin',
+  'gitView.mr.comparison.diffUnavailable': "{provider} merge request farklarını sunmuyor, bu yüzden burada gösterilemez veya adım adım incelenemez",
   'gitView.mr.comparison.partial': 'Bazı merge request\'ler yüklenemedi',
   'gitView.mr.comparison.searchPlaceholder': 'Merge request ara',
   'gitView.mr.comparison.loading': 'Merge request\'ler yükleniyor...',
@@ -1277,9 +1288,6 @@ export const dict = {
   'gitView.mr.comparison.loadMoreFailed': 'Daha fazla merge request yüklenemedi',
   'gitView.mr.walkthroughScope': 'MR !{number}',
   'gitView.mr.createHint': 'Bu branch\'ten merge request oluştur ve yönet.',
-  'header.gitlab.connectedWithLogin': 'GitLab: {login}',
-  'header.gitlab.connected': 'GitLab bağlandı',
-  'header.gitlab.accountsTitle': 'GitLab Hesapları',
   'contextPanel.mode.context': 'Bağlam',
   'contextPanel.mode.preview': 'Önizleme',
   'contextPanel.mode.browser': 'Tarayıcı',
@@ -1886,14 +1894,11 @@ export const dict = {
   'inlineComment.actions.editComment': 'Yorumu düzenle',
   'inlineComment.actions.deleteComment': 'Yorumu sil',
   'inlineComment.toast.selectSessionToSave': 'Yorumu kaydetmek için bir session seçin',
-  'header.github.connectedWithLogin': 'GitHub: {login}',
-  'header.github.connected': 'GitHub bağlandı',
-  'header.github.avatarWithLogin': '{login} avatarı',
-  'header.github.avatar': 'GitHub avatarı',
-  'header.gitlab.avatar': 'GitLab avatarı',
-  'header.github.accountsTitle': 'GitHub Hesapları',
-  'header.github.accountSource.oauth': 'OAuth',
-  'header.github.accountSource.cli': 'CLI',
+  'header.sourceControl.connectedWithLogin': '{provider}: {login}',
+  'header.sourceControl.connected': '{provider} bağlandı',
+  'header.sourceControl.avatarWithLogin': '{login} avatarı',
+  'header.sourceControl.avatar': '{provider} avatarı',
+  'header.sourceControl.accountsTitle': '{provider} Hesapları',
   'header.services.openWithCurrent': 'Instance\'ı, kullanımı ve MCP\'yi aç (mevcut: {current})',
   'header.services.open': 'Hizmetleri, kullanımı ve MCP\'yi aç',
   'header.services.title': 'Hizmetler',
@@ -2135,8 +2140,8 @@ export const dict = {
   'session.newWorktree.remoteBranches': 'Uzak branch\'ler',
   'session.newWorktree.branchName': 'Branch Adı',
   'session.newWorktree.branchNamePlaceholder': 'feature/my-awesome-feature',
-  'session.newWorktree.actions.startFromGitHubIssuePr': 'GitHub Issue/PR\'dan başla',
-  'session.newWorktree.actions.startFromGitLabIssueMr': 'Bir GitLab issue’su veya merge request’i',
+  'session.newWorktree.actions.startFromRepository.pullRequest': "{provider} Issue/PR'dan başla",
+  'session.newWorktree.actions.startFromRepository.mergeRequest': 'Bir {provider} issue’su veya merge request’i',
   'session.newWorktree.worktreeDirectory': 'Worktree Dizini',
   'session.newWorktree.worktreeDirectoryPlaceholder': 'my-worktree-directory',
   'session.newWorktree.resetToMatchBranchName': 'Branch adıyla eşleşecek şekilde sıfırla',
@@ -2144,7 +2149,6 @@ export const dict = {
   'session.newWorktree.selectSourceBranch': 'Kaynak branch seç',
   'session.newWorktree.selectSourceBranchPlaceholder': 'Kaynak branch seçin...',
   'session.newWorktree.issueNumber': 'Issue #{number}',
-  'session.newWorktree.prNumber': 'PR #{number}',
   'session.newWorktree.includeDiffBadge': '+diff',
   'session.newWorktree.fromSource': '{source} kaynağından',
   'session.newWorktree.actions.cancel': 'İptal',
@@ -2307,6 +2311,7 @@ export const dict = {
   'chat.queuedMessage.send': 'gönder',
   'chat.queuedMessage.removeAria': 'Kuyruktan kaldır',
   'chat.queuedMessage.goal': 'Gönderildiğinde bir hedef başlatır',
+  'chat.queuedMessage.sendsAsAgent': '{agent} olarak gönderilir.',
   'chat.queuedMessage.reorderAria': 'Yeniden sıralamak için sürükle',
   'chat.queuedMessage.toast.queueFailed': 'Mesaj kuyruğa eklenemedi. Yazma alanına geri kondu.',
   'chat.queuedMessage.toast.takeFailed': 'Kuyruktaki mesaj yüklenemedi. Lütfen tekrar deneyin.',
@@ -2418,7 +2423,6 @@ export const dict = {
   'chat.chatInput.linked.issue.removeAria': 'Bağlı issue\'ı kaldır',
   'chat.chatInput.linked.pr.openInBrowserAria': 'Pull request\'i tarayıcıda aç',
   'chat.chatInput.linked.mr.openInBrowserAria': 'Merge request\'i tarayıcıda aç',
-  'chat.chatInput.linked.pr.number': 'PR #{number}',
   'chat.chatInput.linked.pr.removeAria': 'Bağlı pull request\'i kaldır',
   'chat.chatInput.linked.mr.removeAria': 'Bağlı merge request\'i kaldır',
   'chat.chatInput.placeholder.shell': 'Shell komutu gir...',
@@ -2613,6 +2617,7 @@ export const dict = {
   'chat.modelControls.noAgentSelected': 'Agent seçilmedi.',
   'chat.modelControls.resetToDefault': 'Varsayılana sıfırla',
   'chat.modelControls.searchModels': 'Modelleri ara',
+  'chat.modelControls.modelListAria': 'Modeller',
   'chat.modelControls.searchAgents': 'Agent\'leri ara',
   'chat.modelControls.noModelsFound': 'Model bulunamadı',
   'chat.modelControls.favorites': 'Favoriler',
@@ -3381,8 +3386,7 @@ export const dict = {
   'chat.workStatus.pinned.unpinFailed': 'Mesajın sabitlemesi kaldırılamadı',
   'chat.workStatus.action.openContext': 'Bağlam panelini aç',
   'chat.workStatus.section.linkedIssues': 'Bağlantılı',
-  'chat.workStatus.linkedIssues.open': 'GitHub\'da #{number} öğesini aç',
-  'chat.workStatus.linkedIssues.openGitLab': 'GitLab\'da {reference} öğesini aç',
+  'chat.workStatus.linkedIssues.openOnProvider': '{reference} öğesini {provider} üzerinde aç',
   'chat.workStatus.linkedIssues.unlink': 'Bağlantıyı kaldır',
   'chat.workStatus.linkedIssues.unlinkFailed': 'Bağlantı kaldırılamadı',
   'chat.workStatus.linkedIssues.link': 'Session\'a bağla',
@@ -3852,4 +3856,8 @@ export const dict = {
   'sessions.scheduledTasks.dialog.toast.alreadyRunning': 'Bu görevin bir çalıştırması zaten sürüyor',
   'sessions.scheduledTasks.dialog.toast.alreadyQueued': 'Bu görev zaten kuyrukta bekliyor; yer açılınca çalışacak',
   'chat.modelControls.agentFavoriteAdd': 'Favorilere ekle. Favori varsa Tab yalnızca onlar arasında geçiş yapar',
+  'notifications.error.bodyFallback': 'Bir hata oluştu',
+  'notifications.question.bodyFallback': 'Ajan yanıtınızı bekliyor',
+  'notifications.permission.bodyFallback': 'Ajan onayınızı bekliyor',
+  'notifications.permission.title': 'İzin gerekiyor',
 };

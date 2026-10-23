@@ -1,3 +1,6 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { inspectLocalImage } from '../markdown-image-grants/inspect-image.js';
 import { isString } from '../shared/guards.js';
 import { OpenChamberControlError } from './error.js';
 
@@ -21,17 +24,79 @@ const RENDER_PAGE_MAX_ANSWER_DATA_LENGTH = 16_000;
 // A quoted path may hold spaces (macOS names screenshots that way); an
 // unquoted url() ends at the first space or parenthesis.
 const LOCAL_IMAGE_RE = /(["'`])((?:file:\/\/|\/(?!\/)|[A-Za-z]:[\\/])[^"'`<>\n]*?\.(?:png|jpe?g|gif|webp))\1|url\(\s*((?:file:\/\/|\/(?!\/)|[A-Za-z]:[\\/])[^"'`<>()\s]*?\.(?:png|jpe?g|gif|webp))\s*\)/gi;
-// The image grant route prepares at most this many images in one request.
-const RENDER_PAGE_MAX_LOCAL_IMAGES = 12;
+// How much the local images a page shows may weigh together, in file bytes.
+// The chat reads each one into the page as a data URL, and the browser holds
+// it decoded on top, so the weight of a page is what bounds the chat's memory.
+export const RENDER_PAGE_IMAGE_BUDGET_BYTES = 25 * 1024 * 1024;
 
-/** The local image paths a page names, in order, at most RENDER_PAGE_MAX_LOCAL_IMAGES. */
+/** The local image paths a page names, in order, once each. */
 export const renderPageImageSources = (html) => {
   const sources = new Set();
-  for (const match of html.matchAll(LOCAL_IMAGE_RE)) {
-    sources.add(match[2] ?? match[3]);
-    if (sources.size === RENDER_PAGE_MAX_LOCAL_IMAGES) break;
-  }
+  for (const match of html.matchAll(LOCAL_IMAGE_RE)) sources.add(match[2] ?? match[3]);
   return [...sources];
+};
+
+/**
+ * Checks every local image a page names and decides which the chat shows: in
+ * page order, while their sizes add up to at most the budget. From the first
+ * image that does not fit on, none does (`too-heavy`), so the page shows a
+ * run from its top. A missing or unreadable image weighs nothing.
+ * `inspect(source)` resolves to what `inspectLocalImage` does. The image grant
+ * route serves a page with this rule and the agent is told with it, so both
+ * agree on what the user sees.
+ */
+export const fitRenderPageImages = async (html, inspect) => {
+  const images = [];
+  let shownBytes = 0;
+  let totalBytes = 0;
+  let full = false;
+  for (const source of renderPageImageSources(html)) {
+    const inspected = await inspect(source);
+    if (inspected.status !== 'ready') {
+      images.push({ source, ...inspected });
+      continue;
+    }
+    totalBytes += inspected.size;
+    full = full || shownBytes + inspected.size > RENDER_PAGE_IMAGE_BUDGET_BYTES;
+    if (full) {
+      images.push({ source, status: 'too-heavy', size: inspected.size });
+      continue;
+    }
+    shownBytes += inspected.size;
+    images.push({ source, ...inspected });
+  }
+  return { images, totalBytes };
+};
+
+const NOT_SHOWN_REASONS = {
+  'too-heavy': 'past the page budget',
+  missing: 'file not found',
+  error: 'not a readable PNG, JPEG, GIF or WebP of at most 10 MB',
+};
+const toMegabytes = (bytes) => Math.round(bytes / (1024 * 1024) * 10) / 10;
+
+/**
+ * What the agent hears about the page's local images the user will not see,
+ * or null when every one shows. Without it the agent heard "shown" and
+ * reported a gallery whose later images were broken.
+ */
+const describeHiddenImages = async (html, directory) => {
+  const { images, totalBytes } = await fitRenderPageImages(html, (source) => (
+    inspectLocalImage({ source, directory, fsPromises: fs, path }).catch(() => ({ status: 'error' }))
+  ));
+  const hidden = images.filter((image) => image.status !== 'ready');
+  if (hidden.length === 0) return null;
+  const tooHeavy = hidden.some((image) => image.status === 'too-heavy');
+  return {
+    images: {
+      shown: images.length - hidden.length,
+      notShown: hidden.map((image) => ({ src: image.source, reason: NOT_SHOWN_REASONS[image.status] })),
+      ...(tooHeavy && { weightMB: toMegabytes(totalBytes), budgetMB: toMegabytes(RENDER_PAGE_IMAGE_BUDGET_BYTES) }),
+    },
+    note: tooHeavy
+      ? 'Some local images on the page do not show; images.notShown says which. A page shows its images in page order while their files add up to at most budgetMB, and these weigh weightMB: split the page or use smaller images.'
+      : 'Some local images on the page do not show; images.notShown says which and why.',
+  };
 };
 
 // A page sent without a title is named after its own <title>, else its first
@@ -163,13 +228,18 @@ export const createRenderPageAction = ({ isEnabled, pageAnswers }) => async (inp
   if (title.length > RENDER_PAGE_MAX_TITLE_LENGTH) {
     throw new OpenChamberControlError(`title is ${title.length} characters; the limit is ${RENDER_PAGE_MAX_TITLE_LENGTH}`, 400);
   }
+  const hidden = await describeHiddenImages(html, directory);
   if (input.awaitAnswer !== true) {
-    return { shown: true, title, note: SHOWN_NOTE };
+    return hidden
+      ? { shown: true, title, note: `${SHOWN_NOTE} ${hidden.note}`, images: hidden.images }
+      : { shown: true, title, note: SHOWN_NOTE };
   }
   // A plugin generated before pages could wait sends no call id.
   if (!sessionId || !callId) {
     throw new OpenChamberControlError('This connection cannot wait for an answer on a page; show the page without awaitAnswer and ask in text', 400);
   }
   const answer = await pageAnswers.wait({ sessionId, callId, title, directory, signal });
-  return { title, answer, note: ANSWERED_NOTE };
+  return hidden
+    ? { title, answer, note: `${ANSWERED_NOTE} ${hidden.note}`, images: hidden.images }
+    : { title, answer, note: ANSWERED_NOTE };
 };

@@ -8,8 +8,8 @@ import { SessionActivityDuration } from '@/components/session/SessionActivityDur
 import { useSessionAiRenameAction } from '@/components/session/useSessionAiRenameAction';
 import { useI18n } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
-import { useSessionUnseenCount } from '@/sync/notification-store';
-import { useHasSessionActivityDuration } from '@/sync/session-activity-timing';
+import { useSessionUnread } from '@/sync/session-unread';
+import { useHasSessionTurnDuration } from '@/sync/session-turn-duration';
 
 import { MobileProjectIcon, type MobileProjectIconProject } from './MobileProjectIcon';
 import { MobileSessionRenameForm } from './MobileSessionRenameForm';
@@ -116,7 +116,7 @@ const MobileTimelineRunRow: React.FC<{
   const { t } = useI18n();
   const { run, project } = entry;
   const active = useUIStore((state) => state.runOverviewKey === run.key);
-  const activity = useCollapsedSessionActivityState({ nodes: entry.laneNodes, includeUnreadSubtasks: false });
+  const activity = useCollapsedSessionActivityState({ nodes: entry.laneNodes });
   const time = formatRelativeShort(run.lastActivity);
   const laneCount = run.lanes.length;
   return (
@@ -186,11 +186,11 @@ const MobileTimelineRow: React.FC<{
 
   // Live indicators, same conventions as the grouped rows: busy/retry →
   // running-kind icon; unseen activity on a non-active row → unread icon.
-  const unseenCount = useSessionUnseenCount(session.id);
+  const isUnread = useSessionUnread(session.id);
   const turnActivity = useSessionTurnActivity(session.id);
   const isStreaming = turnActivity !== null;
-  const showUnreadDot = !isStreaming && unseenCount > 0 && !active;
-  const hasActivityDuration = useHasSessionActivityDuration(session.id, isStreaming);
+  const showUnreadDot = !isStreaming && isUnread && !active;
+  const hasActivityDuration = useHasSessionTurnDuration(session.id, isStreaming);
   const showActivityDuration = (isStreaming || showUnreadDot) && hasActivityDuration;
   const onToggleWork = handlers.onToggleWork;
   const inWork = isSessionInWork(session);

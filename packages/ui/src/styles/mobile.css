@@ -56,6 +56,11 @@
     min-width: 36px;
   }
 
+  /* Composer top-slot rows keep room around their 36px buttons. */
+  :root.mobile-pointer:not(.desktop-runtime) .oc-composer-row {
+    height: 2.5rem;
+  }
+
   /* The Changes section and source pickers take their height from dropdownTriggerVariants,
      rather than the generic mobile button minimum. */
   :root.mobile-pointer:not(.desktop-runtime) button[data-mobile-comparison-trigger] {
@@ -132,7 +137,7 @@
   }
 
   /* Keep markdown code blocks horizontally scrollable on mobile. */
-  :root.mobile-pointer:not(.desktop-runtime) .markdown-content [data-markdown="code-block-body"] {
+  :root.mobile-pointer:not(.desktop-runtime) .markdown-content [data-streamdown="code-block-body"] {
     overflow-x: auto !important;
     overflow-y: hidden !important;
     -webkit-overflow-scrolling: touch;

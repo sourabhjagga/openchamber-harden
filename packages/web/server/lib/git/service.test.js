@@ -1235,6 +1235,81 @@ describe('getStatus', () => {
     expect(status.diffStats.staged['staged.txt']).toEqual({ insertions: 3, deletions: 0 });
     expect(status.diffStats.working['staged.txt']).toBeUndefined();
   });
+
+  it('keys diff stats for non-ASCII paths by the same path status reports', async () => {
+    if (!canRunGit()) return;
+
+    const repo = createTempDir();
+    runGit(repo, ['init', '-b', 'main']);
+    runGit(repo, ['config', 'user.email', 'test@example.com']);
+    runGit(repo, ['config', 'user.name', 'Test User']);
+    const file = 'docs/中文/说明.md';
+    fs.mkdirSync(path.dirname(path.join(repo, file)), { recursive: true });
+    fs.writeFileSync(path.join(repo, file), 'one\ntwo\n');
+    runGit(repo, ['add', file]);
+    runGit(repo, ['commit', '-m', 'initial']);
+
+    // Stage one new line, then keep editing without staging another.
+    fs.appendFileSync(path.join(repo, file), 'staged\n');
+    runGit(repo, ['add', file]);
+    fs.appendFileSync(path.join(repo, file), 'working\n');
+
+    const status = await getStatus(repo);
+
+    // Keys must match the path the file list reports, or the row falls back
+    // to +0/-0 in the UI.
+    expect(status.diffStats.staged[file]).toEqual({ insertions: 1, deletions: 0 });
+    expect(status.diffStats.working[file]).toEqual({ insertions: 1, deletions: 0 });
+
+    const light = await getStatus(repo, { mode: 'light' });
+    expect(light.diffStats).toBeUndefined();
+  });
+
+  it("keys a renamed file's staged stats by its destination path", async () => {
+    if (!canRunGit()) return;
+
+    const repo = createTempDir();
+    runGit(repo, ['init', '-b', 'main']);
+    runGit(repo, ['config', 'user.email', 'test@example.com']);
+    runGit(repo, ['config', 'user.name', 'Test User']);
+    runGit(repo, ['config', 'diff.renames', 'true']);
+    const source = 'source.md';
+    const destination = 'docs/renamed.md';
+    fs.writeFileSync(path.join(repo, source), 'one\ntwo\nthree\n');
+    runGit(repo, ['add', source]);
+    runGit(repo, ['commit', '-m', 'initial']);
+
+    fs.mkdirSync(path.dirname(path.join(repo, destination)), { recursive: true });
+    runGit(repo, ['mv', source, destination]);
+    fs.appendFileSync(path.join(repo, destination), 'four\n');
+    runGit(repo, ['add', destination]);
+
+    const status = await getStatus(repo);
+
+    expect(status.diffStats.staged[destination]).toEqual({ insertions: 1, deletions: 0 });
+    expect(status.diffStats.staged[source]).toBeUndefined();
+  });
+
+  it('keys a working file whose name contains a quote character', async () => {
+    if (!canRunGit()) return;
+    // Windows file names cannot contain a quote character.
+    if (process.platform === 'win32') return;
+
+    const repo = createTempDir();
+    runGit(repo, ['init', '-b', 'main']);
+    runGit(repo, ['config', 'user.email', 'test@example.com']);
+    runGit(repo, ['config', 'user.name', 'Test User']);
+    const file = 'quo"te.txt';
+    fs.writeFileSync(path.join(repo, file), 'one\n');
+    runGit(repo, ['add', file]);
+    runGit(repo, ['commit', '-m', 'initial']);
+
+    fs.appendFileSync(path.join(repo, file), 'two\n');
+
+    const status = await getStatus(repo);
+
+    expect(status.diffStats.working[file]).toEqual({ insertions: 1, deletions: 0 });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1874,6 +1949,8 @@ describe('createWorktree', () => {
     ).not.toBe('pending');
     // The branch's upstream, not the first remote in the list.
     expect(hydrateCheckout).toHaveBeenCalledWith({ directory: created.path, parentRemoteName: 'upstream' });
+    // The branch it started from is recorded as its parent.
+    expect(readBranchConfig(created.path, 'feature/from-local', 'gh-merge-base')).toBe('main');
   });
 
   const installPostCheckoutHook = (repo, script, executable = true) => {
@@ -2220,6 +2297,8 @@ describe('createWorktree', () => {
 
       expect(readBranchConfig(created.path, 'openchamber/feature', 'remote')).toBe('');
       expect(readBranchConfig(created.path, 'openchamber/feature', 'merge')).toBe('');
+      // A remote start names its branch as the parent.
+      expect(readBranchConfig(created.path, 'openchamber/feature', 'gh-merge-base')).toBe('main');
     } finally {
       if (previousXdgDataHome === undefined) {
         delete process.env.XDG_DATA_HOME;
@@ -5453,6 +5532,30 @@ describe.runIf(canRunGit())('getRangeDiff', () => {
     expect(await getBranchBase(repository, 'react')).toEqual({ base: null });
     runGit(repository, ['checkout', '--no-track', '-b', 'loose', 'origin/react']);
     expect(await getBranchBase(repository, 'loose')).toEqual({ base: 'origin/react' });
+  });
+
+  it('keeps a recorded parent through a rebase, where the reflog loses it', async () => {
+    const { repository } = createRepositoryWithRemote();
+    runGit(repository, ['checkout', '-b', 'layer-one', 'origin/react']);
+    runGit(repository, ['checkout', '-b', 'layer-two', 'layer-one']);
+    runGit(repository, ['config', 'branch.layer-two.gh-merge-base', 'layer-one']);
+    fs.writeFileSync(path.join(repository, 'two.txt'), 'two\n');
+    runGit(repository, ['add', '.']);
+    runGit(repository, ['commit', '-m', 'two']);
+    // The lower layer moves on, and the upper one is restacked onto it.
+    runGit(repository, ['checkout', 'layer-one']);
+    fs.writeFileSync(path.join(repository, 'one.txt'), 'one\n');
+    runGit(repository, ['add', '.']);
+    runGit(repository, ['commit', '-m', 'one']);
+    runGit(repository, ['checkout', 'layer-two']);
+    runGit(repository, ['rebase', 'layer-one']);
+    expect(await getBranchBase(repository, 'layer-two')).toEqual({ base: 'layer-one' });
+    // A parent that is only a remote branch here still answers.
+    runGit(repository, ['config', 'branch.layer-two.gh-merge-base', 'react']);
+    expect(await getBranchBase(repository, 'layer-two')).toEqual({ base: 'react' });
+    // A parent that no longer exists gives way to the reflog, which here has nothing.
+    runGit(repository, ['config', 'branch.layer-two.gh-merge-base', 'gone']);
+    expect(await getBranchBase(repository, 'layer-two')).toEqual({ base: null });
   });
 
   it('asks for a new base after restacking and compares against the selected parent', async () => {

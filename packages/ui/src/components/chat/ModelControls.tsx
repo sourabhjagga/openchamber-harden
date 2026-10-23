@@ -2590,6 +2590,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({
 
         const modelPickerLabels = {
             searchPlaceholder: t('chat.modelControls.searchModels'),
+            list: t('chat.modelControls.modelListAria'),
             noResults: t('chat.modelControls.noModelsFound'),
             favorites: t('chat.modelControls.favorites'),
             recent: t('chat.modelControls.recent'),

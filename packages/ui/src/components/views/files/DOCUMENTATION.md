@@ -223,14 +223,14 @@ as is, but left web without annotation and given the Files view two preview
 engines. The bridge works the same in both, and gives the app no reach into
 the page that the page's own scripts lack.
 
-The Markdown preview renders the file's raw HTML the way GitHub does
-(`SimpleMarkdownRenderer allowRawHtml`): right after marked, a separate
-DOMPurify instance keeps a GitHub-like allowlist (`markdownSecurity.ts`:
-`picture`/`source`, `img`, `a`, `details`, `sub`/`sup`, `kbd`, aligned
-blocks) and drops author styles, classes, ids, data attributes, handlers,
-forms and embeds. Chat keeps raw HTML inert. A numeric `img height` becomes
-an inline height, because Tailwind preflight's `height: auto` would beat the
-attribute.
+The Markdown preview uses `SimpleMarkdownRenderer allowRawHtml`, sharing
+Streamdown processing with reference descriptions and comments. The policy in
+`chat/markdown/streamdownPlugins.ts` enables raw parsing, a restricted rehype
+sanitizer and Streamdown hardening. It permits document elements such as
+`picture`/`source`, `img`, `a`, `details`, `sub`/`sup`, `kbd` and aligned blocks.
+Author styles, application classes, handlers, forms and embeds are excluded.
+Chat keeps raw HTML inert. Media components own safe image dimensions so an
+HTML height or aspect ratio is not lost to Tailwind preflight.
 
 A Markdown file's frontmatter shows above its body (`SimpleMarkdownRenderer
 frontmatter="properties"`, also used by the plan view): a YAML mapping
@@ -239,21 +239,85 @@ as YAML; TOML (`+++`), invalid YAML and non-mapping YAML show as the block
 was written. The skill editor hides it (`frontmatter="hide"`) because the
 description has its own field there.
 
-`useMarkdownLocalAssets` makes a rendered Markdown file's relative images and
-links work: images and `srcset` candidates are fetched through the runtime
-against the file's own directory (outside the workspace when the file is) and
-swapped for object URLs that are revoked with the preview; relative links
-open the target file through `useUIStore.openContextFile`, which the context
-panel and the mobile files surface both consume. A `<source
-media="(prefers-color-scheme: …)">` follows the app theme, not the OS: the
-feature is rewritten to an always-true or never-true query and re-evaluated
-when the theme changes.
+`useMarkdownLocalAssets` supplies the file path, workspace scope, file-open
+callback and app color scheme before rendering. `MarkdownMediaContext`
+resolves relative images and `srcset` candidates through the runtime against
+the file's own directory, including files outside the workspace. React media
+nodes receive the resulting object URLs; their owner revokes them when the
+preview changes or unmounts. Relative links open through the supplied
+`useUIStore.openContextFile` callback, shared by the context panel and mobile
+files view. Fragment links find a heading within the Markdown root. A source's
+`prefers-color-scheme` condition follows the app theme through its rendered
+`media` prop. Content, file and runtime changes retire older asset results.
+
+A document image is read once it comes within one height of the preview's
+scroller of its visible part (`useNearMedia` with the nearest ancestor that
+scrolls vertically as root; a table that scrolls sideways does not count). A `<picture>` is watched as a whole, since its sources have
+no box, and a source whose `media` does not hold, the other theme's for one,
+is read only once it does. The candidates of one `srcset` are all read when
+their image is near.
+
+### Why a document image waits until it is near the view
+
+The preview read every image when it opened: a README with 100 screenshots of
+2.8 MB read 280 MB and grew the browser by about 600 MB while two pictures
+were on screen (#5320). The observer's root is the preview's scroller, because
+a margin on the viewport is clipped by that scroller and an image would start
+loading only once already visible. Read files stay until the preview closes:
+releasing one far away would collapse its height and move the text being read.
+
+### Why document assets resolve before node updates
+
+Media and link components own their resources and cleanup. Rewriting the
+rendered Markdown's `src`, `srcset` or `media` attributes would compete with
+React and could publish an old document's assets after a preview switch.
 
 An agent can ask for a file to be shown (`file.open` on the managed
 `openchamber` tool). The server broadcasts `openchamber:file-open-request`;
 `ContextPanel` answers it with `openContextFile`, `MobileApp` additionally
 opens the files drawer. VS Code has no shared file viewer and no managed
 tool, so the event never reaches it.
+
+## Editor aids
+
+The text editor's helpers live in `lib/codemirror/` and need no language
+server; `FilesView` assembles them. What the syntax tree or git can answer
+is shown, nothing that needs type information.
+
+- **Git changes.** `gitChangeGutter` diffs the document against the file's git
+  baseline after typing pauses. A click on a bar opens that change in place:
+  the changed lines are tinted, the baseline lines show under them, and
+  Revert puts them back as an ordinary edit, so undo, autosave and the
+  external-change guard treat it like typing. Escape or the close button
+  hides it; a later diff keeps it open while the change still exists.
+  Read-only files show no Revert.
+- **Indent guides** draw one faint line per indent step on the lines in view,
+  at multiples of the width the file itself uses (the most common step
+  between lines), so a 4-space file does not get guides every 2 columns.
+- **Sticky scope** (desktop) pins the first line of each function or class
+  whose body fills the top of the editor, up to three, innermost kept.
+- **Import links.** Cmd+click (Ctrl+click elsewhere) on a relative import path
+  in JS/TS opens the file it names, trying the extensions a bundler tries;
+  holding the key underlines the path. Elsewhere that click still adds a
+  cursor.
+- **JSON errors** (`.json`, `.jsonc`, `.geojson`) underline the first place the
+  file stops parsing.
+
+### Why import links stop at relative paths
+
+`./` and `../` paths name a file; aliases (`@/lib/x`) and packages need the
+project's resolver settings, and a jump that guesses was ruled out. Go to
+definition for symbols needs a language server, which was ruled out as too
+heavy; OpenCode's own LSP served the agent only and is not a source for it.
+
+### Why JSON errors accept comments and trailing commas
+
+tsconfig, VS Code settings and `opencode.json` allow them under a `.json`
+name. Flagging them would be wrong far more often than missing a trailing
+comma in a strict file, so the check blanks both before parsing, keeping
+offsets, and reports only the first error: the parser's recovery after it is
+noise. JSON5 and JSON Lines are not checked. The JSON tree view parses every
+file the same way, so a tsconfig opens as a tree.
 
 ## Canvas editors
 

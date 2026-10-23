@@ -9,13 +9,17 @@ import { pluginPanelI18n } from './plugin-panel.i18n';
 import { surfacePanelI18n } from './surface-panel.i18n';
 import { fileArtifactsI18n } from './file-artifacts.i18n';
 import { fileContentSearchI18n } from './file-content-search.i18n';
+import { fileEditorAidsI18n } from './file-editor-aids.i18n';
 import { htmlRenderI18n } from './html-render.i18n';
 import { sessionNoticesI18n } from './session-notices.i18n';
 import { usageStatsI18n } from './usage-stats.i18n';
 import { webSearchI18n } from './websearch.i18n';
 import { sessionWarmingI18n } from './session-warming.i18n';
+import { overviewI18n } from './overview.i18n';
 import { isolatedSpacesI18n } from './isolated-spaces.i18n';
 import { sourceBoardI18n } from './source-board.i18n';
+import { stacksI18n } from './stacks.i18n';
+import { changeReviewI18n } from './change-review.i18n';
 import { projectActionsI18n } from './project-actions.i18n';
 import { gitIdentityEditorI18n } from './git-identity-editor.i18n';
 import { environmentI18n } from './environment.i18n';
@@ -53,6 +57,7 @@ export const dict = {
   'commitComparison.mode': 'קומיט',
   'pullRequestComparison.select': 'בחר בקשת משיכה',
   'pullRequestComparison.pickAbove': 'יש לבחור בקשת משיכה למעלה',
+  'pullRequestComparison.diffUnavailable': "{provider} לא מספק את ההבדלים של בקשות משיכה, ולכן אי אפשר להציג אותם או לעבור עליהם כאן",
   'pullRequestComparison.partial': 'לא ניתן היה לטעון חלק מבקשות המשיכה',
   'commitComparison.select': 'בחר קומיט',
   'commitComparison.search': 'חיפוש קומיטים…',
@@ -613,14 +618,11 @@ export const dict = {
   'sessions.archivePage.restoreSessionAria': 'שחזר את {title}',
   'sessions.switcher.openAria': 'פתח את מחליף ההפעלות',
   'header.sessionTabs.stripAria': 'הפעלות פתוחות',
-  'header.github.connectedWithLogin': 'GitHub: {login}',
-  'header.github.connected': 'מחובר ל-GitHub',
-  'header.github.avatarWithLogin': 'תמונת הפרופיל של {login}',
-  'header.github.avatar': 'תמונת פרופיל ב-GitHub',
-  'header.gitlab.avatar': 'תמונת פרופיל ב-GitLab',
-  'header.github.accountsTitle': 'חשבונות GitHub',
-  'header.github.accountSource.oauth': 'OAuth',
-  'header.github.accountSource.cli': 'CLI',
+  'header.sourceControl.connectedWithLogin': '{provider}: {login}',
+  'header.sourceControl.connected': 'מחובר ל-{provider}',
+  'header.sourceControl.avatarWithLogin': 'תמונת הפרופיל של {login}',
+  'header.sourceControl.avatar': 'תמונת פרופיל ב-{provider}',
+  'header.sourceControl.accountsTitle': 'חשבונות {provider}',
   'header.sessionTabs.tabMenuAria': 'פעולות לכרטיסיית ההפעלה',
   'header.sessionTabs.closeTab': 'סגור כרטיסייה',
   'header.sessionTabs.closeOtherTabs': 'סגור כרטיסיות אחרות',
@@ -674,6 +676,7 @@ export const dict = {
   'sessions.sidebar.session.work.markDone': 'סמן כהושלם',
   'sessions.sidebar.session.work.doneSuggested': 'נראה שהושלם',
   'sessions.sidebar.session.work.updateFailed': 'לא ניתן היה לעדכן את ההפעלה',
+  'sessions.sidebar.session.work.folderDeleted': 'התיקייה של ההפעלה הזו נמחקה',
   'sessions.sidebar.session.pin.pinFailed': 'לא ניתן היה להצמיד את ההפעלה',
   'sessions.sidebar.session.pin.unpinFailed': 'לא ניתן היה לבטל את הצמדת ההפעלה',
   'chat.work.doneHint.text': 'נראה שהעבודה הזו הושלמה.',
@@ -1168,6 +1171,7 @@ export const dict = {
   'gitView.sync.syncCounts': '{behind}↓ {ahead}↑',
   'gitView.branch.actionsUnavailable': 'פעולות ענף לא זמינות במצב הנוכחי של המאגר',
   'gitView.conflict.noDetailsAvailable': 'אין פרטי התנגשות זמינים',
+  'magicPrompts.toast.loadFailed': 'לא ניתן לטעון את הנחיות הקסם. דבר לא נשלח.',
   'gitView.empty.notGitRepository': 'התיקייה הזו אינה מאגר Git',
   'gitView.empty.notGitRepositoryDescription': 'אפשר לאתחל Git בתיקייה הזו או לפתוח מאגר.',
   'gitView.empty.selectSessionOrDirectory': 'יש לבחור הפעלה או תיקייה כדי לראות את מצב Git',
@@ -1227,7 +1231,6 @@ export const dict = {
   'gitView.pr.mergeMethod.rebase': 'בצע rebase ומזג',
   'gitView.pr.mergeMethod.squash': 'דחוס (squash) ומזג',
   'gitView.pr.notMergeable': 'לא ניתן למיזוג',
-  'gitView.pr.numberLabel': 'PR #{number}',
   'gitView.pr.segment.checks': 'בדיקות',
   'gitView.pr.comments.addAll': 'צרף הכול לצ\'אט',
   'gitView.pr.placeholder.additionalContext': 'מגבלות, הערות פריסה או הקשר לסוקרים…',
@@ -1354,6 +1357,7 @@ export const dict = {
   'gitView.mr.comparison.mode': 'בקשות מיזוג',
   'gitView.mr.comparison.select': 'בחר בקשת מיזוג',
   'gitView.mr.comparison.pickAbove': 'יש לבחור בקשת מיזוג למעלה',
+  'gitView.mr.comparison.diffUnavailable': "{provider} לא מספק את ההבדלים של בקשות מיזוג, ולכן אי אפשר להציג אותם או לעבור עליהם כאן",
   'gitView.mr.comparison.partial': 'לא ניתן היה לטעון חלק מבקשות המיזוג',
   'gitView.mr.comparison.searchPlaceholder': 'חיפוש בקשות מיזוג',
   'gitView.mr.comparison.loading': 'טוען בקשות מיזוג…',
@@ -1363,9 +1367,6 @@ export const dict = {
   'gitView.mr.comparison.loadMoreFailed': 'טעינת בקשות מיזוג נוספות נכשלה',
   'gitView.mr.walkthroughScope': 'MR !{number}',
   'gitView.mr.createHint': 'יצירה וניהול של בקשות מיזוג מהענף הזה.',
-  'header.gitlab.connectedWithLogin': 'GitLab: {login}',
-  'header.gitlab.connected': 'GitLab מחובר',
-  'header.gitlab.accountsTitle': 'חשבונות GitLab',
   'contextPanel.mode.context': 'הקשר',
   'contextPanel.mode.preview': 'תצוגה מקדימה',
   'contextPanel.mode.browser': 'דפדפן',
@@ -2219,8 +2220,8 @@ export const dict = {
   'session.newWorktree.remoteBranches': 'ענפים מרוחקים',
   'session.newWorktree.branchName': 'שם הענף',
   'session.newWorktree.branchNamePlaceholder': 'feature/my-awesome-feature',
-  'session.newWorktree.actions.startFromGitHubIssuePr': 'Issue או בקשת משיכה ב-GitHub',
-  'session.newWorktree.actions.startFromGitLabIssueMr': 'Issue או בקשת מיזוג ב-GitLab',
+  'session.newWorktree.actions.startFromRepository.pullRequest': 'Issue או בקשת משיכה ב-{provider}',
+  'session.newWorktree.actions.startFromRepository.mergeRequest': 'Issue או בקשת מיזוג ב-{provider}',
   'session.newWorktree.worktreeDirectory': 'שם התיקייה',
   'session.newWorktree.worktreeDirectoryPlaceholder': 'my-worktree-directory',
   'session.newWorktree.resetToMatchBranchName': 'אפס להתאמה לשם הענף',
@@ -2228,7 +2229,6 @@ export const dict = {
   'session.newWorktree.selectSourceBranch': 'מבוסס על',
   'session.newWorktree.selectSourceBranchPlaceholder': 'בחירת ענף…',
   'session.newWorktree.issueNumber': 'Issue #{number}',
-  'session.newWorktree.prNumber': 'PR #{number}',
   'session.newWorktree.includeDiffBadge': '+הבדלים',
   'session.newWorktree.fromSource': 'מתוך {source}',
   'session.newWorktree.actions.cancel': 'ביטול',
@@ -2396,6 +2396,7 @@ export const dict = {
   'chat.queuedMessage.send': 'שליחה',
   'chat.queuedMessage.removeAria': 'הסר מתור ההמתנה',
   'chat.queuedMessage.goal': 'מתחיל יעד כשההודעה נשלחת',
+  'chat.queuedMessage.sendsAsAgent': 'יישלח בתור {agent}.',
   'chat.queuedMessage.reorderAria': 'גרור כדי לשנות סדר',
   'chat.queuedMessage.toast.queueFailed': 'לא ניתן היה להוסיף את ההודעה לתור. היא הוחזרה לתיבת הכתיבה.',
   'chat.queuedMessage.toast.takeFailed': 'לא ניתן היה לטעון את ההודעה מהתור. יש לנסות שוב.',
@@ -2533,7 +2534,6 @@ export const dict = {
   'chat.chatInput.linked.issue.removeAria': 'הסר את ה-issue המקושר',
   'chat.chatInput.linked.pr.openInBrowserAria': 'פתח את בקשת המשיכה בדפדפן',
   'chat.chatInput.linked.mr.openInBrowserAria': 'פתח את בקשת המיזוג בדפדפן',
-  'chat.chatInput.linked.pr.number': 'PR #{number}',
   'chat.chatInput.linked.pr.removeAria': 'הסר את בקשת המשיכה המקושרת',
   'chat.chatInput.linked.mr.removeAria': 'הסר את בקשת המיזוג המקושרת',
   'chat.chatInput.placeholder.shell': 'הזן פקודת מעטפת…',
@@ -2730,6 +2730,7 @@ export const dict = {
   'chat.modelControls.noAgentSelected': 'לא נבחר סוכן.',
   'chat.modelControls.resetToDefault': 'אפס לברירת המחדל',
   'chat.modelControls.searchModels': 'חיפוש מודלים',
+  'chat.modelControls.modelListAria': 'מודלים',
   'chat.modelControls.searchAgents': 'חיפוש סוכנים',
   'chat.modelControls.noModelsFound': 'לא נמצאו מודלים',
   'chat.modelControls.favorites': 'מועדפים',
@@ -3526,8 +3527,7 @@ export const dict = {
   'chat.workStatus.pinned.unpinFailed': 'לא ניתן היה לבטל את הצמדת ההודעה',
   'chat.workStatus.action.openContext': 'פתח את חלונית ההקשר',
   'chat.workStatus.section.linkedIssues': 'מקושרים',
-  'chat.workStatus.linkedIssues.open': 'פתח את #{number} ב-GitHub',
-  'chat.workStatus.linkedIssues.openGitLab': 'פתח את {reference} ב-GitLab',
+  'chat.workStatus.linkedIssues.openOnProvider': 'פתח את {reference} ב-{provider}',
   'chat.workStatus.linkedIssues.unlink': 'הסר קישור',
   'chat.workStatus.linkedIssues.unlinkFailed': 'לא ניתן היה להסיר את הקישור',
   'chat.workStatus.linkedIssues.link': 'קשר להפעלה',
@@ -3808,13 +3808,17 @@ export const dict = {
   ...surfacePanelI18n.he,
   ...fileArtifactsI18n.he,
   ...fileContentSearchI18n.he,
+  ...fileEditorAidsI18n.he,
   ...htmlRenderI18n.he,
   ...sessionNoticesI18n.he,
   ...usageStatsI18n.he,
   ...webSearchI18n.he,
   ...sessionWarmingI18n.he,
+  ...overviewI18n.he,
   ...isolatedSpacesI18n.he,
   ...sourceBoardI18n.he,
+  ...stacksI18n.he,
+  ...changeReviewI18n.he,
   ...projectActionsI18n.he,
   ...gitIdentityEditorI18n.he,
   ...environmentI18n.he,
@@ -3879,4 +3883,8 @@ export const dict = {
   'diffView.whitespace.shown': 'שינויי רווחים מוצגים',
   'session.newWorktree.trust.skip': 'דילוג',
   'chat.revertPopover.toast.restoreFailed': 'לא ניתן היה לשחזר את ההודעות שבוטלו',
+  'notifications.error.bodyFallback': 'אירעה שגיאה',
+  'notifications.question.bodyFallback': 'הסוכן ממתין לתשובתך',
+  'notifications.permission.bodyFallback': 'הסוכן ממתין לאישורך',
+  'notifications.permission.title': 'נדרשת הרשאה',
 } as const;

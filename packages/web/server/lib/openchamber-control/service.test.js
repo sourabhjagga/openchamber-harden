@@ -401,14 +401,17 @@ describe('OpenChamber control service', () => {
     expect(client.session.active).toHaveBeenCalledTimes(2);
   });
 
-  it('filters sessions archived in OpenChamber state and adds global statuses', async () => {
+  it('filters archived sessions, with the archive file over OpenCode, and adds global statuses', async () => {
+    const entries = { ses_archived: 100, ses_restored: null };
     const { service, client } = createService({
       // Async like the real store (`openchamber-sessions/archive-store.js`).
-      archiveStore: { archivedAt: async (id) => (id === 'ses_archived' ? 100 : null) },
+      archiveStore: { entry: async (id) => entries[id] },
     });
     client.session.list.mockResolvedValue({ data: [
       { id: 'ses_active', location: { directory: '/repo' }, time: {} },
       { id: 'ses_archived', location: { directory: '/repo' }, time: {} },
+      { id: 'ses_upstream', location: { directory: '/repo' }, time: { archived: 50 } },
+      { id: 'ses_restored', location: { directory: '/repo' }, time: { archived: 70 } },
       { id: 'ses_other', location: { directory: '/other' }, time: {} },
     ] });
     client.session.active.mockResolvedValue({ ses_active: { type: 'running' } });
@@ -416,6 +419,7 @@ describe('OpenChamber control service', () => {
     await expect(service.execute('session.list', { limit: 10, withStatus: true })).resolves.toEqual({
       sessions: [
         { id: 'ses_active', location: { directory: '/repo' }, time: {}, status: { type: 'busy' } },
+        { id: 'ses_restored', location: { directory: '/repo' }, time: {}, status: { type: 'idle' } },
         { id: 'ses_other', location: { directory: '/other' }, time: {}, status: { type: 'idle' } },
       ],
       limit: 10,
@@ -675,6 +679,44 @@ describe('render.page', () => {
     expect(result.note).toContain("Don't announce");
   });
 
+  it('tells the agent which local images will not show and why', async () => {
+    const { service } = createService();
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'openchamber-render-images-'));
+    try {
+      const png = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
+      const file = (name) => path.join(root, name);
+      // 9 MiB each: two fit the 25 MiB page budget, the third and everything after it do not.
+      for (const name of ['a.png', 'b.png', 'c.png']) {
+        await fs.writeFile(file(name), png);
+        await fs.truncate(file(name), 9 * 1024 * 1024);
+      }
+      await fs.writeFile(file('d.png'), png);
+      await fs.writeFile(file('notes.png'), 'not an image');
+      const html = ['a.png', 'gone.png', 'notes.png', 'b.png', 'c.png', 'd.png'].map((name) => `<img src="${file(name)}">`).join('');
+
+      const result = await service.execute('render.page', { html, title: 'Photos' }, root);
+
+      expect(result).toMatchObject({ shown: true, title: 'Photos' });
+      expect(result.images).toEqual({
+        shown: 2,
+        notShown: [
+          { src: file('gone.png'), reason: 'file not found' },
+          { src: file('notes.png'), reason: 'not a readable PNG, JPEG, GIF or WebP of at most 10 MB' },
+          { src: file('c.png'), reason: 'past the page budget' },
+          { src: file('d.png'), reason: 'past the page budget' },
+        ],
+        weightMB: 27,
+        budgetMB: 25,
+      });
+      expect(result.note).toContain('split the page or use smaller images');
+
+      const fits = await service.execute('render.page', { html: `<img src="${file('a.png')}"><img src="${file('d.png')}">`, title: 'Two' }, root);
+      expect(fits).toEqual({ shown: true, title: 'Two', note: expect.not.stringContaining('do not show') });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('names a page sent without a title after its own title or first heading', async () => {
     const { service } = createService();
     const named = (html) => service.execute('render.page', { html }, '/repo').then((result) => result.title);
@@ -878,6 +920,54 @@ describe('browser close', () => {
     const { service, request } = createCloseService();
     await service.execute('browser.close', {}, '/repo');
     expect(request).toHaveBeenCalledWith('browser.close', {}, expect.anything());
+  });
+});
+
+describe('browser select', () => {
+  it('passes exactly one selection criterion to the browser', async () => {
+    const request = vi.fn(async (_action, parameters) => ({
+      selector: parameters.selector,
+      label: parameters.label ?? 'Canada',
+      value: parameters.value ?? 'ca',
+      url: 'https://example.test/',
+    }));
+    const { service } = createService({ browserControl: { request } });
+
+    await expect(service.execute('browser.select', {
+      selector: ' #country ',
+      label: 'Canada',
+      tabId: ' tab-1 ',
+    }, '/repo')).resolves.toEqual({
+      selector: '#country',
+      label: 'Canada',
+      value: 'ca',
+      url: 'https://example.test/',
+    });
+    expect(request).toHaveBeenCalledWith('browser.select', {
+      selector: '#country',
+      label: 'Canada',
+      tabId: 'tab-1',
+    }, expect.anything());
+
+    await service.execute('browser.select', { selector: '#country', value: '' }, '/repo');
+    expect(request).toHaveBeenLastCalledWith('browser.select', {
+      selector: '#country',
+      value: '',
+    }, expect.anything());
+  });
+
+  it.each([
+    [{ label: 'Canada' }, 'selector is required for browser.select'],
+    [{ selector: '  ', label: 'Canada' }, 'selector is required for browser.select'],
+    [{ selector: '#country' }, 'browser.select requires exactly one of label or value'],
+    [{ selector: '#country', label: 'Canada', value: 'ca' }, 'browser.select requires exactly one of label or value'],
+    [{ selector: '#country', label: 42 }, 'browser.select requires exactly one of label or value'],
+  ])('rejects invalid selection input before contacting the browser', async (input, message) => {
+    const request = vi.fn(async () => ({ ok: true }));
+    const { service } = createService({ browserControl: { request } });
+
+    await expect(service.execute('browser.select', input, '/repo')).rejects.toThrow(message);
+    expect(request).not.toHaveBeenCalled();
   });
 });
 

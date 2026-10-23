@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM oven/bun:1.4.3 AS base
+FROM oven/bun:1.4.4 AS base
 WORKDIR /app
 
 FROM base AS deps
@@ -47,7 +47,7 @@ RUN if [ "$PRUNE_DEV_DEPS" = "true" ]; then \
       && printf 'pruned node_modules: %s\n' "$(du -sh /app/node_modules | cut -f1)"; \
     fi
 
-FROM oven/bun:1.4.3 AS runtime
+FROM oven/bun:1.4.4 AS runtime
 WORKDIR /home/openchamber
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -228,7 +228,7 @@ RUN npm config set prefix /home/openchamber/.npm-global && mkdir -p /home/opench
     /home/openchamber/.config/opencode \
     /home/openchamber/.ssh \
     /home/openchamber/workspaces && \
-  npm install -g @opencode/cli@2.1.2
+  npm install -g @opencode/cli@2.1.3
 
 # The MCP servers that every workspace shares are installed once into the
 # persistent volume rather than carried in the image.

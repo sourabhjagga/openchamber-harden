@@ -44,7 +44,7 @@ Access tokens never appear here or in a `request` result.
 | Call | What it does |
 | --- | --- |
 | `toast({ kind, message })` | show a toast in the app. `kind` is `info`, `success`, or `error`. |
-| `openUrl(url)` | open a URL in the user's browser |
+| `openUrl(url)` | open a URL; in the desktop app a local address opens in the browser panel beside the chat |
 | `openSurface(surfaceId)` | show that screen, such as `"git"` or your own panel `"plugin:<panel id>"`. Resolves once it is on screen; a screen that is already open stays open. |
 | `writeClipboard(text)` | copy text. 1 to 32000 characters. |
 | `compose({ text, mode? })` | put text in the chat box without sending. `mode` is `append` (default) or `replace`. 1 to 16000 characters after trim. |

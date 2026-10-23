@@ -33,6 +33,7 @@ const autoEntry: ModelPickerEntry = { providerID: 'openchamber-auto', modelID: '
 
 const labels = {
   searchPlaceholder: 'Search models',
+  list: 'Models',
   noResults: 'No models found',
   favorites: 'Favorites',
   recent: 'Recent',
@@ -104,6 +105,9 @@ const renderPicker = async (leadingEntry: ModelPickerEntry | null = null) => {
 
 const rows = () => [...document.querySelectorAll<HTMLElement>('[role="option"]')];
 
+/** A row's text as it shows on screen, without the provider name kept for screen readers. */
+const visibleText = (row: HTMLElement) => row.textContent?.replace(row.querySelector('.sr-only')?.textContent ?? '', '');
+
 /** Points at a row and waits out the card's hover delay. */
 const hover = async (row: HTMLElement, x: number) => {
   await act(async () => {
@@ -117,7 +121,7 @@ const cardText = () => document.querySelector('[data-slot="tooltip-content"]')?.
 test('names the provider of each same-named favorite, without catalog data', async () => {
   await renderPicker();
   const [first, second] = rows();
-  expect(first.textContent).toBe(second.textContent);
+  expect(visibleText(first)).toBe(visibleText(second));
 
   await hover(first, 1);
   expect(cardText()).toBe('ProviderLab Cloud');

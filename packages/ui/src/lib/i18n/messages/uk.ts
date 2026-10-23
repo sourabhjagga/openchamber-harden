@@ -10,13 +10,17 @@ import { pluginPanelI18n } from './plugin-panel.i18n';
 import { surfacePanelI18n } from './surface-panel.i18n';
 import { fileArtifactsI18n } from './file-artifacts.i18n';
 import { fileContentSearchI18n } from './file-content-search.i18n';
+import { fileEditorAidsI18n } from './file-editor-aids.i18n';
 import { htmlRenderI18n } from './html-render.i18n';
 import { sessionNoticesI18n } from './session-notices.i18n';
 import { usageStatsI18n } from './usage-stats.i18n';
 import { webSearchI18n } from './websearch.i18n';
 import { sessionWarmingI18n } from './session-warming.i18n';
+import { overviewI18n } from './overview.i18n';
 import { isolatedSpacesI18n } from './isolated-spaces.i18n';
 import { sourceBoardI18n } from './source-board.i18n';
+import { stacksI18n } from './stacks.i18n';
+import { changeReviewI18n } from './change-review.i18n';
 import { projectActionsI18n } from './project-actions.i18n';
 import { gitIdentityEditorI18n } from './git-identity-editor.i18n';
 import { environmentI18n } from './environment.i18n';
@@ -55,6 +59,7 @@ export const dict: Record<I18nKey, string> = {
   'commitComparison.mode': 'Коміт',
   'pullRequestComparison.select': 'Виберіть пул-реквест',
   'pullRequestComparison.pickAbove': 'Виберіть пул-реквест угорі',
+  'pullRequestComparison.diffUnavailable': "{provider} не віддає диф пул-реквестів, тож тут їх не показати й не пройти",
   'pullRequestComparison.partial': 'Не вдалося завантажити частину пул-реквестів',
   'commitComparison.select': 'Вибрати коміт',
   'commitComparison.search': 'Пошук комітів...',
@@ -154,13 +159,17 @@ export const dict: Record<I18nKey, string> = {
   ...surfacePanelI18n.uk,
   ...fileArtifactsI18n.uk,
   ...fileContentSearchI18n.uk,
+  ...fileEditorAidsI18n.uk,
   ...htmlRenderI18n.uk,
   ...sessionNoticesI18n.uk,
   ...usageStatsI18n.uk,
   ...webSearchI18n.uk,
   ...sessionWarmingI18n.uk,
+  ...overviewI18n.uk,
   ...isolatedSpacesI18n.uk,
   ...sourceBoardI18n.uk,
+  ...stacksI18n.uk,
+  ...changeReviewI18n.uk,
   ...projectActionsI18n.uk,
   ...gitIdentityEditorI18n.uk,
   ...environmentI18n.uk,
@@ -707,6 +716,7 @@ export const dict: Record<I18nKey, string> = {
   "sessions.sidebar.session.work.markDone": "Позначити готовим",
   "sessions.sidebar.session.work.doneSuggested": "Схоже, готово",
   "sessions.sidebar.session.work.updateFailed": "Не вдалося оновити сесію",
+  "sessions.sidebar.session.work.folderDeleted": "Папку цієї сесії видалено",
   "sessions.sidebar.session.pin.pinFailed": "Не вдалося закріпити сесію",
   "sessions.sidebar.session.pin.unpinFailed": "Не вдалося відкріпити сесію",
   "chat.work.doneHint.text": "Схоже, тут усе готово.",
@@ -1192,6 +1202,7 @@ export const dict: Record<I18nKey, string> = {
   "gitView.sync.syncCounts": "{behind}↓ {ahead}↑",
   "gitView.branch.actionsUnavailable": "Дії з гілками недоступні в цьому стані сховища",
   "gitView.conflict.noDetailsAvailable": "Деталі конфлікту відсутні",
+  "magicPrompts.toast.loadFailed": "Не вдалося завантажити магічні промпти. Нічого не надіслано.",
   "gitView.empty.notGitRepository": "Цей каталог не є репозиторієм Git",
   "gitView.empty.notGitRepositoryDescription": "Ініціалізуйте Git у цьому каталозі або відкрийте сховище.",
   "gitView.empty.selectSessionOrDirectory": "Виберіть сесію або каталог, щоб переглянути статус Git",
@@ -1251,7 +1262,6 @@ export const dict: Record<I18nKey, string> = {
   "gitView.pr.mergeMethod.rebase": "Перебазувати та злити",
   "gitView.pr.mergeMethod.squash": "Squash і злиття",
   "gitView.pr.notMergeable": "Неможливо злити",
-  "gitView.pr.numberLabel": "PR #{number}",
   "gitView.pr.segment.checks": "Перевірки",
   "gitView.pr.comments.addAll": "Прикріпити все в чат",
   "gitView.pr.placeholder.additionalContext": "Будь-які обмеження, примітки щодо розгортання чи контекст рецензента...",
@@ -1375,6 +1385,7 @@ export const dict: Record<I18nKey, string> = {
   'gitView.mr.comparison.mode': 'MR',
   'gitView.mr.comparison.select': 'Виберіть MR',
   'gitView.mr.comparison.pickAbove': 'Виберіть MR угорі',
+  'gitView.mr.comparison.diffUnavailable': "{provider} не віддає диф MR, тож тут їх не показати й не пройти",
   'gitView.mr.comparison.partial': 'Не вдалося завантажити частину MR',
   'gitView.mr.comparison.searchPlaceholder': 'Пошук MR',
   'gitView.mr.comparison.loading': 'Завантаження MR...',
@@ -1384,9 +1395,6 @@ export const dict: Record<I18nKey, string> = {
   'gitView.mr.comparison.loadMoreFailed': 'Не вдалося завантажити додаткові MR',
   'gitView.mr.walkthroughScope': 'MR !{number}',
   'gitView.mr.createHint': 'Створюйте MR з цієї гілки та керуйте ними.',
-  'header.gitlab.connectedWithLogin': 'GitLab: {login}',
-  'header.gitlab.connected': 'GitLab підключено',
-  'header.gitlab.accountsTitle': 'Акаунти GitLab',
   "contextPanel.mode.context": "Контекст",
   "contextPanel.mode.preview": "Перегляд",
   "contextPanel.mode.browser": "Браузер",
@@ -2240,8 +2248,8 @@ export const dict: Record<I18nKey, string> = {
   "session.newWorktree.remoteBranches": "Віддалені гілки",
   "session.newWorktree.branchName": "Назва гілки",
   "session.newWorktree.branchNamePlaceholder": "feature/my-awesome-feature",
-  "session.newWorktree.actions.startFromGitHubIssuePr": "Почати з GitHub issue/PR",
-  'session.newWorktree.actions.startFromGitLabIssueMr': 'Issue або merge request з GitLab',
+  'session.newWorktree.actions.startFromRepository.pullRequest': 'Почати з {provider} issue/PR',
+  'session.newWorktree.actions.startFromRepository.mergeRequest': 'Issue або merge request з {provider}',
   "session.newWorktree.worktreeDirectory": "Каталог worktree",
   "session.newWorktree.worktreeDirectoryPlaceholder": "my-worktree-directory",
   "session.newWorktree.resetToMatchBranchName": "Скинути відповідно до назви гілки",
@@ -2249,7 +2257,6 @@ export const dict: Record<I18nKey, string> = {
   "session.newWorktree.selectSourceBranch": "Вибрати вихідну гілку",
   "session.newWorktree.selectSourceBranchPlaceholder": "Вибрати вихідну гілку...",
   "session.newWorktree.issueNumber": "issue №{number}",
-  "session.newWorktree.prNumber": "PR #{number}",
   "session.newWorktree.includeDiffBadge": "+diff",
   "session.newWorktree.fromSource": "з {source}",
   "session.newWorktree.actions.cancel": "Скасувати",
@@ -2417,6 +2424,7 @@ export const dict: Record<I18nKey, string> = {
   "chat.queuedMessage.send": "send",
   "chat.queuedMessage.removeAria": "Видалити з черги",
   "chat.queuedMessage.goal": "Почне ціль, коли буде надіслано",
+  "chat.queuedMessage.sendsAsAgent": "Буде надіслано як {agent}.",
   "chat.queuedMessage.reorderAria": "Перетягніть, щоб змінити порядок",
   "chat.queuedMessage.toast.queueFailed": "Не вдалося додати повідомлення в чергу. Воно повернулося в поле вводу.",
   "chat.queuedMessage.toast.takeFailed": "Не вдалося завантажити повідомлення з черги. Спробуйте ще раз.",
@@ -2554,7 +2562,6 @@ export const dict: Record<I18nKey, string> = {
   "chat.chatInput.linked.issue.removeAria": "Видалити пов’язану issue",
   "chat.chatInput.linked.pr.openInBrowserAria": "Відкрити PR в браузері",
   "chat.chatInput.linked.mr.openInBrowserAria": "Відкрити merge request у браузері",
-  "chat.chatInput.linked.pr.number": "PR #{number}",
   "chat.chatInput.linked.pr.removeAria": "Видалити пов’язаний PR",
   "chat.chatInput.linked.mr.removeAria": "Прибрати пов'язаний merge request",
   "chat.chatInput.placeholder.shell": "Введіть shell-команду...",
@@ -2739,6 +2746,7 @@ export const dict: Record<I18nKey, string> = {
   "chat.modelControls.noAgentSelected": "Агент не вибрано.",
   "chat.modelControls.resetToDefault": "Скинути до замовчування",
   "chat.modelControls.searchModels": "Пошук моделей",
+  "chat.modelControls.modelListAria": "Моделі",
   "chat.modelControls.searchAgents": "Пошук агентів",
   "chat.modelControls.noModelsFound": "Моделі не знайдено",
   "chat.modelControls.favorites": "Вибране",
@@ -3567,8 +3575,7 @@ export const dict: Record<I18nKey, string> = {
   'chat.workStatus.pinned.unpinFailed': 'Не вдалося відпінити повідомлення',
   'chat.workStatus.action.openContext': 'Відкрити панель контексту',
   'chat.workStatus.section.linkedIssues': 'Прилінковане',
-  'chat.workStatus.linkedIssues.open': 'Відкрити #{number} на GitHub',
-  'chat.workStatus.linkedIssues.openGitLab': 'Відкрити {reference} на GitLab',
+  'chat.workStatus.linkedIssues.openOnProvider': 'Відкрити {reference} на {provider}',
   'chat.workStatus.linkedIssues.unlink': 'Прибрати лінк',
   'chat.workStatus.linkedIssues.unlinkFailed': 'Не вдалося прибрати лінк',
   'chat.workStatus.linkedIssues.link': 'Прилінкувати до сесії',
@@ -3624,14 +3631,11 @@ export const dict: Record<I18nKey, string> = {
   'settings.mcp.page.connection.hintCommand': 'Запускається на цьому комп’ютері. Вставте цілу команду — вона розділиться на один аргумент у рядку.',
   'settings.mcp.page.connection.hintLink': 'Під’єднується до сервера, який хостить хтось інший. Вставте його https-адресу.',
   'mobile.changes.noRemote': 'No remote available',
-  'header.github.connectedWithLogin': 'GitHub: {login}',
-  'header.github.connected': 'GitHub підключено',
-  'header.github.avatarWithLogin': '{login} avatar',
-  'header.github.avatar': 'GitHub avatar',
-  'header.gitlab.avatar': 'GitLab avatar',
-  'header.github.accountsTitle': 'Акаунти GitHub',
-  'header.github.accountSource.oauth': 'OAuth',
-  'header.github.accountSource.cli': 'CLI',
+  'header.sourceControl.connectedWithLogin': '{provider}: {login}',
+  'header.sourceControl.connected': '{provider} підключено',
+  'header.sourceControl.avatarWithLogin': '{login} avatar',
+  'header.sourceControl.avatar': '{provider} avatar',
+  'header.sourceControl.accountsTitle': 'Акаунти {provider}',
   'gitView.toast.branchCreatedLocally': 'Branch created locally, but failed to set upstream.',
   'gitView.toast.pushedToUpstream': 'Pushed to {name}',
   'gitView.toast.pulledFromRemote': 'Отримано зміни з {name}',
@@ -3855,4 +3859,8 @@ export const dict: Record<I18nKey, string> = {
   'sessions.scheduledTasks.dialog.toast.alreadyRunning': 'Ця задача вже виконується',
   'sessions.scheduledTasks.dialog.toast.alreadyQueued': 'Ця задача вже чекає в черзі й запуститься, щойно звільниться місце',
   'chat.modelControls.agentFavoriteAdd': 'Додати в обрані. Коли є обрані, Tab перемикає лише між ними',
+  'notifications.error.bodyFallback': 'Сталася помилка',
+  'notifications.question.bodyFallback': 'Агент чекає на вашу відповідь',
+  'notifications.permission.bodyFallback': 'Агент чекає на ваше схвалення',
+  'notifications.permission.title': 'Потрібен дозвіл',
 };

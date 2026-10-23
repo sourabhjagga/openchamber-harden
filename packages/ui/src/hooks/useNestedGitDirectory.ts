@@ -2,6 +2,8 @@ import React from 'react';
 import { useShallow } from 'zustand/react/shallow';
 
 import { useRuntimeAPIs } from '@/hooks/useRuntimeAPIs';
+import { chooseAutoNestedRepo, discoversNestedRepos } from '@/lib/nestedRepositories';
+import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import {
   useEffectiveGitDirectory,
   useGitStore,
@@ -26,8 +28,10 @@ type UseNestedGitDirectoryOptions = {
 /**
  * Resolves the repository a git surface operates on when the project root may
  * not itself be a git repository. Owns the full resolution flow: probing the
- * root, discovering nested repositories, auto-selecting the first one, and
- * dropping a selection whose repository disappeared.
+ * root, discovering nested repositories (never in the home directory),
+ * auto-selecting the first one that is not under a dot-directory (#5357), and
+ * dropping a selection whose repository
+ * disappeared.
  *
  * A root repository with no commits yet (a fresh `git init`, #4886) hides
  * nothing below it: discovery keeps running, a nested selection keeps
@@ -45,6 +49,8 @@ export const useNestedGitDirectory = (
 ) => {
   const { enabled = true, recheckOnOpen = false } = options;
   const { git } = useRuntimeAPIs();
+  const homeDirectory = useDirectoryStore((state) => state.homeDirectory);
+  const searchesNested = root ? discoversNestedRepos(root, homeDirectory) : false;
 
   const rootIsGitRepo = useIsGitRepo(root);
   const rootIsUnborn = useIsUnbornGitRepo(root);
@@ -92,10 +98,10 @@ export const useNestedGitDirectory = (
   // Discover nested repositories once the root probe confirms it is not one,
   // or is one with no commits yet.
   React.useEffect(() => {
-    if (!enabled || !root) return;
+    if (!enabled || !root || !searchesNested) return;
     if (rootIsGitRepo !== false && !rootIsUnborn) return;
     void ensureNestedRepos(root);
-  }, [enabled, ensureNestedRepos, root, rootIsGitRepo, rootIsUnborn]);
+  }, [enabled, ensureNestedRepos, root, rootIsGitRepo, rootIsUnborn, searchesNested]);
 
   // Auto-select the first nested repository so the surface opens straight
   // into repository data; a picker (where rendered) switches between them.
@@ -114,8 +120,12 @@ export const useNestedGitDirectory = (
     const candidates = staleClearedSelections
       ? nestedRepos.filter((repository) => !staleClearedSelections.has(repository))
       : nestedRepos;
-    if (candidates.length === 0) return;
-    selectNestedRepo(root, candidates[0]);
+    // A repository hidden inside a dot-directory is tooling that carries a
+    // `.git` (`~/.oh-my-zsh`), so it stays in the picker but is never the
+    // automatic pick (#5357).
+    const autoSelected = chooseAutoNestedRepo(root, candidates);
+    if (!autoSelected) return;
+    selectNestedRepo(root, autoSelected);
   }, [
     enabled,
     nestedRepos,

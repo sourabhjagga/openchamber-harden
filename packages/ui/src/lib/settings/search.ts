@@ -1,24 +1,36 @@
-import type { I18nKey } from '@/lib/i18n/store';
+import type { I18nKey, I18nParams } from '@/lib/i18n/store';
 import { getCustomizableShortcutActions } from '@/lib/shortcuts';
 import { isIsolatedSpacesPageVisible } from '@/lib/spaces/release';
 import { useUIStore } from '@/stores/useUIStore';
+import { trackerPresentation } from '@/lib/trackers/presentation';
+import type { TrackerDescriptor } from '@/lib/trackers/types';
+import type { ChangeRequestTerm, SourceControlProviderDescriptor } from '@/lib/source-control/providers/descriptor';
 import type { SettingsPageSlug, SettingsRuntimeContext } from './metadata';
 import { getSettingsPageMeta } from './metadata';
 
-interface SettingsSearchItem {
+/**
+ * A title is a translated key, or a literal for an entry named after a
+ * product the server describes (a source-control provider's label), since
+ * product names stay untranslated in every locale.
+ */
+type SettingsSearchTitle =
+  | { titleKey: I18nKey; titleParams?: I18nParams; literalTitle?: never }
+  | { literalTitle: string; titleKey?: never; titleParams?: never };
+
+type SettingsSearchItem = SettingsSearchTitle & {
   id: string;
   page: SettingsPageSlug;
-  titleKey: I18nKey;
   descriptionKey?: I18nKey;
+  descriptionParams?: I18nParams;
   keywords?: string[];
   isAvailable?: (ctx: SettingsSearchAvailabilityContext) => boolean;
-}
+};
 
-export interface SettingsSearchResult extends SettingsSearchItem {
+export type SettingsSearchResult = SettingsSearchItem & {
   title: string;
   description: string | null;
   pageTitle: string;
-}
+};
 
 interface SettingsSearchAvailabilityContext extends SettingsRuntimeContext {
   isMobile: boolean;
@@ -546,16 +558,26 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     isAvailable: (ctx) => !ctx.isMobile,
   },
   {
+    id: 'chat.mobile-return-key-sends',
+    page: 'chat',
+    titleKey: 'settings.openchamber.visual.field.mobileReturnKeySends',
+    descriptionKey: 'settings.openchamber.visual.field.mobileReturnKeySendsHint',
+    keywords: ['enter', 'return', 'send', 'newline', 'keyboard', 'enterkeyhint', 'voice', 'dictation', 'swipe up'],
+    isAvailable: (ctx) => ctx.isMobile,
+  },
+  {
     id: 'sessions.default-model',
     page: 'sessions',
     titleKey: 'settings.openchamber.defaults.field.defaultModel',
-    keywords: ['model', 'provider', 'new sessions'],
+    keywords: ['model', 'provider', 'new sessions', 'thinking', 'reasoning', 'variant'],
   },
   {
-    id: 'sessions.default-thinking',
+    id: 'sessions.fallback-model',
     page: 'sessions',
-    titleKey: 'settings.openchamber.defaults.field.defaultThinking',
-    keywords: ['thinking', 'reasoning', 'variant'],
+    titleKey: 'settings.openchamber.defaults.field.fallbackModel',
+    descriptionKey: 'settings.openchamber.defaults.field.fallbackModelInfo',
+    keywords: ['fallback', 'backup', 'usage limit', 'quota', 'rate limit', 'model', 'thinking'],
+    isAvailable: (ctx) => !ctx.isVSCode,
   },
   {
     id: 'sessions.default-agent',
@@ -574,15 +596,7 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     page: 'sessions',
     titleKey: 'settings.openchamber.defaults.field.sessionWarming',
     descriptionKey: 'settings.openchamber.defaults.field.sessionWarmingInfo',
-    keywords: ['warming', 'warm', 'cache', 'prompt cache', 'keep-alive', 'idle', 'per session', 'keep warm'],
-  },
-  {
-    id: 'sessions.warming-duration',
-    page: 'sessions',
-    titleKey: 'settings.openchamber.defaults.sessionWarming.duration',
-    keywords: ['warming', 'warm', 'duration', 'how long', 'hour', 'cache'],
-    // VS Code shows only OpenCode's switch, without a duration.
-    isAvailable: (ctx) => !ctx.isVSCode,
+    keywords: ['warming', 'warm', 'cache', 'prompt cache', 'keep-alive', 'idle', 'per session', 'keep warm', 'duration', 'how long', 'hour'],
   },
   {
     id: 'sessions.permission-default',
@@ -618,7 +632,7 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     page: 'sessions',
     titleKey: 'settings.openchamber.defaults.smallModel.title',
     descriptionKey: 'settings.openchamber.defaults.smallModel.description',
-    keywords: ['small model', 'utility', 'summary', 'recap', 'cheap', 'override'],
+    keywords: ['small model', 'utility', 'summary', 'recap', 'cheap', 'override', 'thinking', 'reasoning', 'effort', 'variant'],
   },
   {
     id: 'sessions.walkthrough-model',
@@ -871,21 +885,6 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     // Unreleased: searching for a setting that is not rendered would take the
     // user to an empty spot on the page.
     isAvailable: (ctx) => !ctx.isVSCode && useUIStore.getState().agentMemoryFeatureAvailable,
-  },
-  {
-    id: 'git.gitlab-account',
-    page: 'integrations',
-    titleKey: 'settings.gitlab.title',
-    descriptionKey: 'settings.gitlab.info',
-    keywords: ['gitlab', 'account', 'oauth', 'pat', 'merge request', 'issues', 'glab'],
-    isAvailable: (ctx) => !ctx.isVSCode,
-  },
-  {
-    id: 'git.gitlab-connect',
-    page: 'integrations',
-    titleKey: 'settings.gitlab.actions.connect',
-    keywords: ['gitlab', 'connect', 'add account', 'oauth', 'pat', 'token', 'instance'],
-    isAvailable: (ctx) => !ctx.isVSCode,
   },
   {
     id: 'routing.token',
@@ -1359,6 +1358,13 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     keywords: ['external repository', 'add source', 'catalog'],
   },
   {
+    id: 'magic-prompts.scope',
+    page: 'magic-prompts',
+    titleKey: 'settings.magicPrompts.page.scope.label',
+    keywords: ['global', 'project', 'project overrides', 'project.json', 'inherit'],
+    isAvailable: (ctx) => !ctx.isVSCode,
+  },
+  {
     id: 'magic-prompts.visible-prompt',
     page: 'magic-prompts',
     titleKey: 'settings.magicPrompts.page.block.visiblePrompt',
@@ -1403,6 +1409,13 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     keywords: ['tts', 'read aloud', 'voice', 'provider', 'speech rate', 'speech pitch', 'speech volume', 'tts input mode', 'markdown'],
   },
   {
+    id: 'voice.auto-read-aloud',
+    page: 'voice',
+    titleKey: 'settings.voice.page.field.autoReadAloud',
+    descriptionKey: 'settings.voice.page.tooltip.autoReadAloud',
+    keywords: ['tts', 'read aloud', 'automatic', 'auto', 'speech', 'finished', 'reply'],
+  },
+  {
     id: 'voice.speech-recognition',
     page: 'voice',
     titleKey: 'settings.voice.page.section.speechRecognition',
@@ -1413,14 +1426,14 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     page: 'tunnel',
     titleKey: 'settings.openchamber.tunnel.field.provider',
     descriptionKey: 'settings.openchamber.tunnel.description',
-    keywords: ['remote access', 'cloudflare', 'ngrok'],
+    keywords: ['remote access', 'cloudflare', 'ngrok', 'tailscale', 'tailnet'],
     isAvailable: (ctx) => !ctx.isVSCode && !ctx.enterpriseMode,
   },
   {
     id: 'tunnel.type',
     page: 'tunnel',
     titleKey: 'settings.openchamber.tunnel.field.tunnelType',
-    keywords: ['quick', 'managed remote', 'managed local'],
+    keywords: ['quick', 'managed remote', 'managed local', 'serve', 'funnel', 'https port'],
     isAvailable: (ctx) => !ctx.isVSCode && !ctx.enterpriseMode,
   },
   {
@@ -1483,45 +1496,6 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     isAvailable: (ctx) => !ctx.isVSCode,
   },
   {
-    id: 'integrations.github',
-    page: 'integrations',
-    titleKey: 'settings.integrations.github.title',
-    descriptionKey: 'settings.integrations.github.description',
-    keywords: ['github', 'account', 'oauth', 'gh', 'cli', 'prs', 'pull request', 'issues', 'connect'],
-    isAvailable: (ctx) => !ctx.isVSCode,
-  },
-  {
-    id: 'git.github-connect',
-    page: 'integrations',
-    titleKey: 'settings.github.page.actions.connect',
-    keywords: ['github', 'connect', 'add account', 'oauth', 'device flow'],
-    isAvailable: (ctx) => !ctx.isVSCode,
-  },
-  {
-    id: 'integrations.linear',
-    page: 'integrations',
-    titleKey: 'settings.integrations.linear.title',
-    descriptionKey: 'settings.integrations.linear.description',
-    keywords: ['linear', 'issues', 'oauth', 'connect', 'workspace'],
-    isAvailable: (ctx) => !ctx.isVSCode,
-  },
-  {
-    id: 'integrations.linear.add-workspace',
-    page: 'integrations',
-    titleKey: 'settings.integrations.linear.actions.addWorkspace',
-    descriptionKey: 'settings.integrations.linear.description',
-    keywords: ['linear', 'workspace', 'add', 'connect', 'oauth'],
-    isAvailable: (ctx) => !ctx.isVSCode,
-  },
-  {
-    id: 'integrations.linear.mapping',
-    page: 'integrations',
-    titleKey: 'settings.integrations.linear.mapping.defaultProject',
-    descriptionKey: 'settings.integrations.linear.mapping.defaultProject.info',
-    keywords: ['linear', 'project', 'team', 'map', 'workspace', 'directory'],
-    isAvailable: (ctx) => !ctx.isVSCode,
-  },
-  {
     id: 'integrations.third-party',
     page: 'integrations',
     titleKey: 'settings.integrations.thirdParty.title',
@@ -1578,6 +1552,14 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     isAvailable: (ctx) => !ctx.isVSCode && !ctx.isMobile,
   },
   {
+    id: 'extensions.browse',
+    page: 'extensions',
+    titleKey: 'settings.extensions.browse.label',
+    descriptionKey: 'settings.extensions.browse.hint',
+    keywords: ['community', 'catalog', 'marketplace', 'store', 'gallery', 'website', 'discover', 'find', 'extension'],
+    isAvailable: (ctx) => !ctx.isVSCode && !ctx.isMobile && !ctx.enterpriseMode,
+  },
+  {
     id: 'extensions.gitIdentity',
     page: 'extensions',
     titleKey: 'settings.extensions.identity.title',
@@ -1598,8 +1580,99 @@ interface BuildSettingsSearchResultsOptions {
   query: string;
   runtimeCtx: SettingsSearchAvailabilityContext;
   visiblePageSlugs?: SettingsPageSlug[];
-  t: (key: I18nKey) => string;
+  t: (key: I18nKey, params?: I18nParams) => string;
   getPageTitle: (slug: SettingsPageSlug) => string;
+  /** The trackers the connected server serves; each adds its own entries. */
+  trackers?: readonly TrackerDescriptor[];
+  /** The source-control providers the connected server serves; each adds its card and connect entries. */
+  sourceControlProviders?: readonly SourceControlProviderDescriptor[];
+}
+
+const CHANGE_REQUEST_SEARCH_NOUNS = {
+  pullRequest: ['pull request', 'pr', 'issues'],
+  mergeRequest: ['merge request', 'mr', 'issues'],
+  change: ['change', 'code review', 'patchset'],
+} satisfies Record<ChangeRequestTerm, string[]>;
+
+/**
+ * Each served source-control provider's entries on the Integrations page: its
+ * card, `integrations.source-control.<id>`, and the connect block inside it,
+ * `.connect`. The card is the anchor `SourceControlProviderCard` renders, so a
+ * provider the server adds is searchable with no entry of its own here.
+ */
+function sourceControlSearchItems(providers: readonly SourceControlProviderDescriptor[]): SettingsSearchItem[] {
+  const notInVSCode = (ctx: SettingsSearchAvailabilityContext) => !ctx.isVSCode;
+  return providers.flatMap((descriptor) => {
+    const term = descriptor.terminology.changeRequest;
+    const id = `integrations.source-control.${descriptor.id}`;
+    const params = { provider: descriptor.label };
+    const keywords = [
+      descriptor.id,
+      descriptor.label.toLowerCase(),
+      ...CHANGE_REQUEST_SEARCH_NOUNS[term],
+      'account',
+      'token',
+      ...(descriptor.auth.cliName ? [descriptor.auth.cliName] : []),
+    ];
+    return [
+      {
+        id,
+        page: 'integrations',
+        literalTitle: descriptor.label,
+        descriptionKey: `settings.sourceControl.provider.description.${term}`,
+        descriptionParams: params,
+        keywords,
+        isAvailable: notInVSCode,
+      },
+      {
+        id: `${id}.connect`,
+        page: 'integrations',
+        titleKey: 'settings.sourceControl.actions.connect',
+        titleParams: params,
+        keywords: [...keywords, 'connect', 'add account', 'instance', 'oauth', 'pat'],
+        isAvailable: notInVSCode,
+      },
+    ];
+  });
+}
+
+/**
+ * Each served tracker's entries on the Integrations page: the tracker itself,
+ * adding an account and its project mapping where its capabilities offer
+ * them. Ids are `integrations.<tracker>[.add-workspace|.mapping]`, the ids
+ * Linear's entries always had. A tracker without words of its own has none.
+ */
+function trackerSearchItems(trackers: readonly TrackerDescriptor[]): SettingsSearchItem[] {
+  const notInVSCode = (ctx: SettingsSearchAvailabilityContext) => !ctx.isVSCode;
+  return trackers.flatMap((descriptor) => {
+    const search = trackerPresentation(descriptor.id).settingsSearch;
+    if (!search) return [];
+    const id = `integrations.${descriptor.id}`;
+    const items: SettingsSearchItem[] = [
+      { id, page: 'integrations', titleKey: search.title, descriptionKey: search.description, keywords: search.keywords, isAvailable: notInVSCode },
+    ];
+    if (descriptor.capabilities.multipleAccounts) {
+      items.push({
+        id: `${id}.add-workspace`,
+        page: 'integrations',
+        titleKey: search.addAccount.title,
+        descriptionKey: search.description,
+        keywords: search.addAccount.keywords,
+        isAvailable: notInVSCode,
+      });
+    }
+    if (descriptor.capabilities.projectMapping) {
+      items.push({
+        id: `${id}.mapping`,
+        page: 'integrations',
+        titleKey: search.mapping.title,
+        descriptionKey: search.mapping.description,
+        keywords: search.mapping.keywords,
+        isAvailable: notInVSCode,
+      });
+    }
+    return items;
+  });
 }
 
 function normalizeSearchText(value: string): string {
@@ -1612,6 +1685,8 @@ export function buildSettingsSearchResults({
   visiblePageSlugs,
   t,
   getPageTitle,
+  trackers = [],
+  sourceControlProviders = [],
 }: BuildSettingsSearchResultsOptions): SettingsSearchResult[] {
   const normalizedQuery = normalizeSearchText(query);
   if (!normalizedQuery) {
@@ -1621,7 +1696,11 @@ export function buildSettingsSearchResults({
   const allowedPages = visiblePageSlugs ? new Set<SettingsPageSlug>(visiblePageSlugs) : null;
   const terms = normalizedQuery.split(/\s+/).filter(Boolean);
 
-  return SETTINGS_SEARCH_ITEMS.flatMap((item) => {
+  return [
+    ...SETTINGS_SEARCH_ITEMS,
+    ...sourceControlSearchItems(sourceControlProviders),
+    ...trackerSearchItems(trackers),
+  ].flatMap((item) => {
     if (allowedPages && !allowedPages.has(item.page)) {
       return [];
     }
@@ -1631,8 +1710,8 @@ export function buildSettingsSearchResults({
       return [];
     }
 
-    const title = t(item.titleKey);
-    const description = item.descriptionKey ? t(item.descriptionKey) : null;
+    const title = item.literalTitle !== undefined ? item.literalTitle : t(item.titleKey, item.titleParams);
+    const description = item.descriptionKey ? t(item.descriptionKey, item.descriptionParams) : null;
     const haystack = normalizeSearchText([
       title,
       description,

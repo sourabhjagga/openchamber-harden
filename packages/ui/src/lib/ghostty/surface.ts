@@ -392,6 +392,40 @@ export function isTerminalPasteShortcut(
   return isMacPlatform(platform) ? event.metaKey : event.ctrlKey && event.shiftKey;
 }
 
+/**
+ * macOS reserves Super (Cmd) for the application: no terminal program binds
+ * Cmd chords, and every menu accelerator (Cmd+B sidebar, Cmd+J terminal dock,
+ * Cmd+Q quit, the edit roles, ...) registers at the app level. The encoder
+ * drops Super for printable keys, so feeding these chords to the pty types
+ * stray text (Cmd+B sends "b") while preventDefault hides the chord from its
+ * accelerator. Stand down for every Super chord and let the app claim it.
+ * Option (Alt) is the terminal's Meta key on macOS and stays untouched.
+ */
+export function isTerminalMacAppShortcut(
+  event: Pick<KeyboardEvent, 'ctrlKey' | 'metaKey'>,
+  platform = navigator.platform,
+) {
+  return isMacPlatform(platform) && event.metaKey && !event.ctrlKey;
+}
+
+/**
+ * On Windows and Linux the app zoom chords (Ctrl + =/-/0) belong to the
+ * embedding app: the desktop shell registers them as menu accelerators for
+ * font zoom, and the browser maps them to page zoom on the web. Ctrl+symbol
+ * combos have no legacy mapping, so encoding them would emit stray input and
+ * preventDefault would hide the key from the accelerator. Stand down instead
+ * and let the event reach it untouched. On macOS the Cmd chords are covered
+ * by `isTerminalMacAppShortcut`.
+ */
+export function isTerminalZoomShortcut(
+  event: Pick<KeyboardEvent, 'altKey' | 'code' | 'ctrlKey' | 'metaKey' | 'shiftKey'>,
+  platform = navigator.platform,
+) {
+  if (isMacPlatform(platform) || event.altKey || event.shiftKey) return false;
+  if (event.code !== 'Equal' && event.code !== 'Minus' && event.code !== 'Digit0') return false;
+  return event.ctrlKey && !event.metaKey;
+}
+
 // How long a delivered shortcut read keeps waiting for its native paste event.
 // WebKit dispatches that event after a UI-process round trip, so it can land
 // after the clipboard read has already resolved.
@@ -1277,6 +1311,14 @@ export class GhosttyTerminalSurface {
           },
         );
       }
+      return;
+    }
+    if (isTerminalMacAppShortcut(event) || isTerminalZoomShortcut(event)) {
+      // No preventDefault: the menu accelerator (or the browser's own chord
+      // handling and page zoom on the web) fires only when the renderer leaves the
+      // key alone. Swallow the release so Kitty report-event-types sessions
+      // do not see a release for a press the shell never received.
+      this.suppressedKeyCodes.add(event.code);
       return;
     }
     // keyCode 229 is Safari's only signal that this keydown opens an IME

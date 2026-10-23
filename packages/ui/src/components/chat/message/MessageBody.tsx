@@ -11,6 +11,7 @@ import type { StreamPhase, ToolPopupContent, AgentMentionInfo } from './types';
 import type { TurnChangedFile, TurnGroupingContext } from '../lib/turns/types';
 import { cn } from '@/lib/utils';
 import { isEmptyTextPart, extractTextContent } from './partUtils';
+import { isInvisibleText } from '@/lib/invisibleText';
 import { FadeInOnReveal } from './FadeInOnReveal';
 import { SessionNoticeBlock } from './SessionNoticeBlock';
 import { readSessionNoticePart } from '@/lib/opencode/session-notices';
@@ -1566,14 +1567,12 @@ const AssistantMessageBody = React.memo(({
         [messageId, t, vscodeApi]
     );
 
-    // The turn footer saves the whole reply: the text the turn's earlier steps
-    // wrote, then every text part of this message. A reply of one text part
-    // keeps the copy of what the chat rendered.
+    // Re-render every part so folded text and settled highlighting are included.
     const earlierAssistantText = turnGroupingContext?.earlierAssistantText;
     const shareTurnAsImage = React.useCallback(
         async (requestedSourceElement?: HTMLElement | null) => {
             const segments = [...(earlierAssistantText ?? []), ...assistantTextSegments(assistantTextParts)];
-            if (segments.length <= 1) {
+            if (segments.length === 0) {
                 await shareMessageAsImage(requestedSourceElement);
                 return;
             }
@@ -1708,7 +1707,13 @@ const AssistantMessageBody = React.memo(({
             }
 
             if (part.type === 'reasoning') {
-                if (showReasoningTraces) {
+                // Empty reasoning draws nothing once it has ended, so it must
+                // not count as content before the answer (no divider). While it
+                // streams it stays mounted: ReasoningPart shows its busy header
+                // before the first reasoning text arrives.
+                const reasoningEnded = part.time?.end !== undefined
+                    || (effectiveStreamPhase !== 'streaming' && effectiveStreamPhase !== 'cooldown');
+                if (showReasoningTraces && !(reasoningEnded && isInvisibleText(part.text))) {
                     if (!collapsibleThinkingBlocks) {
                         // Non-collapsible mode: render thinking blocks as plain text inline.
                         rendered.push(

@@ -10,13 +10,17 @@ import { pluginPanelI18n } from './plugin-panel.i18n';
 import { surfacePanelI18n } from './surface-panel.i18n';
 import { fileArtifactsI18n } from './file-artifacts.i18n';
 import { fileContentSearchI18n } from './file-content-search.i18n';
+import { fileEditorAidsI18n } from './file-editor-aids.i18n';
 import { htmlRenderI18n } from './html-render.i18n';
 import { sessionNoticesI18n } from './session-notices.i18n';
 import { usageStatsI18n } from './usage-stats.i18n';
 import { webSearchI18n } from './websearch.i18n';
 import { sessionWarmingI18n } from './session-warming.i18n';
+import { overviewI18n } from './overview.i18n';
 import { isolatedSpacesI18n } from './isolated-spaces.i18n';
 import { sourceBoardI18n } from './source-board.i18n';
+import { stacksI18n } from './stacks.i18n';
+import { changeReviewI18n } from './change-review.i18n';
 import { projectActionsI18n } from './project-actions.i18n';
 import { gitIdentityEditorI18n } from './git-identity-editor.i18n';
 import { environmentI18n } from './environment.i18n';
@@ -55,6 +59,7 @@ export const dict: Record<I18nKey, string> = {
   'commitComparison.mode': 'コミット',
   'pullRequestComparison.select': 'プルリクエストを選択',
   'pullRequestComparison.pickAbove': '上でプルリクエストを選択してください',
+  'pullRequestComparison.diffUnavailable': "{provider} はプルリクエストの差分を提供していないため、ここでは表示もウォークスルーもできません",
   'pullRequestComparison.partial': '一部のプルリクエストを読み込めませんでした',
   'commitComparison.select': 'コミットを選択',
   'commitComparison.search': 'コミットを検索...',
@@ -144,13 +149,17 @@ export const dict: Record<I18nKey, string> = {
   ...surfacePanelI18n.ja,
   ...fileArtifactsI18n.ja,
   ...fileContentSearchI18n.ja,
+  ...fileEditorAidsI18n.ja,
   ...htmlRenderI18n.ja,
   ...sessionNoticesI18n.ja,
   ...usageStatsI18n.ja,
   ...webSearchI18n.ja,
   ...sessionWarmingI18n.ja,
+  ...overviewI18n.ja,
   ...isolatedSpacesI18n.ja,
   ...sourceBoardI18n.ja,
+  ...stacksI18n.ja,
+  ...changeReviewI18n.ja,
   ...projectActionsI18n.ja,
   ...gitIdentityEditorI18n.ja,
   ...environmentI18n.ja,
@@ -644,14 +653,11 @@ export const dict: Record<I18nKey, string> = {
   'sessions.archivePage.restoreSessionAria': '{title} を復元',
   'sessions.switcher.openAria': 'セッションスイッチャーを開く',
   'header.sessionTabs.stripAria': '開いているセッション',
-  'header.github.connectedWithLogin': 'GitHub: {login}',
-  'header.github.connected': 'GitHubに接続済み',
-  'header.github.avatarWithLogin': '{login}のアバター',
-  'header.github.avatar': 'GitHubアバター',
-  'header.gitlab.avatar': 'GitLabアバター',
-  'header.github.accountsTitle': 'GitHubアカウント',
-  'header.github.accountSource.oauth': 'OAuth',
-  'header.github.accountSource.cli': 'CLI',
+  'header.sourceControl.connectedWithLogin': '{provider}: {login}',
+  'header.sourceControl.connected': '{provider}に接続済み',
+  'header.sourceControl.avatarWithLogin': '{login}のアバター',
+  'header.sourceControl.avatar': '{provider}アバター',
+  'header.sourceControl.accountsTitle': '{provider}アカウント',
   'header.sessionTabs.tabMenuAria': 'セッションタブの操作',
   'header.sessionTabs.closeTab': 'タブを閉じる',
   'header.sessionTabs.closeOtherTabs': '他のタブを閉じる',
@@ -706,6 +712,7 @@ export const dict: Record<I18nKey, string> = {
   'sessions.sidebar.session.work.markDone': '完了にする',
   'sessions.sidebar.session.work.doneSuggested': '完了したようです',
   'sessions.sidebar.session.work.updateFailed': 'セッションを更新できませんでした',
+  'sessions.sidebar.session.work.folderDeleted': 'このセッションのフォルダーは削除されました',
   'sessions.sidebar.session.pin.pinFailed': 'セッションをピン留めできませんでした',
   'sessions.sidebar.session.pin.unpinFailed': 'セッションのピン留めを解除できませんでした',
   'chat.work.doneHint.text': 'この作業は完了したようです。',
@@ -1197,6 +1204,7 @@ export const dict: Record<I18nKey, string> = {
   'gitView.sync.syncCounts': '{behind}↓ {ahead}↑',
   'gitView.branch.actionsUnavailable': 'このリポジトリ状態ではブランチ操作は利用できません',
   'gitView.conflict.noDetailsAvailable': '競合の詳細はありません',
+  'magicPrompts.toast.loadFailed': 'マジックプロンプトを読み込めませんでした。何も送信されていません。',
   'gitView.empty.notGitRepository': 'このディレクトリはGitリポジトリではありません',
   'gitView.empty.notGitRepositoryDescription': 'このディレクトリでGitを初期化するか、リポジトリを開いてください。',
   'gitView.empty.selectSessionOrDirectory': 'セッションまたはディレクトリを選択してGitステータスを表示',
@@ -1256,7 +1264,6 @@ export const dict: Record<I18nKey, string> = {
   'gitView.pr.mergeMethod.rebase': 'リベースしてマージ',
   'gitView.pr.mergeMethod.squash': 'スカッシュしてマージ',
   'gitView.pr.notMergeable': 'マージ不可',
-  'gitView.pr.numberLabel': 'PR #{number}',
   'gitView.pr.segment.checks': 'チェック',
   'gitView.pr.comments.addAll': 'すべてチャットに添付',
   'gitView.pr.placeholder.additionalContext': '制約、ロールアウトノート、レビューアーコンテキスト...',
@@ -1383,6 +1390,7 @@ export const dict: Record<I18nKey, string> = {
   'gitView.mr.comparison.mode': 'マージリクエスト',
   'gitView.mr.comparison.select': 'マージリクエストを選択',
   'gitView.mr.comparison.pickAbove': '上でマージリクエストを選択してください',
+  'gitView.mr.comparison.diffUnavailable': "{provider} はマージリクエストの差分を提供していないため、ここでは表示もウォークスルーもできません",
   'gitView.mr.comparison.partial': '一部のマージリクエストを読み込めませんでした',
   'gitView.mr.comparison.searchPlaceholder': 'マージリクエストを検索',
   'gitView.mr.comparison.loading': 'マージリクエストを読み込み中...',
@@ -1392,9 +1400,6 @@ export const dict: Record<I18nKey, string> = {
   'gitView.mr.comparison.loadMoreFailed': 'さらにマージリクエストを読み込めませんでした',
   'gitView.mr.walkthroughScope': 'MR !{number}',
   'gitView.mr.createHint': 'このブランチからマージリクエストを作成・管理します。',
-  'header.gitlab.connectedWithLogin': 'GitLab: {login}',
-  'header.gitlab.connected': 'GitLabに接続済み',
-  'header.gitlab.accountsTitle': 'GitLabアカウント',
   'contextPanel.mode.context': 'コンテキスト',
   'contextPanel.mode.preview': 'プレビュー',
   'contextPanel.mode.browser': 'ブラウザ',
@@ -2270,8 +2275,8 @@ export const dict: Record<I18nKey, string> = {
   'session.newWorktree.remoteBranches': 'リモートブランチ',
   'session.newWorktree.branchName': 'ブランチ名',
   'session.newWorktree.branchNamePlaceholder': 'feature/my-awesome-feature',
-  'session.newWorktree.actions.startFromGitHubIssuePr': 'GitHub Issue/PRから開始',
-  'session.newWorktree.actions.startFromGitLabIssueMr': 'GitLab の Issue またはマージリクエスト',
+  'session.newWorktree.actions.startFromRepository.pullRequest': '{provider} Issue/PRから開始',
+  'session.newWorktree.actions.startFromRepository.mergeRequest': '{provider} の Issue またはマージリクエスト',
   'session.newWorktree.worktreeDirectory': 'ワークツリーディレクトリ',
   'session.newWorktree.worktreeDirectoryPlaceholder': 'my-worktree-directory',
   'session.newWorktree.resetToMatchBranchName': 'ブランチ名に合わせてリセット',
@@ -2279,7 +2284,6 @@ export const dict: Record<I18nKey, string> = {
   'session.newWorktree.selectSourceBranch': 'ソースブランチを選択',
   'session.newWorktree.selectSourceBranchPlaceholder': 'ソースブランチを選択...',
   'session.newWorktree.issueNumber': 'Issue #{number}',
-  'session.newWorktree.prNumber': 'PR #{number}',
   'session.newWorktree.includeDiffBadge': '+diff',
   'session.newWorktree.fromSource': 'from {source}',
   'session.newWorktree.actions.cancel': 'キャンセル',
@@ -2447,6 +2451,7 @@ export const dict: Record<I18nKey, string> = {
   'chat.queuedMessage.send': '送信',
   'chat.queuedMessage.removeAria': 'キューから削除',
   'chat.queuedMessage.goal': '送信時にゴールを開始',
+  'chat.queuedMessage.sendsAsAgent': '{agent} として送信します。',
   'chat.queuedMessage.reorderAria': 'ドラッグして並び替え',
   'chat.queuedMessage.toast.queueFailed': 'メッセージをキューに追加できませんでした。入力欄に戻しました。',
   'chat.queuedMessage.toast.takeFailed': 'キューのメッセージを読み込めませんでした。もう一度お試しください。',
@@ -2584,7 +2589,6 @@ export const dict: Record<I18nKey, string> = {
   'chat.chatInput.linked.issue.removeAria': 'リンクされたIssueを削除',
   'chat.chatInput.linked.pr.openInBrowserAria': 'ブラウザでプルリクエストを開く',
   'chat.chatInput.linked.mr.openInBrowserAria': 'マージリクエストをブラウザで開く',
-  'chat.chatInput.linked.pr.number': 'PR #{number}',
   'chat.chatInput.linked.pr.removeAria': 'リンクされたプルリクエストを削除',
   'chat.chatInput.linked.mr.removeAria': 'リンクされたマージリクエストを削除',
   'chat.chatInput.placeholder.shell': 'シェルコマンドを入力...',
@@ -2784,6 +2788,7 @@ export const dict: Record<I18nKey, string> = {
   'chat.modelControls.noAgentSelected': 'エージェントが選択されていません。',
   'chat.modelControls.resetToDefault': 'デフォルトにリセット',
   'chat.modelControls.searchModels': 'モデルを検索',
+  'chat.modelControls.modelListAria': 'モデル',
   'chat.modelControls.searchAgents': 'エージェントを検索',
   'chat.modelControls.noModelsFound': 'モデルが見つかりません',
   'chat.modelControls.favorites': 'お気に入り',
@@ -3578,8 +3583,7 @@ export const dict: Record<I18nKey, string> = {
   'chat.workStatus.pinned.unpinFailed': 'ピン留めを解除できませんでした',
   'chat.workStatus.action.openContext': 'コンテキストパネルを開く',
   'chat.workStatus.section.linkedIssues': 'リンク済み',
-  'chat.workStatus.linkedIssues.open': 'GitHub で #{number} を開く',
-  'chat.workStatus.linkedIssues.openGitLab': 'GitLab で {reference} を開く',
+  'chat.workStatus.linkedIssues.openOnProvider': '{provider} で {reference} を開く',
   'chat.workStatus.linkedIssues.unlink': 'リンクを解除',
   'chat.workStatus.linkedIssues.unlinkFailed': 'リンクを解除できませんでした',
   'chat.workStatus.linkedIssues.link': 'セッションにリンク',
@@ -3854,4 +3858,8 @@ export const dict: Record<I18nKey, string> = {
   'sessions.scheduledTasks.dialog.toast.alreadyRunning': 'このタスクはすでに実行中です',
   'sessions.scheduledTasks.dialog.toast.alreadyQueued': 'このタスクはすでにキューで待機中です。空きができ次第実行されます',
   'chat.modelControls.agentFavoriteAdd': 'お気に入りに追加。お気に入りがあると、Tab はその中だけを切り替えます',
+  'notifications.error.bodyFallback': 'エラーが発生しました',
+  'notifications.question.bodyFallback': 'エージェントが回答を待っています',
+  'notifications.permission.bodyFallback': 'エージェントが承認を待っています',
+  'notifications.permission.title': '権限が必要です',
 };

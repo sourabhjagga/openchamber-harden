@@ -107,6 +107,7 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
 
     const labels = React.useMemo(() => ({
         searchPlaceholder: t('settings.agents.modelSelector.searchPlaceholder'),
+        list: t('chat.modelControls.modelListAria'),
         noResults: t('settings.agents.modelSelector.state.noModelsFound'),
         favorites: t('settings.agents.modelSelector.section.favorites'),
         recent: t('settings.agents.modelSelector.section.recent'),
