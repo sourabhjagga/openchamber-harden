@@ -1,0 +1,86 @@
+name: Upstream Sync (Nightly Maintenance)
+
+on:
+  schedule:
+    # 21:30 UTC = 03:00 AM IST every night
+    - cron: '30 21 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Bypass the 2-day soak period and sync immediately'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  sync-upstream:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git Author
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Check Upstream Releases
+        id: check_release
+        run: |
+          git remote add upstream https://github.com/openchamber/openchamber.git || true
+          git fetch upstream --tags
+
+          # Find the latest release tag matching v*
+          LATEST_TAG="$(git tag -l "v*" --sort=-creatordate | head -n 1)"
+          if [ -z "$LATEST_TAG" ]; then
+            echo "No upstream tags found."
+            exit 0
+          fi
+          echo "latest_tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
+
+          # Check if tag is already merged
+          if git merge-base --is-ancestor "$LATEST_TAG" HEAD; then
+            echo "Fork is already up to date with $LATEST_TAG."
+            echo "sync_needed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Found new upstream release: $LATEST_TAG"
+          TAG_DATE="$(git log -1 --format=%ct "$LATEST_TAG")"
+          NOW="$(date +%s)"
+          AGE_HOURS=$(( (NOW - TAG_DATE) / 3600 ))
+          echo "Tag age: ${AGE_HOURS}h"
+
+          FORCE="${{ inputs.force }}"
+          if [ "$FORCE" != "true" ] && [ "$AGE_HOURS" -lt 48 ]; then
+            echo "Release $LATEST_TAG is ${AGE_HOURS}h old (< 48h soak window). Waiting for stability."
+            echo "sync_needed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Release $LATEST_TAG is ready to be absorbed (${AGE_HOURS}h old, soak passed)."
+          echo "sync_needed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Merge Upstream Release & Update Image Tag
+        if: steps.check_release.outputs.sync_needed == 'true'
+        run: |
+          TAG="${{ steps.check_release.outputs.latest_tag }}"
+          echo "Merging release $TAG..."
+          git merge --no-edit "$TAG" -m "sync: absorb upstream release $TAG"
+
+          # Update the image tag in docker-compose.yaml to match the newly absorbed release
+          if [ -f docker-compose.yaml ]; then
+            sed -i "s|sourabhjagga/openchamber-harden:v[0-9.]*|sourabhjagga/openchamber-harden:${TAG}|g" docker-compose.yaml
+            if ! git diff --quiet docker-compose.yaml; then
+              git add docker-compose.yaml
+              git commit -m "chore(deploy): pin image tag to ${TAG} in compose"
+            fi
+          fi
+
+          echo "Pushing changes to main branch (triggers CircleCI deploy pipeline)..."
+          git push origin main

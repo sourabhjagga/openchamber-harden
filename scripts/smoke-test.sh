@@ -52,46 +52,29 @@ else
   bad "GET / -> $code"
 fi
 
-# --- the shared MCP bridge ------------------------------------------------
-section "shared MCP bridge"
-bridge_reply="$(curl -s --max-time 10 -X POST "http://${HOST}:${BRIDGE_PORT}/mcp" \
-  -H 'Content-Type: application/json' \
-  -H 'Accept: application/json, text/event-stream' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}' 2>/dev/null || true)"
-case "$bridge_reply" in
-  *doppler-api-readonly*) ok "port ${BRIDGE_PORT} answers initialize (doppler-api-readonly)" ;;
-  *) bad "port ${BRIDGE_PORT} did not answer initialize" "${bridge_reply:-no response}" ;;
-esac
-
-if ps -eo command 2>/dev/null | grep -q 'bin/openchamber-bridge'; then
-  ok "bridge process is alive"
+# --- core runtime tooling --------------------------------------------------
+section "tooling"
+if command -v node >/dev/null 2>&1; then
+  node_ver="$(node --version 2>&1)"
+  case "$node_ver" in
+    v24.*) ok "node version is $node_ver (Node 24)" ;;
+    *) bad "expected Node 24, got $node_ver" ;;
+  esac
 else
-  bad "bridge process is not running"
+  bad "node is missing"
 fi
 
-# --- the shared MCP servers ------------------------------------------------
-# Each launcher prints one JSON-RPC line naming its server. The launchers put
-# their install back if the volume was emptied, so this also exercises the
-# unpack path.
-section "MCP servers"
-mcp_probe() {
-  name="$1"
-  binary="$2"
-  pattern="$3"
-  if [ ! -x "$binary" ]; then
-    bad "$name: launcher missing at $binary"
-    return
-  fi
-  reply="$(printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}' \
-    | timeout 60 "$binary" 2>/dev/null | head -c 400)"
-  case "$reply" in
-    *"$pattern"*) ok "$name answers initialize" ;;
-    *) bad "$name did not answer initialize" "${reply:-no response}" ;;
-  esac
-}
+if command -v uv >/dev/null 2>&1 && command -v uvx >/dev/null 2>&1; then
+  ok "uv and uvx are available ($(uv --version))"
+else
+  bad "uv or uvx is missing"
+fi
 
-mcp_probe "markitdown" "${HOME_DIR}/.config/opencode/bin/markitdown-mcp" '"name":"markitdown"'
-mcp_probe "analytics-mcp" "${HOME_DIR}/.config/opencode/bin/analytics-mcp" 'Google Analytics MCP Server'
+if command -v opencode >/dev/null 2>&1; then
+  ok "opencode is available ($(opencode --version 2>/dev/null || echo ok))"
+else
+  bad "opencode is missing"
+fi
 
 # --- the browser -----------------------------------------------------------
 # The Server Browser extension starts the browser from PATH without a sandbox
@@ -292,16 +275,6 @@ else console.log(`FAIL ${missing.length} runtime imports do not resolve: ${missi
     *) bad "runtime module resolution" "$resolve_out" ;;
   esac
 fi
-
-# --- the installs kept in the volume --------------------------------------
-section "vendored installs"
-for name in analytics-mcp markitdown supergateway; do
-  if [ -f "${HOME_DIR}/.mcp-vendor/${name}.tar.gz" ]; then
-    ok "${name} archive present"
-  else
-    bad "${name} archive missing from ${HOME_DIR}/.mcp-vendor"
-  fi
-done
 
 # --- process hygiene -------------------------------------------------------
 section "processes"

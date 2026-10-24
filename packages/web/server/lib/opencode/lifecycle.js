@@ -5,7 +5,6 @@ import net from 'node:net';
 import { stripAppImageArgv0Leak, stripAppImageLauncherEnv } from '../inherited-env.js';
 import { assignInjectedEnv } from '../injected-env.js';
 import { registerManagedProcess, unregisterManagedProcess, reapOrphanedProcesses } from './managed-process-registry.js';
-import { killMcpChildrenOf, reapOrphanedMcpServers, reapOrphanedOpencodeServers } from './mcp-process-cleanup.js';
 import { hasChildProcessExited, stopOpenCodeByClosingStdin, waitForChildProcessClose } from './managed-process-stop.js';
 import { applyProviderEnvAliases } from './provider-env-aliases.js';
 import { overlayEnvironment } from '../environment/variables.js';
@@ -24,11 +23,6 @@ const HEALTH_CHECK_MAX_CONSECUTIVE_FAILURES = parsePositiveInt(
   20
 );
 const HEALTH_CHECK_INTERVAL_OVERRIDE_MS = parsePositiveInt(process.env.OPENCHAMBER_OPENCODE_HEALTH_INTERVAL_MS, 0);
-
-// How often the orphaned OpenCode and MCP servers are reclaimed. Short
-// enough that a stray CLI command cannot hold much memory for long, long
-// enough that the process scan is not itself a cost.
-const ORPHAN_REAP_INTERVAL_MS = parsePositiveInt(process.env.OPENCHAMBER_ORPHAN_REAP_INTERVAL_MS, 120000);
 const HEALTH_CHECK_RESULT_CACHE_MS = parsePositiveInt(process.env.OPENCHAMBER_OPENCODE_HEALTH_CACHE_MS, 750);
 const OPENCODE_HEALTH_PATH = '/api/info';
 const OPENCODE_REQUIRED_MAJOR_VERSION = 2;
@@ -322,20 +316,8 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
       return;
     }
 
-    // The MCP servers this OpenCode started are detached, so the group kill
-    // below does not reach them. End them while their parent is still alive
-    // to identify them, or they are reparented to init and keep their memory
-    // for the rest of the container's life.
-    try {
-      const killedMcp = await killMcpChildrenOf(pid);
-      if (killedMcp > 0) {
-        console.log(`[lifecycle] stopped ${killedMcp} MCP server(s) owned by OpenCode pid ${pid}`);
-      }
-    } catch (error) {
-      console.warn('[lifecycle] could not stop MCP servers of the OpenCode process:', error?.message ?? error);
-    }
-
-    const signalProcessTree = (signal) => {      if (process.platform !== 'win32') {
+    const signalProcessTree = (signal) => {
+      if (process.platform !== 'win32') {
         try {
           process.kill(-pid, signal);
         } catch {
@@ -1162,20 +1144,6 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
         console.warn('[lifecycle] orphan reap failed:', error?.message ?? error);
       }
 
-      // An OpenCode server that was killed leaves two things behind: the MCP
-      // servers it started, which are detached and get reparented to init,
-      // and the server itself when the owner died before it could be torn
-      // down. Both keep their memory for the rest of the container's life.
-      // Reclaim them before this instance starts its own.
-      try {
-        const reapedServers = await reapOrphanedOpencodeServers({ log: (msg) => console.log(msg) });
-        if (reapedServers > 0) console.log(`[lifecycle] startup reaped ${reapedServers} orphaned OpenCode server(s)`);
-        const reapedMcp = await reapOrphanedMcpServers({ log: (msg) => console.log(msg) });
-        if (reapedMcp > 0) console.log(`[lifecycle] startup reaped ${reapedMcp} orphaned MCP server(s)`);
-      } catch (error) {
-        console.warn('[lifecycle] MCP orphan reap failed:', error?.message ?? error);
-      }
-
       syncFromHmrState();
       if (await isOpenCodeProcessHealthy()) {
         console.log(`[HMR] Reusing existing OpenCode process on port ${state.openCodePort}`);
@@ -1566,37 +1534,6 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
     }, effectiveIntervalMs);
   };
 
-  /**
-   * Reclaim the processes that pile up outside the managed server's own
-   * lifetime.
-   *
-   * Running an `opencode` command inside this container starts a second
-   * OpenCode server for the directory it runs in. That server opens an MCP
-   * connection per configured server, and the CLI exits without stopping it,
-   * so the server and its MCP servers are left running with nobody using
-   * them. On a host with many MCP servers that is over a gigabyte per stray
-   * command. The startup pass only runs once, so this repeats it while the
-   * host is up.
-   */
-  const startOrphanReapMonitoring = () => {
-    if (state.orphanReapInterval) {
-      clearInterval(state.orphanReapInterval);
-    }
-    state.orphanReapInterval = setInterval(async () => {
-      try {
-        const reapedServers = await reapOrphanedOpencodeServers({ log: (msg) => console.log(msg) });
-        const reapedMcp = await reapOrphanedMcpServers({ log: (msg) => console.log(msg) });
-        if (reapedServers > 0 || reapedMcp > 0) {
-          console.log(`[lifecycle] reaped ${reapedServers} orphaned OpenCode server(s) and ${reapedMcp} orphaned MCP server(s)`);
-        }
-      } catch (error) {
-        console.warn('[lifecycle] periodic orphan reap failed:', error?.message ?? error);
-      }
-    }, ORPHAN_REAP_INTERVAL_MS);
-    // The timer must not keep the process alive on its own.
-    state.orphanReapInterval.unref?.();
-  };
-
   return {
     /** The managed OpenCode's launch environment; null for an external OpenCode or before the first launch. */
     getManagedOpenCodeProcessEnv: () => (state.isExternalOpenCode ? null : managedProcessEnv),
@@ -1627,7 +1564,6 @@ export const createOpenCodeLifecycleRuntime = (deps) => {
     refreshOpenCodeAfterConfigChange,
     bootstrapOpenCodeAtStartup,
     startHealthMonitoring,
-    startOrphanReapMonitoring,
     triggerHealthCheck,
     waitForPortRelease,
   };

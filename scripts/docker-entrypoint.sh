@@ -6,14 +6,6 @@ HOME="/home/openchamber"
 OPENCODE_CONFIG_DIR="${OPENCODE_CONFIG_DIR:-${HOME}/.config/opencode}"
 export OPENCODE_CONFIG_DIR
 
-# The MCP servers that every workspace shares live in the persistent volume.
-# The image carries a compressed copy of each install, so the volume can be
-# filled without a network round trip, and the launcher in front of each
-# server fills it again if the volume was ever emptied.
-VENDOR_DIR="${HOME}/.config/opencode/vendor"
-VENDOR_ARCHIVES="${HOME}/.mcp-vendor"
-MCP_BIN_DIR="${HOME}/.config/opencode/bin"
-
 SSH_DIR="${HOME}/.ssh"
 SSH_PRIVATE_KEY_PATH="${SSH_DIR}/id_ed25519"
 SSH_PUBLIC_KEY_PATH="${SSH_PRIVATE_KEY_PATH}.pub"
@@ -76,145 +68,30 @@ fi
 OPENCHAMBER_HOST="${OPENCHAMBER_HOST:-0.0.0.0}"
 export OPENCHAMBER_HOST
 
-# The MCP servers that every workspace shares live in the persistent volume.
-# The image carries a compressed copy of each install, so the volume can be
-# filled without a network round trip, and the launcher in front of each
-# server fills it again if the volume was ever emptied.
-unpack_vendor() {
-  # unpack_vendor <name> <path inside the install that proves it is complete>
-  name="$1"
-  probe="$2"
-  archive="${VENDOR_ARCHIVES}/${name}.tar.gz"
-  target="${VENDOR_DIR}/${name}"
-  [ -f "$archive" ] || return 1
-  [ -e "${target}/${probe}" ] && return 0
-  mkdir -p "$VENDOR_DIR"
-  tar xzf "$archive" -C "$VENDOR_DIR"
-  [ -e "${target}/${probe}" ]
-}
-
-if unpack_vendor analytics-mcp bin/analytics-mcp; then
-  echo "[entrypoint] analytics-mcp is in place"
-else
-  echo "[entrypoint] warning: analytics-mcp is not available" >&2
-fi
-
-if unpack_vendor markitdown bin/markitdown-mcp; then
-  echo "[entrypoint] markitdown-mcp is in place"
-else
-  echo "[entrypoint] warning: markitdown-mcp is not available" >&2
-fi
-
-if unpack_vendor supergateway bin/supergateway; then
-  echo "[entrypoint] supergateway is in place"
-else
-  echo "[entrypoint] warning: supergateway is not available" >&2
-fi
-
-# The launcher in front of each server puts its install back if the volume
-# was emptied. It is written here, and into the volume, because the config
-# points at these paths and the volume has to survive a wipe.
-mkdir -p "$MCP_BIN_DIR"
-
-cat > "${MCP_BIN_DIR}/analytics-mcp" <<'LAUNCHER_EOF'
-#!/bin/sh
-# Launcher for the analytics-mcp server.
-#
-# The install lives in the persistent volume. If the volume was emptied, the
-# launcher puts it back from the copy in the image, so the server starts
-# without waiting on a package registry.
-set -eu
-VENDOR_DIR="${HOME}/.config/opencode/vendor"
-VENV="${VENDOR_DIR}/analytics-mcp"
-if [ ! -x "${VENV}/bin/analytics-mcp" ]; then
-  mkdir -p "$VENDOR_DIR"
-  tar xzf "${HOME}/.mcp-vendor/analytics-mcp.tar.gz" -C "$VENDOR_DIR"
-fi
-exec "${VENV}/bin/analytics-mcp" "$@"
-LAUNCHER_EOF
-chmod 0755 "${MCP_BIN_DIR}/analytics-mcp"
-
-cat > "${MCP_BIN_DIR}/markitdown-mcp" <<'LAUNCHER_EOF'
-#!/bin/sh
-# Launcher for the markitdown-mcp server.
-#
-# The install lives in the persistent volume. If the volume was emptied, the
-# launcher puts it back from the copy in the image, so the server starts
-# without waiting on a package registry.
-set -eu
-VENDOR_DIR="${HOME}/.config/opencode/vendor"
-VENV="${VENDOR_DIR}/markitdown"
-if [ ! -x "${VENV}/bin/markitdown-mcp" ]; then
-  mkdir -p "$VENDOR_DIR"
-  tar xzf "${HOME}/.mcp-vendor/markitdown.tar.gz" -C "$VENDOR_DIR"
-fi
-exec "${VENV}/bin/markitdown-mcp" "$@"
-LAUNCHER_EOF
-chmod 0755 "${MCP_BIN_DIR}/markitdown-mcp"
-
-# The shared Doppler MCP server, started once for the whole container. Every
-# project reaches it over HTTP instead of running a copy of its own.
-#
-# The wrapper is written here rather than in the image because a Dockerfile RUN
-# would have Docker substitute the shell variables in it before the script
-# ever saw them, and the script would then look for its token file in the
-# current directory. Writing it at start time, with a quoted heredoc, keeps
-# every variable for the script that runs it.
-BRIDGE_DIR="${HOME}/.npm-global/bin"
-BRIDGE_BIN="${BRIDGE_DIR}/openchamber-bridge"
-BRIDGE_PORT="${OPENCHAMBER_BRIDGE_PORT:-8910}"
-SUPERGATEWAY_BIN="${VENDOR_DIR}/supergateway/bin/supergateway"
-
-if [ -x "$SUPERGATEWAY_BIN" ]; then
-  mkdir -p "$BRIDGE_DIR"
-  cat > "$BRIDGE_BIN" <<'BRIDGE_EOF'
-#!/bin/sh
-# Shared Doppler MCP server, reached over HTTP by every project.
-#
-# Not exec: the wrapper stays as the process so that its own command line
-# carries the marker the orphan sweep looks for. The sweep would otherwise
-# end this bridge like any other stray MCP server.
-set -eu
-DOPPLER_TOKEN_FILE="${DOPPLER_TOKEN_FILE:-/home/openchamber/.config/opencode/doppler_token}"
-DOPPLER_TOKEN="${DOPPLER_TOKEN:-}"
-if [ -z "$DOPPLER_TOKEN" ] && [ -r "$DOPPLER_TOKEN_FILE" ]; then
-  DOPPLER_TOKEN="$(tr -d '[:space:]' < "$DOPPLER_TOKEN_FILE")"
-fi
-export DOPPLER_TOKEN
-SUPERGATEWAY="${HOME}/.config/opencode/vendor/supergateway/bin/supergateway"
-if [ ! -x "$SUPERGATEWAY" ]; then
-  mkdir -p "${HOME}/.config/opencode/vendor"
-  tar xzf "${HOME}/.mcp-vendor/supergateway.tar.gz" -C "${HOME}/.config/opencode/vendor"
-fi
-# Deliberately not exec: the shell has to stay as the surviving process, because
-# its own command line is what carries the openchamber-bridge marker that the
-# orphan sweep looks for. Replacing it with the supergateway process drops the
-# marker, and the sweep then ends the bridge like any other stray MCP server.
-"$SUPERGATEWAY" \
-  --stdio "node /home/openchamber/.config/opencode/node_modules/@dopplerhq/mcp-server/dist/index.js --read-only" \
-  --port "${OPENCHAMBER_BRIDGE_PORT:-8910}" \
-  --outputTransport streamableHttp
-BRIDGE_EOF
-  chmod 0755 "$BRIDGE_BIN"
-
-  echo "[entrypoint] starting the shared MCP bridge on port ${BRIDGE_PORT}..."
-  OPENCHAMBER_BRIDGE_PORT="$BRIDGE_PORT" nohup "$BRIDGE_BIN" >/tmp/openchamber-bridge.log 2>&1 &
-  BRIDGE_WAITED=0
-  while [ "$BRIDGE_WAITED" -lt 30 ]; do
-    if curl -s -o /dev/null --max-time 2 \
-      -X POST "http://127.0.0.1:${BRIDGE_PORT}/mcp" \
-      -H "Content-Type: application/json" \
-      -H "Accept: application/json, text/event-stream" \
-      -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"openchamber","version":"1"}}}'; then
-      echo "[entrypoint] MCP bridge is up"
-      break
-    fi
-    sleep 1
-    BRIDGE_WAITED=$((BRIDGE_WAITED + 1))
-  done
-  if [ "$BRIDGE_WAITED" -ge 30 ]; then
-    echo "[entrypoint] warning: the MCP bridge did not come up, see /tmp/openchamber-bridge.log" >&2
-  fi
+# Background orphan process sweeper
+# Detached MCP child processes reparented to init (PID 1) hold memory after their
+# caller exits. Sweep reparented MCP processes periodically without disturbing live sessions.
+ORPHAN_SWEEP_INTERVAL="${ORPHAN_SWEEP_INTERVAL:-900}"
+if [ "${ORPHAN_SWEEP_ENABLED:-true}" = "true" ]; then
+  (
+    while true; do
+      sleep "$ORPHAN_SWEEP_INTERVAL"
+      ps -eo pid,ppid,args 2>/dev/null | while read -r p_pid p_ppid p_cmd; do
+        if [ "$p_ppid" = "1" ] && [ -n "$p_pid" ] && [ "$p_pid" != "1" ]; then
+          case "$p_cmd" in
+            *mcp*|*markitdown*)
+              case "$p_cmd" in
+                *openchamber*|*cli.js*) ;;
+                *)
+                  kill -TERM "$p_pid" 2>/dev/null || true
+                  ;;
+              esac
+              ;;
+          esac
+        fi
+      done
+    done
+  ) >/dev/null 2>&1 &
 fi
 
 echo "[entrypoint] starting..."

@@ -183,22 +183,6 @@ chmod 0755 /usr/local/bin/chromium
 RUN_EOF
 RUN /usr/local/bin/chromium --version
 
-# Engram, the persistent memory server. One static Go binary, no runtime
-# dependency stack, and it is what both the `engram` MCP entry and the
-# OpenChamber Engram panel shell out to, so it has to be on PATH for them.
-#
-# The version is pinned and the archive checksum is verified, so a rebuilt
-# image always carries the same binary and a tampered download fails the
-# build instead of shipping.
-ARG ENGRAM_VERSION=3.5.2
-ARG ENGRAM_SHA256=b0ba49cf5a7d5af436c9744a9a0d638b3f9ebb2a7321c8736d30e96305c2993c
-RUN curl -fsSL -o /tmp/engram.tar.gz \
-    "https://github.com/Gentleman-Programming/engram/releases/download/v${ENGRAM_VERSION}/engram_${ENGRAM_VERSION}_linux_arm64.tar.gz" \
-  && echo "${ENGRAM_SHA256}  /tmp/engram.tar.gz" | sha256sum -c - \
-  && tar -xzf /tmp/engram.tar.gz -C /usr/local/bin engram \
-  && rm -f /tmp/engram.tar.gz \
-  && engram --version
-
 # Node.js: ARG default is the major, tracked by Renovate (bumps only when a
 # new major ships); setup_${NODE_VERSION}.x resolves the latest patch of that
 # line at build time.
@@ -228,48 +212,7 @@ RUN npm config set prefix /home/openchamber/.npm-global && mkdir -p /home/opench
     /home/openchamber/.config/opencode \
     /home/openchamber/.ssh \
     /home/openchamber/workspaces && \
-  npm install -g @opencode/cli@2.1.3
-
-# The MCP servers that every workspace shares are installed once into the
-# persistent volume rather than carried in the image.
-#
-# OpenCode opens one MCP connection per project location, so a local MCP
-# server runs once per location. These three are the same for every location,
-# so they are installed once and shared.
-#
-# The image keeps a compressed copy of each install. The entry point unpacks
-# them into the volume when they are missing, and the launcher in front of
-# each server unpacks it again if the volume was ever emptied. Nothing here
-# needs the network, so a start up never waits on a package registry.
-#
-# The Python venvs are built at the path they will live at. A venv records its
-# own absolute path in the shebang of every script inside it, so an install
-# that is built somewhere else and moved would not start.
-ARG ANALYTICS_MCP_VERSION=0.7.0
-ARG MARKITDOWN_MCP_VERSION=0.0.1a8
-ARG SUPERGATEWAY_VERSION=4.2.0
-RUN mkdir -p /home/openchamber/.mcp-vendor \
-  && mkdir -p /home/openchamber/.config/opencode/vendor \
-  && uv venv /home/openchamber/.config/opencode/vendor/analytics-mcp --python /usr/bin/python3.13 \
-  && uv pip install --python /home/openchamber/.config/opencode/vendor/analytics-mcp/bin/python "analytics-mcp==${ANALYTICS_MCP_VERSION:?unset}" \
-  && uv venv /home/openchamber/.config/opencode/vendor/markitdown --python /usr/bin/python3.13 \
-  && uv pip install --python /home/openchamber/.config/opencode/vendor/markitdown/bin/python "markitdown-mcp==${MARKITDOWN_MCP_VERSION:?unset}" \
-  && npm install --prefix /home/openchamber/.config/opencode/vendor/supergateway "supergateway@${SUPERGATEWAY_VERSION:?unset}" \
-  && mkdir -p /home/openchamber/.config/opencode/vendor/supergateway/bin \
-  && ln -sf ../node_modules/.bin/supergateway /home/openchamber/.config/opencode/vendor/supergateway/bin/supergateway \
-  && test -x /home/openchamber/.config/opencode/vendor/analytics-mcp/bin/analytics-mcp \
-  && test -x /home/openchamber/.config/opencode/vendor/markitdown/bin/markitdown-mcp \
-  && test -x /home/openchamber/.config/opencode/vendor/supergateway/bin/supergateway \
-  && /home/openchamber/.config/opencode/vendor/supergateway/bin/supergateway --version \
-  && tar czf /home/openchamber/.mcp-vendor/analytics-mcp.tar.gz -C /home/openchamber/.config/opencode/vendor analytics-mcp \
-  && tar czf /home/openchamber/.mcp-vendor/markitdown.tar.gz -C /home/openchamber/.config/opencode/vendor markitdown \
-  && tar czf /home/openchamber/.mcp-vendor/supergateway.tar.gz -C /home/openchamber/.config/opencode/vendor supergateway \
-  && rm -rf /home/openchamber/.config/opencode/vendor/analytics-mcp \
-              /home/openchamber/.config/opencode/vendor/markitdown \
-              /home/openchamber/.config/opencode/vendor/supergateway \
-  && test -f /home/openchamber/.mcp-vendor/analytics-mcp.tar.gz \
-  && test -f /home/openchamber/.mcp-vendor/markitdown.tar.gz \
-  && test -f /home/openchamber/.mcp-vendor/supergateway.tar.gz
+  npm install -g @opencode/cli@2.1.4
 
 # cloudflared 2026.3.0 - update digest explicitly when upgrading
 COPY --from=cloudflare/cloudflared@sha256:6d91c121b803126f7a5344005d17a9324788fc09d305b6e2560ec6040a7ae283 /usr/local/bin/cloudflared /usr/local/bin/cloudflared
