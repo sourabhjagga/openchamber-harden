@@ -71,7 +71,26 @@ jobs:
         run: |
           TAG="${{ steps.check_release.outputs.latest_tag }}"
           echo "Merging release $TAG..."
-          git merge --no-edit "$TAG" -m "sync: absorb upstream release $TAG"
+          if ! git merge --no-edit "$TAG" -m "sync: absorb upstream release $TAG"; then
+            echo "Handling upstream workflow conflicts..."
+            sh .fork/sync-upstream-workflows.sh
+
+            # Fail only if there are real code conflicts outside .github/workflows
+            UNMERGED="$(git diff --name-only --diff-filter=U)"
+            if [ -n "$UNMERGED" ]; then
+              echo "Merge has real code conflicts outside workflows:"
+              echo "$UNMERGED"
+              exit 1
+            fi
+
+            git commit --no-edit -m "sync: absorb upstream release $TAG"
+          else
+            sh .fork/sync-upstream-workflows.sh
+            if ! git diff --quiet .github/workflows; then
+              git add .github/workflows
+              git commit -m "chore(ci): reconcile upstream workflows"
+            fi
+          fi
 
           # Update the image tag in docker-compose.yaml to match the newly absorbed release
           if [ -f docker-compose.yaml ]; then

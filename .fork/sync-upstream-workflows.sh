@@ -83,27 +83,27 @@ restore() {
 }
 
 apply() {
-  for wf in $DISABLED_WORKFLOWS; do
-    if [ -f ".github/workflows/$wf" ]; then
-      git rm -f --quiet ".github/workflows/$wf"
-      echo "disabled .github/workflows/$wf"
-    else
-      echo "skip $wf (already disabled)"
-    fi
-  done
-
-  for wf in $PATCHED_WORKFLOWS; do
-    path=".github/workflows/$wf"
-    if [ ! -f "$path" ]; then
-      echo "skip $wf (missing, not patching)"
-      continue
-    fi
-    if grep -q "$UPSTREAM_RUNNER" "$path"; then
-      sed -i "s|$UPSTREAM_RUNNER|$FORK_RUNNER|g" "$path"
-      echo "repointed $wf: $UPSTREAM_RUNNER -> $FORK_RUNNER"
-    else
-      echo "skip $wf (no upstream runner label to repoint)"
-    fi
+  for wf in .github/workflows/*.yml; do
+    [ -f "$wf" ] || continue
+    name="$(basename "$wf")"
+    case "$name" in
+      upstream-sync.yml)
+        # Fork-owned sync workflow, keep untouched
+        ;;
+      oc-review.yml)
+        # Keep and repoint runner
+        if grep -q "$UPSTREAM_RUNNER" "$wf"; then
+          sed -i "s|$UPSTREAM_RUNNER|$FORK_RUNNER|g" "$wf"
+          echo "repointed $name: $UPSTREAM_RUNNER -> $FORK_RUNNER"
+        fi
+        git add "$wf" 2>/dev/null || true
+        ;;
+      *)
+        # All other upstream-only workflows (bots, desktop, mobile, nix, docs)
+        git rm -f --quiet "$wf" 2>/dev/null || rm -f "$wf"
+        echo "disabled $name"
+        ;;
+    esac
   done
 }
 
