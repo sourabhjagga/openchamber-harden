@@ -21,6 +21,7 @@ import { registerGitRoutes } from '../git/routes.js';
 import { registerDevServerRoutes } from '../dev-servers/routes.js';
 import { registerMagicPromptRoutes } from '../magic-prompts/routes.js';
 import { registerSessionFoldersRoutes } from '../session-folders/routes.js';
+import { registerSessionDraftRoutes } from '../session-drafts/routes.js';
 import { registerProjectContextRoutes } from '../project-context/routes.js';
 import { registerProjectDirectoryRoutes, registerProjectSetupRoutes } from '../projects/routes.js';
 import { registerAgentMemoryRoutes } from '../agent-memory/routes.js';
@@ -28,6 +29,7 @@ import { registerSessionKnowledgeRoutes } from '../session-knowledge/routes.js';
 import { registerMessageSearchRoutes } from '../message-search/routes.js';
 import { registerPermissionAutoAcceptRoutes } from '../permission-auto-accept/runtime.js';
 import { registerMessageQueueRoutes } from '../message-queue/runtime.js';
+import { registerWorkflowRoutes } from '../workflows/routes.js';
 import { registerRoutingPromptRewrite, registerRoutingRoutes } from '../routing/routes.js';
 import { registerConfigEntityRoutes } from './config-entity-routes.js';
 import { registerSettingsUtilityRoutes } from './core-routes.js';
@@ -118,6 +120,7 @@ export const createFeatureRoutesRuntime = (dependencies) => {
 
   let walkthroughService = null;
   let walkthroughBindingService = null;
+  let magicPrompts = null;
   let gitRepositoryCredentialRuntime = null;
   let networkOperations = null;
   let gitWorktreeCreation = null;
@@ -129,6 +132,12 @@ export const createFeatureRoutesRuntime = (dependencies) => {
       ]);
       walkthroughService = {
         ...service,
+        // The reader's preferences, the Walkthrough Magic Prompt as the
+        // directory's project or global overrides set it. It has no built-in
+        // text, so no override means none.
+        readWalkthroughInstructions: async (directory) => (
+          magicPrompts ? (await magicPrompts.overridesForDirectory(directory))['walkthrough.instructions'] ?? '' : ''
+        ),
         // Forward only the request options by name: the remaining slots are
         // dependency overrides and must not be reachable from a route.
         getPullRequestDiff: (directory, number, readContext, { allowEmpty, sourceRepo, revision } = {}) => pullRequest.getPullRequestDiff(
@@ -259,6 +268,8 @@ export const createFeatureRoutesRuntime = (dependencies) => {
       routingRuntime,
       globalEventHub,
       openchamberVersion,
+      // Absent in builds without workflows; their routes are then not served.
+      workflowRuntime = null,
     } = routeDependencies;
 
     registerSettingsUtilityRoutes(app, {
@@ -331,6 +342,7 @@ export const createFeatureRoutesRuntime = (dependencies) => {
     });
 
     registerOpenChamberControlRoutes(app, { controlService: openChamberControlService });
+    if (workflowRuntime) registerWorkflowRoutes(app, workflowRuntime);
 
     registerMarkdownImageGrantRoutes(app, {
       fsPromises,
@@ -744,7 +756,7 @@ export const createFeatureRoutesRuntime = (dependencies) => {
     registerTrackerRoutes(app, { registry: trackers });
     registerLinearRoutes(app);
     registerDevServerRoutes(app, { scanner: devServerScanner, getOwnPorts });
-    registerMagicPromptRoutes(app, {
+    magicPrompts = registerMagicPromptRoutes(app, {
       fsPromises,
       path,
       openchamberDataDir,
@@ -783,6 +795,22 @@ export const createFeatureRoutesRuntime = (dependencies) => {
         for (const client of clients) {
           try {
             writeSseEvent(client, { type: 'openchamber:session-folders-changed', properties: { updatedAt } });
+          } catch {
+            clients.delete(client);
+          }
+        }
+      },
+    });
+    registerSessionDraftRoutes(app, {
+      fsPromises,
+      path,
+      openchamberDataDir,
+      // Drafts are shared by every client of this server, like folders.
+      onChanged: (updatedAt) => {
+        const clients = getOpenChamberEventClients();
+        for (const client of clients) {
+          try {
+            writeSseEvent(client, { type: 'openchamber:session-drafts-changed', properties: { updatedAt } });
           } catch {
             clients.delete(client);
           }

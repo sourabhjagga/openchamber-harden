@@ -34,6 +34,7 @@ import { resolveDraftPinnedKnowledge } from './draftKnowledge';
 import { changeRequestCopy } from '@/lib/source-control/changeRequestCopy';
 import { refTintStyle } from '@/lib/source-control/prVisualState';
 import { cn } from '@/lib/utils';
+import { useLeaveWorkStatus } from './leaveWorkStatus';
 
 
 type Props = {
@@ -191,7 +192,7 @@ export const WorkStatusContextSection: React.FC<Props> = ({ sessionId, directory
     () => linkedSidebarIssues.flatMap((issue) => (issue.source === 'repository' ? [issue.ref] : [])),
     [linkedSidebarIssues],
   );
-  const repositoryIssueItems = React.useMemo(() => repositoryIssueRefs.map((ref) => repositoryThread('issue', ref)), [repositoryIssueRefs]);
+  const repositoryIssueItems = React.useMemo(() => repositoryIssueRefs.map((ref) => repositoryThread(ref.thread, ref)), [repositoryIssueRefs]);
   const linkedTrackerEntries = React.useMemo(
     () => linkedSidebarIssues.flatMap((issue) => (issue.source === 'tracker' ? [{ key: issue.key, identifier: issue.identifier, item: workItem(issue.provider, issue.identifier) }] : [])),
     [linkedSidebarIssues],
@@ -260,6 +261,7 @@ export const WorkStatusContextSection: React.FC<Props> = ({ sessionId, directory
     return looks;
   }, [branchPrSummary, changeSummaries, linkedTrackerEntries, linkedWorkItemStates, repositoryChanges, repositoryIssueRefs, repositoryIssueStates, t, urlMatcher]);
   const openTrackerItem = useOpenTrackerItem();
+  const leaveWorkStatus = useLeaveWorkStatus();
   const trackerDescriptors = useTrackerDescriptors();
   // Connected servers only. A disabled server contributes nothing to the
   // context, so counting it here contradicts the MCP section right above,
@@ -391,7 +393,10 @@ export const WorkStatusContextSection: React.FC<Props> = ({ sessionId, directory
           muted
           // In the Tracker, read through this session's project; Cmd or Ctrl,
           // and anything the app cannot show, opens the link.
-          onClick={(event) => openTrackerItem(entry.url, directory, event)}
+          onClick={(event) => {
+            openTrackerItem(entry.url, directory, event);
+            leaveWorkStatus?.();
+          }}
           // The panel that shows what a session carries is the one that can
           // take an item back off; a pinned row's control is the precedent.
           // This sits in the trailing value slot, where row actions live.

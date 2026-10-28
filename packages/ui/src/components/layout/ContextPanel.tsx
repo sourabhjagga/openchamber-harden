@@ -20,6 +20,7 @@ import { getDisambiguatingFolders } from '@/lib/path-utils';
 const GitView = lazyWithChunkRecovery(() => import('@/components/views/GitView').then((m) => ({ default: m.GitView })));
 import { areTitleMapsEqual, buildSessionTitleMap, EMPTY_SESSION_TITLE_MAP, getSessionIDFromDedupeKey } from './contextPanelSessionTitles';
 import { ProjectContextPanel } from './RightSidebarTabs';
+import { WorkflowsPanel } from '@/components/chat/workflows/WorkflowsPanel';
 import { useEffectiveDirectory } from '@/hooks/useEffectiveDirectory';
 import { useRepositoryReferenceProvider } from '@/components/references/referenceSources';
 import { useGuestSurfaces } from '@/hooks/useGuestSurfaces';
@@ -54,6 +55,7 @@ import { setZoneBody, setZoneHeaderSlot } from './zoneHosts';
 import { useOpenWhenSettled } from './useOpenUntilSettled';
 import { isZoneExposed } from './zoneInteractiveContext';
 import { DockedPanelSurfaceContext } from '@/hooks/usePageColors';
+import { REPOSITORY_KIND_ICONS } from '@/components/references/referencePickerItems';
 
 const CONTEXT_PANEL_MIN_WIDTH = 320;
 // The panel has no absolute pixel ceiling: on large monitors the user may
@@ -124,6 +126,7 @@ const getModeLabel = (
   if (mode === 'pr') return t('contextPanel.mode.pr');
   if (mode === 'notes') return t('contextRail.surface.notes');
   if (mode === 'terminal') return t('layout.mainTab.terminal');
+  if (mode === 'workflows') return t('contextPanel.mode.workflows');
   if (isPluginContextPanelMode(mode)) {
     const guest = useGuestsStore.getState().guests.find((entry) => entry.id === pluginIdFromMode(mode));
     return guest?.name ?? t('contextRail.surface.plugin');
@@ -216,7 +219,7 @@ const TrackerTabIcon: React.FC<{ url: string | null }> = ({ url }) => {
   const target = url ? trackerTargetOfUrl(url, urls, trackerUrls) : null;
   const name: IconName = !target ? 'git-branch'
     : target.source === 'tracker' ? trackerPresentation(target.provider).icon
-      : target.kind === 'pull' ? 'git-pull-request' : 'record-circle';
+      : REPOSITORY_KIND_ICONS[target.kind];
   return <Icon name={name} className="h-3.5 w-3.5" />;
 };
 
@@ -256,6 +259,10 @@ const getTabIcon = (
 
   if (tab.mode === 'context') {
     return <Icon name="donut-chart-fill" className="h-3.5 w-3.5" />;
+  }
+
+  if (tab.mode === 'workflows') {
+    return <Icon name="flow-chart" className="h-3.5 w-3.5" />;
   }
 
   if (tab.mode === 'chat') {
@@ -337,7 +344,7 @@ const HEADER_DRAG_EXCLUDED = 'button, a, input, textarea, select, label, [role="
 // Surfaces rendered by the zone itself and remounted on every switch; the
 // rest stay alive in ContextSurfacePanes.
 const isRemountedSurface = (mode: ContextPanelMode): boolean => (
-  mode === 'context' || mode === 'git' || mode === 'pr' || mode === 'notes'
+  mode === 'context' || mode === 'git' || mode === 'pr' || mode === 'notes' || mode === 'workflows'
 );
 
 const CONTEXT_PANEL_DEFAULT_HEIGHT = 320;
@@ -458,10 +465,10 @@ export const ContextPanel: React.FC<{ zone?: ContextZone }> = ({ zone = 'right' 
   const isTreeOnly = !isVertical && activeTab?.mode === 'file' && !showsEditor;
   const isExpanded = Boolean(isOpen && zoneView.expanded && !isTreeOnly);
   // A fixed size in px: the one the user resized this zone to, else the
-  // default, whatever surface it shows, so switching surfaces leaves its edge
-  // in place. It does not follow the chat area, so a sidebar toggle or a
+  // default, whatever surface or folder it shows, so switching either leaves
+  // its edge in place. It does not follow the chat area, so a sidebar toggle or a
   // window resize leaves it alone unless the chat would get too small.
-  const manualSize = panelState?.sizeByZone?.[zone];
+  const manualSize = useUIStore((state) => state.contextZoneSizes[zone]);
   const desiredSize = isTreeOnly
     ? contextEditorTreeWidth
     : isVertical
@@ -500,7 +507,7 @@ export const ContextPanel: React.FC<{ zone?: ContextZone }> = ({ zone = 'right' 
     const editorShown = panel.tabs.some((entry) => entry.mode === 'file' && entry.targetPath)
       && (state.contextEditorVisible || !state.contextEditorTreeVisible);
     if (tab.mode === 'file' && !editorShown) return state.contextEditorTreeWidth;
-    return panel.sizeByZone[otherSide] ?? CONTEXT_ZONE_DEFAULT_WIDTH;
+    return state.contextZoneSizes[otherSide] ?? CONTEXT_ZONE_DEFAULT_WIDTH;
   });
   // The closed right zone still holds the work-status card's column.
   const otherSideReserved = otherSide === 'right' && workStatusReserved && !chatCovered && otherSideWidth === 0
@@ -677,12 +684,12 @@ export const ContextPanel: React.FC<{ zone?: ContextZone }> = ({ zone = 'right' 
     document.documentElement.style.cursor = '';
     if (isTreeOnly) {
       setContextEditorTreeWidth(finalSize);
-    } else if (directoryKey) {
-      setContextZoneSize(directoryKey, zone, finalSize);
+    } else {
+      setContextZoneSize(zone, finalSize);
     }
     setIsResizing(false);
     activeResizePointerIDRef.current = null;
-  }, [clampSizeForDrag, directoryKey, isTreeOnly, setContextEditorTreeWidth, setContextZoneSize, size, zone]);
+  }, [clampSizeForDrag, isTreeOnly, setContextEditorTreeWidth, setContextZoneSize, size, zone]);
 
   // Window-level drag listeners: tracking the pointer via the thin handle and
   // pointer capture is unreliable (capture can fail over iframes and a missed
@@ -819,6 +826,8 @@ export const ContextPanel: React.FC<{ zone?: ContextZone }> = ({ zone = 'right' 
                     : <PullRequestView />)
             : activeTab?.mode === 'notes'
                 ? <ContextPanelHeaderSlotProvider value={headerSlotEl}><ProjectContextPanel visible={isOpen} /></ContextPanelHeaderSlotProvider>
+            : activeTab?.mode === 'workflows'
+                ? <ContextPanelHeaderSlotProvider value={headerSlotEl}><WorkflowsPanel directory={effectiveDirectory || null} /></ContextPanelHeaderSlotProvider>
         : null;
 
   const isFileTabActive = activeTab?.mode === 'file';

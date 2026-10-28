@@ -77,6 +77,7 @@ import { useMessageQueueStore } from "@/stores/messageQueueStore"
 import { subscribeMessageQueueSync } from "./message-queue-sync"
 import { subscribeSessionWarmingSync } from "./session-warming-sync"
 import { subscribeSessionFoldersSync } from "./session-folders-sync"
+import { subscribeSessionDraftsSync } from "./session-drafts-sync"
 import { subscribePermissionPolicySync, subscribeSpacePermissionModes } from "./permission-mode-sync"
 import { spaceFoldersOfProject, subscribeSpaceCatalogs } from "./space-catalog-sync"
 import {
@@ -116,6 +117,8 @@ import {
   type LocationRelease,
 } from "./location-release"
 import { applySessionAssistEvent, subscribeSessionAssistSettled } from "./pending-session-assists"
+import { useWorkflowRunsStore } from "@/lib/workflows/store"
+import { setWorkflowRunningSessions } from "./workflow-activity"
 import { isChatDirectoryPath } from "@/lib/chatDirectories"
 import type { State } from "./types"
 import {
@@ -147,6 +150,14 @@ import {
 } from "./session-message-loader"
 import { openCodeStartupSignal } from "./opencode-startup-gate"
 import { claimFirstServerConnect, notifyFirstServerConnect } from "./first-server-connect"
+
+// Session rows read which sessions run a workflow from a small store of their
+// own (`workflow-activity.ts`), kept here from the runs the server reports.
+useWorkflowRunsStore.subscribe((state) => {
+  setWorkflowRunningSessions(Object.entries(state.bySession).flatMap(([sessionId, entry]) => (
+    entry.runs.some((run) => run.state === "running") ? [sessionId] : []
+  )))
+})
 
 // ---------------------------------------------------------------------------
 // Context
@@ -2012,6 +2023,18 @@ export function handleEvent(
     return
   }
 
+  // Workflow runs live in their own store, keyed by the session that proposed them.
+  if (payload.type === "openchamber.workflow-run") {
+    if (expectedRuntimeKey !== getRuntimeKey()) return
+    useWorkflowRunsStore.getState().apply(payload.properties.run)
+    return
+  }
+  if (payload.type === "openchamber.workflow-run-removed") {
+    if (expectedRuntimeKey !== getRuntimeKey()) return
+    useWorkflowRunsStore.getState().remove(payload.properties.parentSessionId, payload.properties.runId)
+    return
+  }
+
   if (payload.type === "openchamber.permission-auto-accept") {
     usePermissionStore.getState().applySnapshot(policySnapshotFromWire(payload.properties), expectedRuntimeKey, payload.properties.spaceId ?? "")
     return
@@ -3130,6 +3153,7 @@ export function SyncProvider(props: {
     const unsubscribeQueueEvents = subscribeMessageQueueSync(runtimeKey)
     const unsubscribeSessionWarming = subscribeSessionWarmingSync(runtimeKey)
     const unsubscribeFolderEvents = subscribeSessionFoldersSync(runtimeKey)
+    const unsubscribeDraftEvents = subscribeSessionDraftsSync(runtimeKey)
     const unsubscribeSpaceModes = subscribeSpacePermissionModes(runtimeKey)
     const unsubscribePermissionPolicy = subscribePermissionPolicySync(
       runtimeKey,
@@ -3225,6 +3249,8 @@ export function SyncProvider(props: {
         }
         // Queue recovery is independent of the directory-bootstrap debounce.
         void useMessageQueueStore.getState().resync().catch(() => undefined)
+        // Workflow run changes during a gap are not replayed: read the shown sessions' runs again.
+        useWorkflowRunsStore.getState().reloadLoaded()
         useConfigStore.setState({
           isConnected: true,
           hasEverConnected: true,
@@ -3272,6 +3298,7 @@ export function SyncProvider(props: {
       unsubscribeQueueEvents()
       unsubscribeSessionWarming()
       unsubscribeFolderEvents()
+      unsubscribeDraftEvents()
       unsubscribeSpaceModes()
       unsubscribePermissionPolicy()
       unsubscribeSpaceCatalogs()

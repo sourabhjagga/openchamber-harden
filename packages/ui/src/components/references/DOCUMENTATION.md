@@ -1,6 +1,7 @@
 # Reference picker
 
-The picker for a project's issues and change requests, on whichever
+The picker for a project's issues, change requests and discussions (where the
+host keeps them), on whichever
 source-control provider hosts it, and each served tracker's work items
 (Linear issues), used by the
 composer (any number of items, attached together) and by New Worktree (one
@@ -87,6 +88,48 @@ caller that keys a selection (New Worktree, attach), while marking every change
 request `!` and every issue `#` keeps keys unique on any provider: where both
 share one number space only one of them can exist.
 
+## Discussions
+
+A provider whose descriptor has `features.discussions` (GitHub) gets a third
+repository tab, Discussions, in the picker, the board's switch and New
+Worktree; elsewhere the tab is absent, and a remembered Discussions tab reads
+as Issues (`useReferenceBrowser`) once the host is known; until the provider
+list and the project's host are known it waits on Discussions instead of
+listing issues and switching. Discussions come only from the provider's
+own search (`referenceSearch`, `referenceDetail` with `kind: 'discussion'`);
+the list-backed reads have none and refuse the kind.
+
+- The list loads only while its tab is open: the background read that makes
+  switching between issues and change requests instant leaves discussions out.
+- Filters: open, unanswered (open questions in a category that takes
+  answers), closed, all; anyone's or the user's own, remembered per kind like
+  the others.
+- State looks (`discussionStateLook`): open in the open colour, with a
+  check while its answer is chosen; resolved in the merged colour; outdated
+  and duplicate in the closed colour. Rows add the category (its emoji and
+  name) and upvotes; the preview adds category, answer status, upvotes and a
+  lock note.
+- Comments are threads: each comment's replies sit under it, and on the board
+  and in a Tracker tab each takes a reply (`threadActions`, `replyTo` the
+  comment's id) and, in a category that takes answers, Mark or Unmark as
+  answer where the host says this account may; the chosen one wears an
+  Answer badge. The reply box at the bottom writes a comment of its own, and
+  is left out of a locked discussion this account may not comment on. The
+  state pill closes an open discussion as resolved, outdated or duplicate, or
+  reopens a closed one, offered only while the detail does not say this
+  account may not (`canChangeDiscussionState`); labels edit as one set.
+- Attached, a discussion becomes a `repository-discussion` chip and context
+  part: `Source control discussion context (JSON)` with the listed item (its
+  description as the list cut it, `bodyTruncated` saying so), its newest
+  comments with their replies and which one is the answer
+  (`resolveComposerReferences.ts`). The session keeps it as an `external`
+  link under its canonical address (`buildLinkedDiscussion`), the id an
+  agent's link to it gets too, so every client keeps it and newer ones read
+  it as a discussion: the sidebar and work status show it among the issues,
+  coloured as an issue reads (resolved done, outdated and duplicate dropped).
+- New Worktree starts from one the way it starts from an issue: a new branch,
+  `discussion-<number>-<slug>`.
+
 ## Lists and the cache
 
 - A list is cached per key `[runtime, account or tracker and its account, project, kind, filter, search text]`. Switching tabs or filters, or reopening the picker, shows the cached list at once; one older than 60 s refreshes in the background and is replaced when the answer lands. `revalidateReferences` makes every mounted list, preview and PR status check its age again.
@@ -147,6 +190,10 @@ Tracker then show one state for the same PR.
 - The preview shows the list item at once and asks for the rest of the item the highlight rests on (250 ms after it stops moving): GitHub comments, and a PR's size, review and newest commits, from `references/detail` with the same read context (a GitLab merge request's pipeline, commits and verdicts come with its detail, read with `includeTimeline`); a tracker item's description and comments from `trackers.get(provider, id)`. Both land in value caches: going back to an item shows what was already read at once, without waiting out the 250 ms, and attaching a previewed tracker item reuses the answer.
 - A PR's thread is its activity (`referenceTimeline.ts`): comments, review verdicts and commits by time, commits in a row grouped, so a review reads next to the commits it answered. Comments made at the same moment as a commit come first. Each commit names its author: the host account with its avatar on GitHub, the name git recorded on GitLab.
 - Descriptions and comments render with `allowRawHtml`, sharing the Files preview's Streamdown processing and restricted rehype policy in `chat/markdown/streamdownPlugins.ts`. GitHub screenshots, tables and disclosures show; scripts, author styles and application classes are excluded. Media components preserve safe image dimensions and aspect ratios. Tracker items and the Git view's PR section use this same renderer.
+- Inside a preview, `#12`, `owner/repo#12` (`!12` where change requests have their own prefix), `@someone` and commit ids link the way the item's host links them (`referenceLinks.ts` provides the item's repository to every body; `chat/markdown/remarkRepositoryReferences.ts` builds the links from the descriptor's URL patterns). Code, existing links, words and paths stay text, and a run of hex counts as a commit only with a digit and a letter in it. A provider without `urls.commit` or `urls.user` gets no links for those. The links open like any link in item text: an issue or change request in the Tracker, a commit in the Diff view when the folder the item was read through has it (`useOpenChatLink`), else on the host. Only the desktop app looks for the commit first: knowing whether the repository has it takes a git read, and a browser opens a new tab only right inside the click, so on the web a missing commit would open nowhere. The SHAs of a PR's commit rows open the same way.
+- Emoji shortcodes (`:tada:`) in item text read as emoji, the way the host shows them; hosts send the shortcode as written. The names are GitHub's (`gemoji`), loaded from `lib/emoji/shortcodes.ts` only once a body holds something shaped like a shortcode, so a preview without one never loads the table. Code keeps its shortcodes, and an unknown name stays text. Chat does not convert them: agents write the emoji themselves.
+- Where issues and change requests share one number, `#12` links the issue page, which the host forwards to a change request. The Tracker reads such a link as an issue first and, when no issue has that number, as a change request (`TrackerItemView`).
+- A review comment's ```` ```suggestion ```` fence (GitLab's `suggestion:-0+2` too) draws as a suggested change: a diff of the lines the comment sits on against the suggestion. Those lines come with the comment as `excerpt` where the host sends them (GitHub, from the thread's diff hunk); without them the suggestion shows as added lines. Copying the block copies the suggested code.
 - Clicking a picture in the description or a comment opens the chat's image viewer (`useReferenceImagePreview.tsx`) with every loaded picture of the item, in page order, so the arrows step through them; a picture inside a link keeps opening its link. Escape closes the viewer alone, never the picker dialog under it. The viewer's chunk loads on the first click, and nothing runs while it is closed.
 - `chat/markdown/MarkdownMedia.tsx` owns video nodes: a Linear upload written as a video-named image, a GitHub `user-attachments/assets` URL alone on its line, or a safe raw `<video>`. Linked pictures retain their link behavior. Controls and load/error recovery belong to the video component; the Markdown body has no container-wide video fallback listener. Original source metadata stays separate from authenticated playback URLs.
 - A provider with `features.projectUploads` (GitLab) writes an attachment as a project path, `/uploads/<secret>/<name>`, readable only by signed-in members. `projectUploads.ts` rewrites those paths in the displayed description and notes, outside code: a picture or clip to `GET /api/source-control/<provider>/uploads/:secret/:filename` with the preview's read context and the URL token, kept fresh while such an item is shown; a link to any other file to the file on the host. The text attached for the agent keeps the host's path. That is why `ReferencePreview` takes the item's `directory`.

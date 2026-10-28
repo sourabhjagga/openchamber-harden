@@ -74,6 +74,15 @@
         ],
         "issue": [
           "/{owner}/{repo}/issues/{number}"
+        ],
+        "discussion": [
+          "/{owner}/{repo}/discussions/{number}"
+        ],
+        "commit": [
+          "/{owner}/{repo}/commit/{sha}"
+        ],
+        "user": [
+          "/{user}"
         ]
       },
       "features": {
@@ -86,7 +95,8 @@
         "projectUploads": false,
         "issueCloseReason": true,
         "changeRequestTemplates": [],
-        "changeRequestPatch": true
+        "changeRequestPatch": true,
+        "discussions": true
       }
     },
     {
@@ -153,6 +163,12 @@
         "issue": [
           "/{namespace+}/{repo}/-/issues/{number}",
           "/{namespace+}/{repo}/-/work_items/{number}"
+        ],
+        "commit": [
+          "/{namespace+}/{repo}/-/commit/{sha}"
+        ],
+        "user": [
+          "/{user}"
         ]
       },
       "features": {
@@ -232,6 +248,12 @@
         ],
         "issue": [
           "/{owner}/{repo}/issues/{number}"
+        ],
+        "commit": [
+          "/{owner}/{repo}/commit/{sha}"
+        ],
+        "user": [
+          "/{user}"
         ]
       },
       "features": {

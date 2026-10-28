@@ -13,6 +13,7 @@ import { PlanView } from '@/components/views/PlanView';
 import { SettingsView } from '@/components/views/SettingsView';
 import { AppLinkConfirmDialog } from '@/components/chat/AppLinkConfirmDialog';
 import { SharedTrustConfirmDialog } from '@/components/projects/SharedTrustConfirmDialog';
+import { OpenCodeTrustDialog } from '@/components/projects/OpenCodeTrustDialog';
 import { SpaceAccessDialog } from '@/components/session/spaces/SpaceAccessDialog';
 import { SpaceActionsSheet, SpaceDeleteDialog } from '@/components/session/spaces/SpaceActions';
 import { SpaceApplyDialog } from '@/components/session/spaces/SpaceApplyDialog';
@@ -53,15 +54,6 @@ import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import { useSourceControlAuthStore } from '@/stores/useSourceControlAuthStore';
 import { useSourceControlProviderRegistry } from '@/lib/source-control/providers/registry';
 import { refreshTrackers } from '@/stores/useTrackerAuthStore';
-import { useGitStore } from '@/stores/useGitStore';
-import { useMcpConfigStore, type McpDraft } from '@/stores/useMcpConfigStore';
-import { useProjectsStore } from '@/stores/useProjectsStore';
-import {
-  listProjectWorktrees,
-  partitionWorktreesByRegisteredProject,
-  worktreeMapsEqual,
-} from '@/lib/worktrees/worktreeManager';
-import { refreshWorktreeTopologyForChange } from '@/lib/worktrees/worktreeTopologyRefresh';
 import { useUIStore } from '@/stores/useUIStore';
 import { closeTopmostBackLayer } from '@/lib/mobileBackLayers';
 import { useUpdateStore } from '@/stores/useUpdateStore';
@@ -134,7 +126,7 @@ const NATIVE_RESUME_SYNC_EVENT_THROTTLE_MS = 1_000;
 /** The fullscreen app-level surfaces, reachable from the sessions drawer
     footer. Exactly one can be open at a time — opening another replaces it,
     closing returns to the chat. The sessions drawer and the workspace drawer
-    (Changes / Files / Terminal / Notes / MCP) are separate layers. */
+    (Status / Changes / Files / Terminal / Notes) are separate layers. */
 type MobileSurface = 'archive' | 'board' | 'overview' | 'instances' | 'scheduled' | 'settings' | 'update' | 'usage';
 
 const MobileShell: React.FC<{ onActiveConnectionDeleted: () => void }> = ({ onActiveConnectionDeleted }) => {
@@ -158,7 +150,10 @@ const MobileShell: React.FC<{ onActiveConnectionDeleted: () => void }> = ({ onAc
   // Phone right drawer with the workspace tabs; the tab persists across
   // open/close so the right-edge swipe reopens where the user left off.
   const [workspaceOpen, setWorkspaceOpen] = React.useState(false);
-  const [workspaceTab, setWorkspaceTab] = React.useState<MobileWorkspaceTab>('changes');
+  const [workspaceTab, setWorkspaceTab] = React.useState<MobileWorkspaceTab>(() => {
+    const { mobileWorkspaceTabOrder, mobileWorkspaceHiddenTabs } = useUIStore.getState();
+    return shownMobileWorkspaceTabs(mobileWorkspaceTabOrder, mobileWorkspaceHiddenTabs)[0];
+  });
   // Opening the drawer itself lands on the last tab, unless the user has since
   // hidden it in Settings; then on their first tab. A trigger that asks for a
   // tab (a changed file in the chat) sets it on its own and opens it hidden or not.
@@ -179,9 +174,6 @@ const MobileShell: React.FC<{ onActiveConnectionDeleted: () => void }> = ({ onAc
   const updateAvailable = useUpdateStore((state) => state.available);
   const updateRuntimeType = useUpdateStore((state) => state.runtimeType);
   const showCapacitorOnlyFeatures = React.useMemo(() => isCapacitorMobileApp(), []);
-  const mcpServers = useMcpConfigStore((state) => state.mcpServers);
-  const setMcpDraft = useMcpConfigStore((state) => state.setMcpDraft);
-  const setSelectedMcp = useMcpConfigStore((state) => state.setSelectedMcp);
 
   // NOTE: pendingChangesDiff is intentionally NOT cleared on close — it keys
   // the persistent Changes pane in the workspace drawer, and clearing it would
@@ -337,8 +329,9 @@ const MobileShell: React.FC<{ onActiveConnectionDeleted: () => void }> = ({ onAc
           openFilesSurface();
           return;
         }
+        // MCP lives in the Status tab now; old links to it land there.
         if (target === 'mcp') {
-          setWorkspaceTab('mcp');
+          setWorkspaceTab('status');
           setWorkspaceOpen(true);
           return;
         }
@@ -469,43 +462,6 @@ const MobileShell: React.FC<{ onActiveConnectionDeleted: () => void }> = ({ onAc
     if (isTabletLayout && !roomyForPanels) setSidebarOpen(false);
   }, [closeSurface, isTabletLayout, roomyForPanels]);
 
-  const openMcpCreateSettings = React.useCallback(() => {
-    const baseName = 'new-mcp-server';
-    let newName = baseName;
-    let counter = 1;
-    while (mcpServers.some((server) => server.name === newName)) {
-      newName = `${baseName}-${counter}`;
-      counter += 1;
-    }
-
-    const draft: McpDraft = {
-      name: newName,
-      scope: 'user',
-      type: 'local',
-      command: [],
-      url: '',
-      environment: [],
-      headers: [],
-      oauthEnabled: true,
-      oauthClientId: '',
-      oauthClientSecret: '',
-      oauthScope: '',
-      oauthRedirectUri: '',
-      oauthCallbackPort: '',
-      oauthAuthServerMetadataUrl: '',
-      protocol: 'legacy',
-      timeoutStartup: '',
-      timeoutCatalog: '',
-      timeoutExecution: '',
-      codemode: 'default',
-      disabled: false,
-    };
-
-    setMcpDraft(draft);
-    setSelectedMcp(newName);
-    setSettingsPage('mcp');
-    openSettingsSurface('page-content');
-  }, [mcpServers, openSettingsSurface, setMcpDraft, setSelectedMcp, setSettingsPage]);
 
   return (
     <DedicatedMobileAppProvider actions={mobileActions}>
@@ -524,7 +480,7 @@ const MobileShell: React.FC<{ onActiveConnectionDeleted: () => void }> = ({ onAc
               // rows are opaque bg-background (the swipe actions live under
               // them), so a tinted sidebar would show through as row-shaped
               // bands. Same surface as the phone drawer.
-              'relative flex h-full shrink-0 flex-col overflow-hidden border-e border-border/70 bg-background will-change-[width] motion-reduce:transition-none',
+              'oc-ipad-sidebar relative flex h-full shrink-0 flex-col overflow-hidden border-e border-border/70 bg-background will-change-[width] motion-reduce:transition-none',
               !sidebarOpen && 'border-e-0',
             )}
             style={{
@@ -551,7 +507,7 @@ const MobileShell: React.FC<{ onActiveConnectionDeleted: () => void }> = ({ onAc
             >
               <ErrorBoundary>
                 <MobileSessionsSheet
-                  open
+                  open={sidebarOpen}
                   variant="sidebar"
                   // The surface asks to close after picking a session/project
                   // or creating a worktree: give the space back to the chat
@@ -643,7 +599,6 @@ const MobileShell: React.FC<{ onActiveConnectionDeleted: () => void }> = ({ onAc
                 onTabChange={setWorkspaceTab}
                 pendingChangesDiff={pendingChangesDiff}
                 onOpenPlan={setOpenPlan}
-                onOpenMcpSettings={openMcpCreateSettings}
                 variant={workspaceAsPanel ? 'panel' : 'drawer'}
               />
             </ErrorBoundary>
@@ -832,7 +787,6 @@ function MobileAppContent({ apis }: MobileAppProps) {
   const setIsMobile = useUIStore((state) => state.setIsMobile);
   const refreshSourceControlAuth = useSourceControlAuthStore((state) => state.refreshAll);
   const refreshSourceControlProviders = useSourceControlProviderRegistry((state) => state.refresh);
-  const projects = useProjectsStore((state) => state.projects);
   // The mobile shell has no layout-level session list sync, so a lost
   // `session.deleted` is reconciled here from the same complete global
   // active+archived snapshots, refreshed whenever the sessions sheet opens.
@@ -1249,76 +1203,9 @@ function MobileAppContent({ apis }: MobileAppProps) {
     void refreshTrackers(apis.trackers);
   }, [apis.sourceControl, apis.trackers, isConnected, refreshSourceControlAuth, refreshSourceControlProviders]);
 
-  // Discover all worktrees for every known project so the draft session's
-  // worktree/branch dropdown can list every available branch — not only the
-  // current one. Mirrors ElectronMiniChatApp + desktop SessionSidebar.
-  // Gated on isConnected: running before the runtime is reachable made every
-  // per-project probe fail silently, leaving the map empty until some later
-  // projects-store update happened to re-run this effect (the "switch projects
-  // back and forth to see worktrees" bug).
-  React.useEffect(() => {
-    if (!isConnected || projects.length === 0) return;
-    let cancelled = false;
-
-    const run = async () => {
-      const worktreesByProject = new Map(useSessionUIStore.getState().availableWorktreesByProject);
-
-      await Promise.all(
-        projects.map(async (project) => {
-          const projectPath = project.path.replace(/\\/g, '/').replace(/\/+$/, '');
-          if (!projectPath) return;
-          try {
-            const cachedIsGitRepo = useGitStore.getState().directories.get(projectPath)?.isGitRepo;
-            const isGitRepo =
-              cachedIsGitRepo ?? (await import('@/lib/gitApi').then((m) => m.checkIsGitRepository(projectPath)));
-            if (!isGitRepo) return;
-            const worktrees = await listProjectWorktrees({ id: project.id, path: projectPath });
-            if (cancelled) return;
-            worktreesByProject.set(projectPath, worktrees);
-          } catch {
-            // Worktree discovery is best-effort per project: a failed probe keeps
-            // that project's previously known (persisted) worktrees instead of
-            // wiping the whole map.
-          }
-        }),
-      );
-
-      if (cancelled) return;
-
-      const partitionedWorktreesByProject = partitionWorktreesByRegisteredProject(projects, worktreesByProject);
-
-      // Skip update if nothing changed — see worktreeMapsEqual JSDoc.
-      const currentByProject = useSessionUIStore.getState().availableWorktreesByProject;
-      if (!worktreeMapsEqual(partitionedWorktreesByProject, currentByProject)) {
-        useSessionUIStore.setState({
-          availableWorktrees: [...partitionedWorktreesByProject.values()].flat(),
-          availableWorktreesByProject: partitionedWorktreesByProject,
-        });
-      }
-    };
-
-    void run();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [isConnected, projects]);
-
-  // A worktree added or removed anywhere (another window, an agent, a
-  // terminal) arrives as a server control event; refresh only the projects it
-  // names so the draft's worktree picker stays current without polling.
-  React.useEffect(() => {
-    if (!isConnected) return;
-    let cancelled = false;
-    const unsubscribe = subscribeOpenchamberEvents((event) => {
-      if (event.type !== 'worktree-changed') return;
-      void refreshWorktreeTopologyForChange(projects, event.directories, () => cancelled);
-    });
-    return () => {
-      cancelled = true;
-      unsubscribe();
-    };
-  }, [isConnected, projects]);
+  // Worktree discovery for every project, and its refresh on the server's
+  // worktree and session events, run in the sessions drawer's list, which is
+  // the desktop sidebar's and stays mounted while the drawer is closed.
 
   React.useEffect(() => {
     if (!error) return;
@@ -1496,6 +1383,7 @@ function MobileAppContent({ apis }: MobileAppProps) {
               }} />
               <AppLinkConfirmDialog />
               <SharedTrustConfirmDialog />
+              <OpenCodeTrustDialog />
               {isolatedSpacesEnabled ? <><SpaceAccessDialog /><SpaceActionsSheet /><SpaceApplyDialog /><SpaceDeleteDialog /><SpaceSetupOutputDialog /></> : null}
               <MobileToaster />
               {isInitialized ? <ConfigUpdateOverlay /> : null}

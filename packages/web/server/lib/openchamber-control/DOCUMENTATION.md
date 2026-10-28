@@ -192,6 +192,30 @@ other.
   directory and does not erase other session results.
 - Destructive session/worktree deletion and project-path registration are not
   part of the action contract.
+- `session.create`, `session.send` and `session.fork` called from a session
+  pass that session as `promptedBySessionId` (except a send to the caller
+  itself). The session service records it on the prompt's message as
+  `metadata.openchamber.promptedBy { sessionID, title }`, and the transcript
+  links back to the sender under that message. The title is read when the
+  prompt goes out; a failed read records the id alone. A slash-command
+  prompt goes through `session.command`, which takes no metadata, so it
+  carries no link.
+- `work.name` names the task the session (default: the calling one) works on
+  (`../openchamber-sessions/work-naming.js`, wired through the `workNaming`
+  dependency; without it the action answers 503). In a linked worktree it sets
+  the branch description (`setWorktreeTaskTitle` in `../git`); in the main
+  checkout it renames the task's root session, found through the same lineage
+  the sidebar nests by, and records `metadata.openchamber.workTitle`. A name
+  the user gave stays: the call changes nothing and answers `named: false`
+  with the current name. When to call it is in the session context, next to
+  the linking guidance (`WORK_NAME_GUIDANCE`). While the worktree's branch is
+  OpenChamber's unpushed placeholder (`readRenameableGeneratedBranch`), the
+  call also requires `branch` and renames it (`renameGeneratedWorktreeBranch`),
+  answering `branch` and `branchRenamed: true`; without `branch` it fails with
+  400, says how to call it, and names nothing. Any other branch, and the main
+  checkout, is not renamed: a `branch` passed there answers
+  `branchRenamed: false` with a note, so the agent does not take the call for
+  a rename.
 - `session.link` records a code change under review or an issue on a session
   (`../openchamber-sessions/session-link.js`), defaulting to the calling
   session. When to link is not in the action's description but at the head of
@@ -207,6 +231,10 @@ other.
   `/api/linear` alias exists, so older bundled UIs keep showing and keeping
   it; other trackers are `kind: 'tracker'`, see
   `../trackers/DOCUMENTATION.md`), anything else an `external` entry shown by identifier.
+  A github.com discussion is such an external entry, identified `#N` unless the
+  agent named it, under the id the UI writes when one is attached
+  (`link:<origin>/<owner>/<repo>/discussions/<N>`), and newer UIs read it as a
+  discussion by its address.
   A change request or issue address that a source-control provider's
   `urls.thread` names (GitLab's `/-/merge_requests/N` shape on any host) is
   keyed by the thread, so linking it again from a tab like `/diffs` or with a
@@ -238,3 +266,15 @@ other.
   Closing is panel state, so the client that owns the tab performs it through a
   registered closer, not the page view; the server only validates `tabId` and
   forwards the action like the rest.
+
+## Decisions
+
+### Why a dispatched session links back from its prompt and does not nest in the sidebar
+
+A dispatched session used to nest under the caller's work in the sidebar
+(`metadata.openchamber.originSessionID` on the session). These sessions are
+the user's own conversations, such as PRs a triage session splits off for a
+separate discussion: nesting hid them under one chevron, reshuffled them when
+the caller was archived, and made `work.name` in each of them rename the
+caller. They stay roots now, and the link sits on the prompt that started
+them, where it says who sent which message.

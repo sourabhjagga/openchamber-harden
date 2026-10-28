@@ -19,6 +19,7 @@ export const OPENCHAMBER_CONTROL_ACTION_DEFINITIONS = Object.freeze([
   { action: 'session.messages', title: 'Read session messages', description: 'Text messages and sessionStatus of sessionId' },
   { action: 'session.moveToWorktree', title: 'Move a session into a new worktree', description: 'Move sessionId (default: this session) and its carry files into a new worktree, made the way the New worktree dialog makes one; requires worktree. Nothing moves when carry cannot be applied; directory is ignored' },
   { action: 'session.link', title: 'Link a change or issue to a session', description: 'Add link to sessionId (default: this session); the same link again updates its title. Only the user removes links' },
+  { action: 'work.name', title: 'Name the task', description: 'Name the task sessionId (default: this session) works on, in title: at most 4 words saying what the task is; rename only when it becomes a different task. Names its worktree, or in the main checkout the session it grew from. Answers the current name; a name the user gave stays. Only while the branch of a worktree is a placeholder OpenChamber generated (its checkout context says so), it also requires branch, the branch named after the task, and renames it; any other branch stays' },
   { action: 'schedule.status', title: 'Check scheduler status', description: 'No parameters', agentExposed: false },
   { action: 'schedule.list', title: 'List scheduled tasks', description: 'Tasks and scheduler status' },
   { action: 'schedule.create', title: 'Create a scheduled task', description: 'Requires name, prompt, one schedule selector, and model unless targetSessionId is set, which keeps that session\'s model' },
@@ -146,6 +147,43 @@ export const OPENCHAMBER_RENDER_ACTIONS = Object.freeze(
 );
 
 /**
+ * Workflows are their own tool: fanning a large task out to many agents is a
+ * distinct intent with its own scripting guidance, and it ships dark behind
+ * OPENCHAMBER_WORKFLOWS_ENABLE, so it has to disappear completely.
+ */
+export const OPENCHAMBER_WORKFLOW_ACTION_DEFINITIONS = Object.freeze([
+  { action: 'workflow.check', title: 'Check a workflow', description: 'Compile script, or a saved workflow by name, without running it: its name, description and phases' },
+  { action: 'workflow.run', title: 'Propose a workflow run', description: 'script, or name of a saved workflow, with optional args. The user approves the plan in the chat; the report arrives here as a message when the run ends. Returns runId at once' },
+  { action: 'workflow.status', title: 'Check a workflow run', description: 'Phases, agents with their state, key and session id, recent log lines and a result preview of runId' },
+  { action: 'workflow.result', title: 'Read a workflow result', description: "The whole result of runId; with agent (its key or session id) that agent's prompt and full answer" },
+  { action: 'workflow.stop', title: 'Stop a workflow run', description: 'Stop runId; its running agents are interrupted' },
+  { action: 'workflow.resume', title: 'Resume a workflow run', description: 'Run a stopped or failed runId again: agents asked the same as before return their saved answer, the rest run' },
+  { action: 'workflow.save', title: 'Save a workflow', description: 'Save script as .openchamber/workflows/<meta.name>.js in this project, to run later by name; overwrite replaces one' },
+  { action: 'workflow.list', title: 'List workflows', description: "This project's saved workflows and this session's runs" },
+]);
+
+export const OPENCHAMBER_WORKFLOW_ACTIONS = Object.freeze(
+  OPENCHAMBER_WORKFLOW_ACTION_DEFINITIONS.map(({ action }) => action),
+);
+
+/**
+ * How a workflow agent asked for a schema answer hands it over. A tool of its
+ * own: the managed config denies it in every session
+ * (`../agent-tool/runtime.js`, `managedPermissionRules`) and the session of a
+ * workflow agent asked for one allows it (`../workflows/agent-session.js`), so
+ * no other session carries its declaration.
+ */
+export const WORKFLOW_ANSWER_TOOL = 'openchamber_workflow_answer';
+
+export const OPENCHAMBER_WORKFLOW_ANSWER_ACTION_DEFINITIONS = Object.freeze([
+  { action: 'workflow.answer', title: 'Submit a workflow answer', description: 'Only for a workflow agent whose prompt asks for it: answer, a JSON value matching the schema in that prompt. Checked on the spot; a mismatch says what to fix' },
+]);
+
+export const OPENCHAMBER_WORKFLOW_ANSWER_ACTIONS = Object.freeze(
+  OPENCHAMBER_WORKFLOW_ANSWER_ACTION_DEFINITIONS.map(({ action }) => action),
+);
+
+/**
  * Which actions each managed tool may ask for.
  *
  * The callback needs this because models routinely drop the namespace: asked
@@ -163,6 +201,8 @@ const ACTIONS_BY_TOOL = Object.freeze({
   openchamber_knowledge: OPENCHAMBER_KNOWLEDGE_ACTIONS,
   openchamber_notify: OPENCHAMBER_NOTIFY_ACTIONS,
   openchamber_render: OPENCHAMBER_RENDER_ACTIONS,
+  openchamber_workflow: OPENCHAMBER_WORKFLOW_ACTIONS,
+  [WORKFLOW_ANSWER_TOOL]: OPENCHAMBER_WORKFLOW_ANSWER_ACTIONS,
 });
 
 const bareName = (action) => {
@@ -212,4 +252,6 @@ export const OPENCHAMBER_ALL_ACTIONS = Object.freeze([
   ...OPENCHAMBER_KNOWLEDGE_ACTIONS,
   ...OPENCHAMBER_NOTIFY_ACTIONS,
   ...OPENCHAMBER_RENDER_ACTIONS,
+  ...OPENCHAMBER_WORKFLOW_ACTIONS,
+  ...OPENCHAMBER_WORKFLOW_ANSWER_ACTIONS,
 ]);

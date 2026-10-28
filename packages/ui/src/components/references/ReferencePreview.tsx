@@ -8,18 +8,20 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenu
 import { dropdownTriggerVariants } from '@/components/ui/dropdown-trigger';
 import { ScrollableOverlay } from '@/components/ui/ScrollableOverlay';
 import type { CISummary, ChangeRequestListStatus, ChangeRequestRevision, ChangeRequestRevisionKind, RepositoryReference, RepositoryReferenceComment, RepositoryReferenceDetail, TrackerItem, TrackerItemSummary, PullRequestStackLayer } from '@/lib/api/types';
+import { useEmojiShortcodes } from '@/lib/emoji/shortcodes';
 import { useI18n, type I18nKey } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 
 import type { CachedValue } from './referenceCache';
 import { ReferenceMarkdownRewriteContext, useProjectUploadRewrite } from './projectUploads';
+import { ReferenceLinksContext, useReferenceLinks } from './referenceLinks';
 import { useSourceControlProvider } from '@/lib/source-control/providers/registry';
 import { trackerPresentation } from '@/lib/trackers/presentation';
 import { useTrackerDescriptor } from '@/lib/trackers/registry';
 import { isSettledTrackerState, trackerStateGlyph } from '@/lib/trackers/stateLook';
 import { ReferenceComments, type ReferenceThreadActions } from './ReferenceComments';
 import { buildReferenceTimeline, type ReferenceCommentItem, type ReferenceTimelineEntry } from './referenceTimeline';
-import { ChecksGlyph, ReferenceLabelChips } from './ReferencePickerRow';
+import { ChecksGlyph, DiscussionCategory, ReferenceLabelChips } from './ReferencePickerRow';
 import { PullStackRows } from './PullStackRows';
 import { useReferenceImagePreview } from './useReferenceImagePreview';
 import {
@@ -125,6 +127,18 @@ export const ChecksSummaryLine: React.FC<{ checks: CISummary }> = ({ checks }) =
     </>
 );
 
+/** What the agent gets from an attached item, and what a worktree started from one gets. */
+const SENDS_KEYS = {
+    issue: 'references.picker.preview.sends.issue',
+    pull: 'references.picker.preview.sends.pull',
+    discussion: 'references.picker.preview.sends.discussion',
+} as const satisfies Record<RepositoryReference['kind'], I18nKey>;
+const WORKTREE_KEYS = {
+    issue: 'references.picker.preview.worktree.issue',
+    pull: 'references.picker.preview.worktree.pull',
+    discussion: 'references.picker.preview.worktree.discussion',
+} as const satisfies Record<RepositoryReference['kind'], I18nKey>;
+
 const REVIEW_KEYS = {
     approved: 'references.picker.preview.review.approved',
     changes_requested: 'references.picker.preview.review.changesRequested',
@@ -218,8 +232,20 @@ const ChangeFlags: React.FC<{ reference: RepositoryReference }> = ({ reference }
 /** Description with images and the HTML GitHub allows; the agent gets the source. */
 const ReferenceBody: React.FC<{ content: string }> = ({ content }) => {
     const rewrite = React.useContext(ReferenceMarkdownRewriteContext);
+    const links = React.useContext(ReferenceLinksContext);
     const shown = React.useMemo(() => (rewrite ? rewrite(content) : content), [content, rewrite]);
-    return <SimpleMarkdownRenderer content={shown} className={MARKDOWN_CLASS} enableFileReferences={false} allowRawHtml />;
+    const emojiShortcodes = useEmojiShortcodes(shown);
+    return (
+        <SimpleMarkdownRenderer
+            content={shown}
+            className={MARKDOWN_CLASS}
+            enableFileReferences={false}
+            allowRawHtml
+            repositoryLinks={links.repository}
+            emojiShortcodes={emojiShortcodes}
+            directory={links.directory}
+        />
+    );
 };
 
 /** The thread section under the body: loading, failure, empty, or the comments. */
@@ -413,6 +439,8 @@ const RepositoryPreview: React.FC<{
                 context: location ?? (comment.review && comment.review !== 'commented' ? t(REVIEW_VERDICT_KEYS[comment.review]) : null),
                 location,
             };
+            if (comment.answer) item.answer = comment.answer;
+            if (comment.excerpt) item.excerpt = comment.excerpt;
             if (comment.thread) {
                 item.thread = {
                     id: comment.thread.id,
@@ -448,9 +476,7 @@ const RepositoryPreview: React.FC<{
     const footer = footerOverride ?? (
         <div className="flex flex-col gap-2">
             <p className="typography-meta text-muted-foreground">
-                {purpose === 'worktree'
-                    ? t(reference.kind === 'pull' ? 'references.picker.preview.worktree.pull' : 'references.picker.preview.worktree.issue')
-                    : t(reference.kind === 'pull' ? 'references.picker.preview.sends.pull' : 'references.picker.preview.sends.issue')}
+                {t((purpose === 'worktree' ? WORKTREE_KEYS : SENDS_KEYS)[reference.kind])}
             </p>
             {reference.kind === 'pull' ? (
                 <label className="flex cursor-pointer items-center gap-2 typography-meta text-foreground">
@@ -531,6 +557,29 @@ const RepositoryPreview: React.FC<{
                         </MetaRow>
                     ) : null}
                     {updated ? <MetaRow label={t('references.picker.preview.updated')}>{updated}</MetaRow> : null}
+                    {reference.kind === 'discussion' ? (
+                        <>
+                            <MetaRow label={t('references.picker.preview.category')}><DiscussionCategory category={reference.category} /></MetaRow>
+                            {reference.category.answerable ? (
+                                <MetaRow label={t('references.picker.preview.answer')}>
+                                    {reference.answered ? (
+                                        <span className="inline-flex items-center gap-1">
+                                            <Icon name="checkbox-circle" className="size-3.5 text-[var(--status-success)]" />
+                                            {t('references.picker.state.answered')}
+                                        </span>
+                                    ) : t('references.picker.discussion.unanswered')}
+                                </MetaRow>
+                            ) : null}
+                            {reference.upvotes > 0 ? (
+                                <MetaRow label={t('references.picker.preview.upvotes')}>
+                                    <span className="tabular-nums">{reference.upvotes}</span>
+                                </MetaRow>
+                            ) : null}
+                            {reference.locked ? (
+                                <MetaRow label={t('references.picker.preview.locked')}>{t('references.picker.discussion.lockedNote')}</MetaRow>
+                            ) : null}
+                        </>
+                    ) : null}
                     {reference.kind === 'pull' ? (
                         <>
                             <MetaRow label={t('references.picker.preview.branch')}>
@@ -824,7 +873,7 @@ export const ReferencePreview: React.FC<{
     onOpenTrackerItem?: (item: TrackerItemSummary) => void;
     /** Reads an issue or PR again from its host, past every cached answer; settles when the reads are asked. */
     onRefresh?: () => Promise<void>;
-    /** Answer and resolve a PR's review threads; without it they are read only. */
+    /** Answer and resolve a PR's review threads, or answer a discussion's comments and choose its answer; without it they are read only. */
     threadActions?: ReferenceThreadActions;
     /** Opens another layer of the previewed PR's stack; without it the layers are plain text. */
     onOpenStackLayer?: (layer: PullRequestStackLayer) => void;
@@ -833,6 +882,7 @@ export const ReferencePreview: React.FC<{
 }> = ({ item, directory, pullStatus, trackerDetail, repositoryDetail, purpose, pinned, includeDiff, onIncludeDiffChange, now, footer, pullLinks, trackerStateControl, reply, labelsControl, reviewersControl, onOpenChecks, commentAttachments, stateMenu, onOpenTrackerItem, onRefresh, threadActions, onOpenStackLayer, revisionChoice }) => {
     const { t } = useI18n();
     const rewriteMarkdown = useProjectUploadRewrite(directory, item?.source === 'repository' ? item.reference : null);
+    const links = useReferenceLinks(directory, item?.source === 'repository' ? item.reference : null);
     if (!item) {
         return (
             <div className="flex h-full items-center justify-center px-6 text-center typography-meta text-muted-foreground">
@@ -845,28 +895,30 @@ export const ReferencePreview: React.FC<{
     }
     return (
         <ReferenceMarkdownRewriteContext.Provider value={rewriteMarkdown}>
-            <RepositoryPreview
-                reference={item.reference}
-                pullStatus={pullStatus}
-                detail={repositoryDetail}
-                purpose={purpose}
-                pinned={pinned}
-                includeDiff={includeDiff}
-                onIncludeDiffChange={onIncludeDiffChange}
-                now={now}
-                footer={footer}
-                pullLinks={pullLinks}
-                reply={reply}
-                labelsControl={labelsControl}
-                reviewersControl={reviewersControl}
-                onOpenChecks={onOpenChecks}
-                commentAttachments={commentAttachments}
-                stateMenu={stateMenu}
-                onRefresh={onRefresh}
-                threadActions={threadActions}
-                onOpenStackLayer={onOpenStackLayer}
-                revisionChoice={revisionChoice}
-            />
+            <ReferenceLinksContext.Provider value={links}>
+                <RepositoryPreview
+                    reference={item.reference}
+                    pullStatus={pullStatus}
+                    detail={repositoryDetail}
+                    purpose={purpose}
+                    pinned={pinned}
+                    includeDiff={includeDiff}
+                    onIncludeDiffChange={onIncludeDiffChange}
+                    now={now}
+                    footer={footer}
+                    pullLinks={pullLinks}
+                    reply={reply}
+                    labelsControl={labelsControl}
+                    reviewersControl={reviewersControl}
+                    onOpenChecks={onOpenChecks}
+                    commentAttachments={commentAttachments}
+                    stateMenu={stateMenu}
+                    onRefresh={onRefresh}
+                    threadActions={threadActions}
+                    onOpenStackLayer={onOpenStackLayer}
+                    revisionChoice={revisionChoice}
+                />
+            </ReferenceLinksContext.Provider>
         </ReferenceMarkdownRewriteContext.Provider>
     );
 };

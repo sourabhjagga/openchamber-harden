@@ -7,11 +7,13 @@ import type { FilePart, FormRequest, JsonValue, Message, Metadata, ModelSelectio
 import { compact, partIds } from "@/lib/opencode/model"
 import { readSubagentRun } from "@/lib/opencode/subagent-run"
 import { readDispatchedSessionResult } from "@/lib/opencode/dispatched-session"
+import { readWorkflowReport } from "@/lib/workflows/report"
 import { Binary } from "./binary"
 import { useSessionUIStore } from "./session-ui-store"
 import { useInputStore } from "./input-store"
 import type { ChildStoreManager } from "./child-store"
 import { computeSubtreeIds } from "./scoped-blocking-requests"
+import { withUserWorkTitle } from "@/lib/sessionWorkTitle"
 import { opencodeClient, type SyntheticContextInput } from "@/lib/opencode/client"
 import { findMessagePageItem } from "@/lib/opencode/messagePaging"
 import { toJsonRecord } from "@/lib/opencode/json"
@@ -1961,7 +1963,7 @@ export async function unarchiveSessions(
 export async function updateSessionTitle(
   sessionId: string,
   title: string,
-  options?: { directory?: string | null; expectedRuntimeKey?: string; signal?: AbortSignal },
+  options?: { directory?: string | null; expectedRuntimeKey?: string; signal?: AbortSignal; byUser?: boolean },
 ): Promise<void> {
   if (isStaleRuntime(options?.expectedRuntimeKey)) throw new Error("runtime changed")
   if (options?.signal) options.signal.throwIfAborted()
@@ -1975,6 +1977,13 @@ export async function updateSessionTitle(
   options?.signal?.throwIfAborted()
   useGlobalSessionsStore.getState().upsertSession(session)
   mirrorSessionIntoLiveStores(session, sessionDirectory)
+  // A name the user gave is theirs: the agent's `work.name` keeps it. The
+  // rename itself has succeeded, so a failed note only lets the agent rename
+  // it later, which is no reason to report the rename as failed.
+  if (options?.byUser) {
+    await patchSessionMetadata(sessionId, sessionDirectory, (metadata) => withUserWorkTitle(metadata, title), options.expectedRuntimeKey)
+      .catch(() => undefined)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2735,6 +2744,7 @@ const isTurnBoundary = (message: Message): boolean =>
   TURN_BOUNDARY_ROLES.has(message.role)
   || readSubagentRun(message) !== undefined
   || readDispatchedSessionResult(message) !== undefined
+  || readWorkflowReport(message) !== undefined
 
 /**
  * Fork keeping an assistant turn: the new session holds everything through

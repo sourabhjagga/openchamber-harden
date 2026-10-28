@@ -1,6 +1,7 @@
 /**
  * Reference-picker reads: searched lists, an item's detail and listed change
- * requests' statuses, for providers whose descriptor offers them
+ * requests' statuses (discussions where `features.discussions` says the
+ * provider keeps them), for providers whose descriptor offers them
  * (`features.referenceSearch`, `referenceDetail`, `listStatuses`,
  * `referencesAcross`).
  *
@@ -73,6 +74,15 @@ const referenceSchema = z.discriminatedUnion('kind', [
       sshUrl: z.string().optional(),
     }).nullable(),
   }),
+  z.object({
+    kind: z.literal('discussion'),
+    ...referenceFields,
+    state: z.enum(['open', 'resolved', 'outdated', 'duplicate']),
+    answered: z.boolean().nullable(),
+    upvotes: z.number(),
+    locked: z.boolean(),
+    category: z.object({ name: z.string(), emoji: z.string().nullable(), answerable: z.boolean() }),
+  }),
 ]);
 
 const referencesResultSchema = z.discriminatedUnion('connected', [
@@ -95,6 +105,11 @@ const referenceCommentFields = {
   path: z.string().nullable(),
   line: z.number().nullable(),
   review: z.enum(['approved', 'changes_requested', 'commented', 'dismissed']).nullable(),
+  // Absent from older servers and other hosts; a malformed one only costs the suggestion its base.
+  excerpt: z.object({
+    startLine: z.number().int().positive(),
+    lines: z.array(z.string()).max(200),
+  }).optional().catch(undefined),
 };
 
 const referenceDetailResultSchema = z.discriminatedUnion('connected', [
@@ -113,6 +128,7 @@ const referenceDetailResultSchema = z.discriminatedUnion('connected', [
           canReply: z.boolean(),
           replies: z.array(z.object(referenceCommentFields)),
         }).optional(),
+        answer: z.object({ chosen: z.boolean(), canChange: z.boolean() }).optional(),
       })),
       commentTotal: z.number(),
       pull: z.object({
@@ -146,6 +162,7 @@ const referenceDetailResultSchema = z.discriminatedUnion('connected', [
           })),
         }).nullable().optional().catch(undefined),
       }).nullable(),
+      discussion: z.object({ canComment: z.boolean(), canClose: z.boolean(), canReopen: z.boolean() }).optional(),
     }).nullable(),
   }),
 ]);
@@ -223,12 +240,13 @@ export const fetchRepositoryReferences = async (
 export const fetchRepositoryReferenceDetail = async (
   fetch: ReferencesFetch,
   context: SourceControlReadContext,
-  item: RepositoryItemRef,
+  item: RepositoryItemRef & { kind?: 'discussion' },
 ): Promise<RepositoryReferenceDetailResult> => {
   const query = readContextQuery(context);
   query.set('owner', item.owner);
   query.set('repo', item.repo);
   query.set('number', String(item.number));
+  if (item.kind === 'discussion') query.set('kind', 'discussion');
   const host = item.host?.trim();
   // The wire's default host is github.com; a ref on any other host names it.
   if (host && host !== 'github.com') {

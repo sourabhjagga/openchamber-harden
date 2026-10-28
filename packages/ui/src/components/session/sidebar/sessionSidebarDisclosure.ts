@@ -1,7 +1,8 @@
 import type { SessionSidebarRow } from './sessionSidebarRowModel';
 
 /**
- * Opening and closing a section, project, worktree, folder or multi-run in the
+ * Opening and closing a section, project, worktree, folder, multi-run or a
+ * session's subsessions in the
  * sidebar. The rows are a flat virtual list, so there is no container to
  * animate: the rows the header shows or hides are revealed above a moving
  * boundary, and the rows after them slide with that boundary, as one block
@@ -22,6 +23,8 @@ const disclosureOpen = (row: SessionSidebarRow): boolean | null => {
       return row.forceExpanded ? null : !row.collapsed;
     case 'run':
       return row.forceExpanded ? null : row.expanded;
+    case 'session':
+      return row.expanded === undefined || row.forceExpanded ? null : row.expanded;
     default:
       return null;
   }
@@ -102,4 +105,23 @@ export const boundaryClipKeyframes = (start: number, size: number, from: number,
     const visible = Math.min(Math.max(boundary - start, 0), size);
     return { offset, clipPath: `inset(0 0 ${size - visible}px 0)` };
   });
+};
+
+/**
+ * Keyframes that fade in a row, `size` tall at `start`, as a boundary moving
+ * `from` → `to` uncovers it: clear until the boundary reaches the row, solid
+ * once half of it shows. Tied to the boundary, the row keeps up with the gap
+ * opening for it; a fade on a clock of its own left the first rows under a
+ * header empty while the rows below already slid away.
+ */
+export const boundaryFadeInKeyframes = (start: number, size: number, from: number, to: number): Keyframe[] => {
+  if (to === from) return [{ opacity: 1 }, { opacity: 1 }];
+  const progressAt = (edge: number) => Math.min(Math.max((edge - from) / (to - from), 0), 1);
+  const shown = progressAt(start);
+  const solid = Math.max(progressAt(start + size / 2), shown);
+  const keyframes: Keyframe[] = [{ offset: 0, opacity: 0 }];
+  if (shown > 0) keyframes.push({ offset: shown, opacity: 0 });
+  keyframes.push({ offset: solid, opacity: 1 });
+  if (solid < 1) keyframes.push({ offset: 1, opacity: 1 });
+  return keyframes;
 };
