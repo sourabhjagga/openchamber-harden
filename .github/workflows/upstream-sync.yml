@@ -71,9 +71,24 @@ jobs:
         run: |
           TAG="${{ steps.check_release.outputs.latest_tag }}"
           echo "Merging release $TAG..."
+
+          # Extract the OpenCode CLI version pinned in the upstream release Dockerfile
+          UPSTREAM_CLI_VER="$(git show "$TAG:Dockerfile" 2>/dev/null | grep -oE "@opencode/cli@[0-9.]+" | cut -d@ -f3 || true)"
+
           if ! git merge --no-edit "$TAG" -m "sync: absorb upstream release $TAG"; then
             echo "Handling upstream workflow conflicts..."
             sh .fork/sync-upstream-workflows.sh
+
+            # If Dockerfile conflicted on the CLI version or packaging lines, resolve it cleanly
+            if git status --porcelain | grep -q "^UU Dockerfile\|^AA Dockerfile"; then
+              echo "Resolving Dockerfile merge conflict..."
+              git checkout HEAD -- Dockerfile
+              if [ -n "$UPSTREAM_CLI_VER" ]; then
+                sed -i "s|@opencode/cli@[0-9.]*|@opencode/cli@${UPSTREAM_CLI_VER}|g" Dockerfile
+                sed -i "s|OPENCODE_CLI_VERSION=[0-9.]*|OPENCODE_CLI_VERSION=${UPSTREAM_CLI_VER}|g" Dockerfile
+              fi
+              git add Dockerfile
+            fi
 
             # Fail only if there are real code conflicts outside .github/workflows
             UNMERGED="$(git diff --name-only --diff-filter=U)"
