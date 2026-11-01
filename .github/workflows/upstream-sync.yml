@@ -84,7 +84,6 @@ jobs:
               echo "Resolving Dockerfile merge conflict..."
               git checkout HEAD -- Dockerfile
               if [ -n "$UPSTREAM_CLI_VER" ]; then
-                sed -i "s|@opencode/cli@[0-9.]*|@opencode/cli@${UPSTREAM_CLI_VER}|g" Dockerfile
                 sed -i "s|OPENCODE_CLI_VERSION=[0-9.]*|OPENCODE_CLI_VERSION=${UPSTREAM_CLI_VER}|g" Dockerfile
               fi
               git add Dockerfile

@@ -214,7 +214,7 @@ RUN npm config set prefix /home/openchamber/.npm-global && mkdir -p /home/opench
     /home/openchamber/.config/opencode \
     /home/openchamber/.ssh \
     /home/openchamber/workspaces && \
-  npm install -g @opencode/cli@2.2.0${OPENCODE_CLI_VERSION}
+  npm install -g @opencode/cli@${OPENCODE_CLI_VERSION}
 
 # cloudflared 2026.3.0 - update digest explicitly when upgrading
 COPY --from=cloudflare/cloudflared@sha256:6d91c121b803126f7a5344005d17a9324788fc09d305b6e2560ec6040a7ae283 /usr/local/bin/cloudflared /usr/local/bin/cloudflared
