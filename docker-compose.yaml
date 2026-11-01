@@ -1,5 +1,5 @@
 # One place to bump the release tag.
-x-openchamber-image: &openchamber-image sourabhjagga/openchamber-harden:v2.5.2
+x-openchamber-image: &openchamber-image sourabhjagga/openchamber-harden:v2.5.3
 
 services:
   openchamber:
