@@ -203,7 +203,7 @@ RUN userdel bun \
 ENV NPM_CONFIG_PREFIX=/home/openchamber/.npm-global
 ENV PATH=${NPM_CONFIG_PREFIX}/bin:${PATH}
 
-ARG OPENCODE_CLI_VERSION=2.2.0
+ARG OPENCODE_CLI_VERSION=2.2.5
 
 USER openchamber
 RUN npm config set prefix /home/openchamber/.npm-global && mkdir -p /home/openchamber/.npm-global && \
