@@ -150,6 +150,9 @@ mock.module('@/lib/gitApi', () => ({
 mock.module('@/lib/openchamberConfig', () => ({
   substituteCommandVariables: (command: string) => command,
 }));
+mock.module('@/lib/sharedTrustConfirmation', () => ({
+  resolveWorktreeTeardownCommands: async () => [],
+}));
 
 mock.module('@/lib/worktreeSessionCreator', () => ({
   createQuickWorktree: mock((project: ProjectRef, options: CreateQuickWorktreeOptions) => {
@@ -164,6 +167,7 @@ mock.module('@/lib/worktreeSessionCreator', () => ({
 mock.module('@/lib/worktrees/worktreeBootstrap', () => ({
   waitForWorktreeGitReady: mock((directory: string) => waitForWorktreeGitReadyImplementation(directory)),
   clearWorktreeBootstrapState: mock(),
+  getWorktreeBootstrapState: () => null,
   markWorktreeBootstrapPending: mock(),
   setWorktreeBootstrapState: mock(),
   startWorktreeBootstrapWatcher: mock(),
@@ -205,7 +209,10 @@ mock.module('@/sync/session-actions', () => ({
     moveCalls.push({ sessionId: session.id, sourceDirectory, destinationDirectory });
     return moveSessionImplementation(session, sourceDirectory, destinationDirectory);
   },
-  getSessionLiveActivity,
+  readSessionsLiveActivity: async (sessionIds: string[]) => {
+    const activities = sessionIds.map(getSessionLiveActivity);
+    return activities.find((activity) => activity === 'active') ?? activities.find((activity) => activity === 'unknown') ?? 'idle';
+  },
   isSessionBusyNow: (sessionId: string) => getSessionLiveActivity(sessionId) === 'active',
 }));
 
@@ -291,7 +298,7 @@ const setStatuses = (directory: string, statuses: Record<string, State['session_
 };
 
 const waitFor = async (predicate: () => boolean): Promise<void> => {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
     if (predicate()) return;
     await Promise.resolve();
   }

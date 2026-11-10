@@ -11,11 +11,11 @@ export const OPENCHAMBER_CONTROL_ACTION_DEFINITIONS = Object.freeze([
   { action: 'projects.list', title: 'List session destinations', description: 'Projects and Chats; use an id as projectId for session.create. No parameters' },
   { action: 'models.list', title: 'Show model preferences', description: 'Default, favorite and recent models; no parameters' },
   { action: 'models.search', title: 'Search models', description: 'The model catalog, favorites and recent models first; optional query, provider, all, limit, offset' },
-  { action: 'session.list', title: 'List sessions', description: 'Optional limit, all, withStatus' },
+  { action: 'session.list', title: 'List sessions', description: 'Optional limit, all, withStatus (each session\'s status as in session.status)' },
   { action: 'session.create', title: 'Create a session', description: 'In this directory by default; projectId from projects.list selects a project or openchamber:chats for a new Chat. Use the returned directory for later session actions. Prompt optional' },
   { action: 'session.send', title: 'Send a prompt', description: 'New prompt to sessionId' },
   { action: 'session.fork', title: 'Fork a session', description: 'Fork sessionId at messageId; prompt optional' },
-  { action: 'session.status', title: 'Check session status', description: 'Status of sessionId' },
+  { action: 'session.status', title: 'Check session status', description: 'Status of sessionId: busy, idle, or waiting when it cannot go on until the user answers it. An unknown id is an error' },
   { action: 'session.messages', title: 'Read session messages', description: 'Text messages and sessionStatus of sessionId' },
   { action: 'session.moveToWorktree', title: 'Move a session into a new worktree', description: 'Move sessionId (default: this session) and its carry files into a new worktree, made the way the New worktree dialog makes one; requires worktree. Nothing moves when carry cannot be applied; directory is ignored' },
   { action: 'session.link', title: 'Link a change or issue to a session', description: 'Add link to sessionId (default: this session); the same link again updates its title. Only the user removes links' },
@@ -24,8 +24,8 @@ export const OPENCHAMBER_CONTROL_ACTION_DEFINITIONS = Object.freeze([
   { action: 'work.name', title: 'Name the task', description: 'Name the worktree\'s or isolated space\'s task for sessionId (default: this session), never a session. In title: at most 4 words in the user\'s latest language; rename only for a different task. A user-given name stays. Main checkout and plain folders need no naming. A worktree on an OpenChamber-generated placeholder branch also requires branch, the English branch name after the task, and renames it; any other branch stays' },
   { action: 'schedule.status', title: 'Check scheduler status', description: 'No parameters', agentExposed: false },
   { action: 'schedule.list', title: 'List scheduled tasks', description: 'Tasks and scheduler status' },
-  { action: 'schedule.create', title: 'Create a scheduled task', description: 'Requires name, prompt, one schedule selector, and model unless targetSessionId is set, which keeps that session\'s model' },
-  { action: 'schedule.update', title: 'Change a scheduled task', description: 'Change taskId in place, keeping its id and run state; pass only what changes' },
+  { action: 'schedule.create', title: 'Create a scheduled task', description: 'Requires name, prompt, one schedule selector, and model unless targetSessionId is set. That session keeps its model and agent unless the task names others, which then become the session\'s. A named model is checked against the catalog when the task is written. runInWorktree (git only) runs each run in a fresh worktree on baseBranch (default HEAD); cleanupWorktree false keeps it' },
+  { action: 'schedule.update', title: 'Change a scheduled task', description: 'Change taskId in place, keeping its id and run state; pass only what changes. runInWorktree, baseBranch and cleanupWorktree switch a task to run in an isolated worktree (git only)' },
   { action: 'schedule.run', title: 'Run a scheduled task', description: 'Run taskId now' },
   { action: 'schedule.delete', title: 'Delete a scheduled task', description: 'Delete taskId' },
   { action: 'schedule.toggle', title: 'Enable or disable a scheduled task', description: 'Requires taskId and disabled' },
@@ -174,6 +174,19 @@ export const OPENCHAMBER_SECRET_ACTIONS = Object.freeze(
 );
 
 /**
+ * Usage is its own tool: reading provider quotas is a distinct intent from
+ * the others, it is off until the user turns it on, and each read asks every
+ * configured provider, so it has to disappear completely when off.
+ */
+export const OPENCHAMBER_USAGE_ACTION_DEFINITIONS = Object.freeze([
+  { action: 'usage.read', title: 'Read usage limits', description: 'Usage windows, percentages and resets of every configured provider, as Settings > Usage shows them; providerId reads one' },
+]);
+
+export const OPENCHAMBER_USAGE_ACTIONS = Object.freeze(
+  OPENCHAMBER_USAGE_ACTION_DEFINITIONS.map(({ action }) => action),
+);
+
+/**
  * Workflows are their own tool: fanning a large task out to many agents is a
  * distinct intent with its own scripting guidance, and the tool is off until
  * the user turns it on, so it has to disappear completely.
@@ -230,6 +243,7 @@ const ACTIONS_BY_TOOL = Object.freeze({
   openchamber_render: OPENCHAMBER_RENDER_ACTIONS,
   openchamber_image: OPENCHAMBER_IMAGE_ACTIONS,
   openchamber_secret: OPENCHAMBER_SECRET_ACTIONS,
+  openchamber_usage: OPENCHAMBER_USAGE_ACTIONS,
   openchamber_workflow: OPENCHAMBER_WORKFLOW_ACTIONS,
   [WORKFLOW_ANSWER_TOOL]: OPENCHAMBER_WORKFLOW_ANSWER_ACTIONS,
 });
@@ -283,6 +297,7 @@ export const OPENCHAMBER_ALL_ACTIONS = Object.freeze([
   ...OPENCHAMBER_RENDER_ACTIONS,
   ...OPENCHAMBER_IMAGE_ACTIONS,
   ...OPENCHAMBER_SECRET_ACTIONS,
+  ...OPENCHAMBER_USAGE_ACTIONS,
   ...OPENCHAMBER_WORKFLOW_ACTIONS,
   ...OPENCHAMBER_WORKFLOW_ANSWER_ACTIONS,
 ]);

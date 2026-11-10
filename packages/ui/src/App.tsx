@@ -16,6 +16,7 @@ import { setRequestsInFlightTrackingEnabled } from '@/stores/utils/requestsInFli
 import { ErrorBoundary } from '@/components/ui/ErrorBoundary';
 // useEventStream removed — replaced by SyncProvider + SyncBridge
 import { useMenuActions } from '@/hooks/useMenuActions';
+import { useGuestInstallLinks } from '@/hooks/useGuestInstallLinks';
 import { useSessionStatusBootstrap } from '@/hooks/useSessionStatusBootstrap';
 import { useTraySync } from '@/hooks/useTraySync';
 import { useGlobalSessionsPolling } from '@/hooks/useGlobalSessionsPolling';
@@ -26,6 +27,7 @@ import { useAgentMemorySync } from '@/hooks/useAgentMemorySync';
 import { useBrowserProviderSync } from '@/hooks/useBrowserProviderSync';
 import { useSourceControlProviderSync } from '@/hooks/useSourceControlProviderSync';
 import { useTrackerProviderSync } from '@/hooks/useTrackerProviderSync';
+import { useQuotaProviderSync } from '@/hooks/useQuotaProviderSync';
 import { useGuestCatalogSync } from '@/hooks/useGuestCatalogSync';
 import { useLimitFailoverNotices } from '@/hooks/useLimitFailoverNotices';
 import { useEnterprisePolicySync } from '@/hooks/useEnterprisePolicySync';
@@ -209,6 +211,7 @@ type AppProps = {
 };
 
 function App({ apis }: AppProps) {
+  useGuestInstallLinks();
   React.useEffect(() => startDiagnosticCapture(), []);
   React.useEffect(() => {
     markStartupTrace('App:mounted');
@@ -667,6 +670,7 @@ function App({ apis }: AppProps) {
   useBrowserProviderSync();
   useSourceControlProviderSync(apis.sourceControl);
   useTrackerProviderSync(apis.trackers);
+  useQuotaProviderSync();
   useGuestCatalogSync();
   useLimitFailoverNotices();
   useRoutingSync();

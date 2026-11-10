@@ -12,6 +12,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { execGit as executeGit } from './bridge-git-process-runtime';
 import { readConfig } from './opencodeConfig';
+import { isContributorForkGitDirectory } from '../../web/server/lib/git/contributor-provenance-storage.js';
 import { readProjectStartCommand } from '../../web/server/lib/opencode/project-start-command.js';
 import { resolveWorktreeDirectory } from './worktree-directory';
 import { readSubmoduleState, resolveGitPathTarget, type GitPathUnavailable, type GitSubmoduleState } from './gitPathDiff';
@@ -319,13 +320,25 @@ async function execGit(args: string[], cwd: string, env?: NodeJS.ProcessEnv): Pr
 
 // ============== Repository Operations ==============
 
+const GIT_PROBE_TIMEOUT_MS = 30_000;
+
 /**
  * Check if a directory is a git repository
  */
 export async function checkIsGitRepository(directory: string): Promise<boolean> {
-  const result = await execGit(['rev-parse', '--is-inside-work-tree', '--is-bare-repository'], directory);
+  // A missing folder is simply not a repository; a Git that ran there and
+  // could not answer is a failure the panel shows in Git's words, as the web
+  // server does (`probeRepository` in the server's git service).
+  if (!fs.existsSync(normalizePath(directory))) return false;
+  const result = await executeGit(['rev-parse', '--is-inside-work-tree', '--is-bare-repository'], normalizePath(directory), {
+    binary: gitApi?.git.path || 'git',
+    timeoutMs: GIT_PROBE_TIMEOUT_MS,
+    // English messages, so "not a git repository" is recognised whatever the locale.
+    env: { LC_ALL: 'C' },
+  });
   if (result.exitCode !== 0) {
-    return false;
+    if (result.exitCode === 128 && /^fatal: not a git repository\b/i.test(result.stderr.trim())) return false;
+    throw Object.assign(new Error(result.stderr.trim() || 'Git could not read this directory.'), { code: 'GIT_REPOSITORY_UNREADABLE' });
   }
   // A bare repository is not inside a work tree but is still a repository:
   // its linked worktrees are the checkouts a user works in.
@@ -854,6 +867,8 @@ export interface CreateGitWorktreePayload {
 export interface RemoveGitWorktreePayload {
   directory: string;
   deleteLocalBranch?: boolean;
+  /** Runs inside the worktree before anything is removed; a failure keeps the worktree. */
+  teardownCommand?: string;
   /**
    * Releases the OpenCode instance that served the worktree while its path
    * still resolves. The bridge injects it; the webview payload never carries it.
@@ -1464,46 +1479,39 @@ const isBranchKeptOnWorktreeRemoval = async (primaryWorktree: string, branchName
   });
 };
 
-const runWorktreeStartCommand = async (directory: string, command: string): Promise<{ success: boolean; message?: string; stdout?: string; stderr?: string }> => {
+// Mirrors the server: `timeoutMs` 0 means no limit, and stdin is closed
+// because nobody can answer a prompt from these commands.
+const runWorktreeStartCommand = async (
+  directory: string,
+  command: string,
+  { timeoutMs = 0 }: { timeoutMs?: number } = {},
+): Promise<{ success: boolean; message?: string; stdout?: string; stderr?: string }> => {
   const text = String(command || '').trim();
   if (!text) {
     return { success: true };
   }
 
-  const env = await buildGitEnv();
-  if (process.platform === 'win32') {
-    try {
-      const { stdout, stderr } = await execFileAsync('cmd', ['/c', text], {
-        cwd: directory,
-        env,
-        maxBuffer: 20 * 1024 * 1024,
-      });
-      return { success: true, stdout: String(stdout || ''), stderr: String(stderr || '') };
-    } catch (error) {
-      const err = error as { stdout?: string; stderr?: string; message?: string };
-      return {
-        success: false,
-        stdout: err.stdout,
-        stderr: err.stderr,
-        message: String(err.message || err.stderr || err.stdout || 'Failed to run start command').trim(),
-      };
-    }
-  }
-
+  const windows = process.platform === 'win32';
+  const run = execFileAsync(windows ? 'cmd' : 'bash', windows ? ['/c', text] : ['-lc', text], {
+    cwd: directory,
+    env: await buildGitEnv(),
+    maxBuffer: 20 * 1024 * 1024,
+    timeout: timeoutMs,
+  });
+  run.child.stdin?.end();
   try {
-    const { stdout, stderr } = await execFileAsync('bash', ['-lc', text], {
-      cwd: directory,
-      env,
-      maxBuffer: 20 * 1024 * 1024,
-    });
+    const { stdout, stderr } = await run;
     return { success: true, stdout: String(stdout || ''), stderr: String(stderr || '') };
   } catch (error) {
-    const err = error as { stdout?: string; stderr?: string; message?: string };
+    const err = error as { stdout?: string; stderr?: string; message?: string; killed?: boolean; code?: unknown };
+    const timedOut = timeoutMs > 0 && err.killed === true && err.code !== 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
     return {
       success: false,
       stdout: err.stdout,
       stderr: err.stderr,
-      message: String(err.message || err.stderr || err.stdout || 'Failed to run start command').trim(),
+      message: timedOut
+        ? `${text} did not finish within ${Math.round(timeoutMs / 1000)} seconds`
+        : String(err.message || err.stderr || err.stdout || 'Failed to run start command').trim(),
     };
   }
 };
@@ -1903,6 +1911,7 @@ export async function previewWorktreeCreate(directory: string, input: CreateGitW
   const mode = input?.mode === 'existing' ? 'existing' : 'new';
   const context = await resolveWorktreeProjectContext(directory);
   await fs.promises.mkdir(context.worktreeRoot, { recursive: true });
+  context.worktreeRoot = await fs.promises.realpath(context.worktreeRoot);
 
   const preferredName = String(input?.worktreeName || input?.name || '').trim();
   const preferredBranchName = cleanBranchName(String(input?.branchName || '').trim());
@@ -2170,6 +2179,7 @@ export async function createWorktree(directory: string, input: CreateGitWorktree
   const preparedInput = prepared.input;
 
   await fs.promises.mkdir(context.worktreeRoot, { recursive: true });
+  context.worktreeRoot = await fs.promises.realpath(context.worktreeRoot);
 
   const preferredName = String(preparedInput.worktreeName || preparedInput.name || '').trim();
   const preferredBranchName = cleanBranchName(String(preparedInput.branchName || '').trim());
@@ -2316,6 +2326,8 @@ export async function waitForWorktreeRemoval(directory: string): Promise<void> {
 // failure is retried briefly before it is reported.
 const WORKTREE_BUSY_RETRY_DELAYS_MS = [250, 500, 1000, 2000];
 const WORKTREE_BUSY_MESSAGE = 'The worktree folder is still in use by another process (a running session, terminal or editor). Stop it and try again.';
+const WORKTREE_TEARDOWN_TIMEOUT_MS = 5 * 60 * 1000;
+const WORKTREE_TEARDOWN_OUTPUT_MAX_CHARS = 2000;
 
 // Only Windows locks a folder that is open elsewhere; on other platforms the
 // same words mean a real permission problem and are reported as they are.
@@ -2368,6 +2380,64 @@ const removeGitWorktreeWhenFree = async (
     await wait(delay);
   }
 };
+
+// Mirrors the server (`runWorktreeTeardown` in packages/web/server/lib/git/service.js):
+// teardown runs while the worktree and its OpenCode instance are intact, so a
+// failing command leaves both as they were; a folder already gone or a
+// checkout whose bootstrap failed has nothing to stop. A contributor-fork
+// checkout holds the contributor's code and never runs it. The host creates no
+// such checkout, so the answer comes from the server's store; when it cannot be
+// read nothing runs and the worktree is kept. The path is the server's own
+// (`OPENCHAMBER_USER_CONFIG_ROOT`, the same on every platform).
+const contributorProvenancePath = (): string => path.join(
+  process.env.OPENCHAMBER_DATA_DIR ? path.resolve(process.env.OPENCHAMBER_DATA_DIR) : path.join(os.homedir(), '.config', 'openchamber'),
+  'git-contributor-provenance.json',
+);
+
+const isContributorCheckout = async (worktreeDirectory: string): Promise<boolean> => {
+  const gitDirectory = await runGitCommandOrThrow(worktreeDirectory, ['rev-parse', '--absolute-git-dir'], 'Could not find the git directory');
+  return isContributorForkGitDirectory({
+    filePath: contributorProvenancePath(),
+    gitDirectory: gitDirectory.stdout.trim(),
+  });
+};
+
+const runWorktreeTeardown = async (worktreeDirectory: string, command: string | undefined): Promise<void> => {
+  if (!command?.trim()) return;
+  if (worktreeBootstrapState.get(toBootstrapStateKey(worktreeDirectory))?.status === WORKTREE_BOOTSTRAP_FAILED) return;
+  if (!(await checkPathExists(worktreeDirectory))) return;
+  const contributor = await isContributorCheckout(worktreeDirectory).catch((error: Error) => {
+    throw Object.assign(new Error(`Could not tell whether this checkout holds a contributor's code, so no teardown command ran and the worktree was kept: ${error.message}`), { code: 'WORKTREE_TEARDOWN_FAILED' });
+  });
+  if (contributor) return;
+  const teardown = await runWorktreeStartCommand(worktreeDirectory, command, { timeoutMs: WORKTREE_TEARDOWN_TIMEOUT_MS });
+  if (!teardown.success) {
+    const output = teardown.message || 'the command exited with an error';
+    const shown = output.length > WORKTREE_TEARDOWN_OUTPUT_MAX_CHARS ? `...${output.slice(-WORKTREE_TEARDOWN_OUTPUT_MAX_CHARS)}` : output;
+    throw Object.assign(new Error(`Worktree teardown command failed, so the worktree was kept: ${shown}`), { code: 'WORKTREE_TEARDOWN_FAILED' });
+  }
+};
+
+/** Runs the teardown of a registered linked worktree without removing it; see the server's `teardownWorktree`. */
+export async function teardownWorktree(directory: string, input: { directory: string; teardownCommand?: string }): Promise<boolean> {
+  const targetDirectory = normalizeDirectoryPath(input?.directory);
+  if (!targetDirectory) {
+    throw new Error('Worktree directory is required');
+  }
+  await waitForActiveWorktreeBootstrap(targetDirectory);
+  const context = await resolveWorktreeProjectContext(directory, { tolerateWorktreeRootConfigError: true });
+  const targetCanonical = await canonicalPath(targetDirectory);
+  if (targetCanonical === await canonicalPath(context.primaryWorktree)) {
+    throw new Error('Cannot tear down the primary workspace');
+  }
+  for (const entry of await listWorktreeEntries(context.primaryWorktree)) {
+    if (entry?.worktree && await canonicalPath(entry.worktree) === targetCanonical) {
+      await runWorktreeTeardown(entry.worktree, input?.teardownCommand);
+      break;
+    }
+  }
+  return true;
+}
 
 export async function removeWorktree(directory: string, input: RemoveGitWorktreePayload): Promise<boolean> {
   const targetDirectory = normalizeDirectoryPath(input?.directory);
@@ -2431,6 +2501,8 @@ export async function removeWorktree(directory: string, input: RemoveGitWorktree
 
     return true;
   }
+
+  await runWorktreeTeardown(matchedEntry.worktree, input?.teardownCommand);
 
   const settleRemoval = trackWorktreeRemoval(targetCanonical);
   // The directory is a registered linked worktree and still exists here, which

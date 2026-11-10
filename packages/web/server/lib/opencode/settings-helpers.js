@@ -48,6 +48,7 @@ const sidebarSectionSchema = z.union([
       kinds: sidebarChips(['session', 'worktree', 'space', 'run', 'scheduled']).catch([]),
       links: sidebarChips(['pr', 'issue', 'tracker', 'plan', 'goal']).catch([]),
       projectIds: sidebarProjectIds.catch([]),
+      folders: sidebarIds.catch([]),
       activity: z.enum(['any', 'today', 'two-days', 'week', 'stalled']).catch('any'),
       // A list of phrases; a build before lists kept one phrase as a string.
       text: z.union([z.string().transform((value) => [value]), z.array(z.unknown())]).transform((entries) => (
@@ -367,8 +368,8 @@ export const createSettingsHelpers = (dependencies) => {
         ...new Set(candidate.workStatusHiddenSections.filter((entry) => typeof entry === 'string' && entry.length > 0)),
       ];
     }
-    if (typeof candidate.workStatusHiddenSectionsExplicit === 'boolean') {
-      result.workStatusHiddenSectionsExplicit = candidate.workStatusHiddenSectionsExplicit;
+    for (const key of ['workStatusHiddenSectionsExplicit', 'workStatusSectionOrderExplicit']) {
+      if (typeof candidate[key] === 'boolean') result[key] = candidate[key];
     }
     if (Array.isArray(candidate.workStatusSectionOrder)) {
       result.workStatusSectionOrder = [
@@ -581,6 +582,10 @@ export const createSettingsHelpers = (dependencies) => {
     if (typeof candidate.tableCellWrap === 'boolean') {
       result.tableCellWrap = candidate.tableCellWrap;
     }
+    const selectionApprovalText = z.string().transform((value) => value.slice(0, 1000)).safeParse(candidate.selectionApprovalText);
+    if (selectionApprovalText.success) {
+      result.selectionApprovalText = selectionApprovalText.data;
+    }
     if (typeof candidate.copyMessagesAsPlainText === 'boolean') {
       result.copyMessagesAsPlainText = candidate.copyMessagesAsPlainText;
     }
@@ -743,6 +748,9 @@ export const createSettingsHelpers = (dependencies) => {
     }
     if (typeof candidate.sessionRetentionOnlyArchived === 'boolean') {
       result.sessionRetentionOnlyArchived = candidate.sessionRetentionOnlyArchived;
+    }
+    if (candidate.sessionRetentionIncludeInWork === true || candidate.sessionRetentionIncludeInWork === false) {
+      result.sessionRetentionIncludeInWork = candidate.sessionRetentionIncludeInWork;
     }
     if (typeof candidate.mergedWorktreeCleanupEnabled === 'boolean') {
       result.mergedWorktreeCleanupEnabled = candidate.mergedWorktreeCleanupEnabled;
@@ -925,8 +933,8 @@ export const createSettingsHelpers = (dependencies) => {
     if (candidate.agentSecretToolEnabled === true || candidate.agentSecretToolEnabled === false) {
       result.agentSecretToolEnabled = candidate.agentSecretToolEnabled;
     }
-    if (typeof candidate.agentToolsCodeMode === 'boolean') {
-      result.agentToolsCodeMode = candidate.agentToolsCodeMode;
+    if (candidate.agentUsageToolEnabled === true || candidate.agentUsageToolEnabled === false) {
+      result.agentUsageToolEnabled = candidate.agentUsageToolEnabled;
     }
     if (typeof candidate.isolatedSpacesEnabled === 'boolean') {
       result.isolatedSpacesEnabled = candidate.isolatedSpacesEnabled;
@@ -1006,6 +1014,9 @@ export const createSettingsHelpers = (dependencies) => {
     }
     if (typeof candidate.fontSize === 'number' && Number.isFinite(candidate.fontSize)) {
       result.fontSize = Math.max(50, Math.min(200, Math.round(candidate.fontSize)));
+    }
+    if (Number.isFinite(candidate.chatFontSize)) {
+      result.chatFontSize = Math.max(50, Math.min(200, Math.round(candidate.chatFontSize)));
     }
     if (typeof candidate.terminalFontSize === 'number' && Number.isFinite(candidate.terminalFontSize)) {
       result.terminalFontSize = Math.max(9, Math.min(52, Math.round(candidate.terminalFontSize)));

@@ -1,4 +1,5 @@
 import React from 'react';
+import { useMobileAppActions } from '@/apps/mobileAppContext';
 import type { FilePart, Part } from '@/lib/opencode/model';
 
 import { sessionMentionChipsOf } from './parts/sessionMentionChips';
@@ -11,7 +12,7 @@ import type { ToolPart as ToolPartType } from '@/lib/opencode/model';
 import type { StreamPhase, ToolPopupContent, AgentMentionInfo } from './types';
 import type { TurnChangedFile, TurnGroupingContext } from '../lib/turns/types';
 import { cn } from '@/lib/utils';
-import { isEmptyTextPart, extractTextContent } from './partUtils';
+import { contextPartsPastCollapse, isEmptyTextPart, extractTextContent } from './partUtils';
 import { isInvisibleText } from '@/lib/invisibleText';
 import { attachmentBasename } from '@/lib/attachmentIdentity';
 import { FadeInOnReveal } from './FadeInOnReveal';
@@ -41,6 +42,7 @@ import { assistantTextSegments, flattenAssistantTextParts, suggestPlanTitleFromT
 import { MULTIRUN_EXECUTION_FORK_PROMPT_META_TEXT } from '@/lib/messages/executionMeta';
 import { useMessageTTS } from '@/hooks/useMessageTTS';
 import { MobileOverlayPanel } from '@/components/ui/MobileOverlayPanel';
+import { MobileSheetRow } from '@/components/ui/MobileSheetList';
 import { useFactsFit } from './useFactsFit';
 import { useConfigStore } from '@/stores/useConfigStore';
 import { useProjectsStore } from '@/stores/useProjectsStore';
@@ -57,6 +59,7 @@ import { isExpandableTool } from './parts/toolRenderUtils';
 import { ShownPartCard, ShownToolCard } from './parts/ShownToolCard';
 import { isShownInPlace } from '@/lib/opencode/tools';
 import { LiveActivityCollapse } from '../components/LiveActivityCollapse';
+import { dispatchRowExpand } from '../lib/scroll/timelineScrollIntent';
 import { ActivityRowSkipContext, isActivityRowPart, isToolRowShown } from '../lib/turns/activityRows';
 import { LiveFinalActivityContext, LiveTurnHoistedPagesContext } from '../components/liveActivityContext';
 import { MessageSliceContext } from './messageSliceContext';
@@ -64,6 +67,7 @@ import { useProjectContextStore } from '@/stores/useProjectContextStore';
 import { resolveProjectForSessionDirectory } from '@/lib/projectResolution';
 import { useSpaceProjectDirectory } from '@/lib/spaces/spaces-store';
 import { useEffectiveDirectory } from '@/hooks/useEffectiveDirectory';
+import { HoverTooltip } from '@/components/ui/row-tooltip';
 import { useI18n } from '@/lib/i18n';
 import { FileTypeIcon } from '@/components/icons/FileTypeIcon';
 import {
@@ -71,7 +75,7 @@ import {
     sendImplementationResponseToReviewer,
     sendReviewFeedbackToOriginal,
 } from '@/lib/reviewFlow';
-import { useProviderLogo } from '@/hooks/useProviderLogo';
+import { ProviderLogo } from '@/components/ui/ProviderLogo';
 import { useAgentColors } from '@/hooks/useAgentColors';
 import { isCapacitorMobileApp } from '@/apps/mobileNativeChrome';
 import { shareFileFromNativeApp } from '@/lib/nativeFileShare';
@@ -154,15 +158,23 @@ const InteractiveTurnChangedFilePills = React.memo(({ files }: { files: TurnChan
     const isMobile = useUIStore((state) => state.isMobile);
     const navigateToDiff = useUIStore((state) => state.navigateToDiff);
     const openContextDiff = useUIStore((state) => state.openContextDiff);
+    const setPendingTurnDiffFile = useUIStore((state) => state.setPendingTurnDiffFile);
+    const mobileActions = useMobileAppActions();
 
     const openLastTurnDiff = React.useCallback((file: string) => {
+        if (mobileActions) {
+            mobileActions.openChanges({ diffPath: file, scope: 'turn' });
+            return;
+        }
+
         if (!isMobile && effectiveDirectory) {
             openContextDiff(effectiveDirectory, file, false, 'turn');
+            setPendingTurnDiffFile({ file, sessionId: useSessionUIStore.getState().currentSessionId });
             return;
         }
 
         navigateToDiff(file, false, 'turn');
-    }, [effectiveDirectory, isMobile, navigateToDiff, openContextDiff]);
+    }, [effectiveDirectory, isMobile, mobileActions, navigateToDiff, openContextDiff, setPendingTurnDiffFile]);
 
     return (
         <>
@@ -207,27 +219,28 @@ const TurnChangedFilePills = React.memo(({ files, isInteractive }: { files?: Tur
     return (
         <>
             <Pills files={expanded ? files : files.slice(0, CHANGED_FILE_CHIP_LIMIT)} />
-            <button
-                ref={toggleRef}
-                type="button"
-                className={CHANGED_FILE_CHIP_BUTTON_CLASS_NAME}
-                aria-expanded={expanded}
-                aria-label={label}
-                title={label}
-                onClick={(event) => {
-                    event.stopPropagation();
-                    setExpanded((value) => !value);
-                }}
-            >
-                <span className={cn(CHANGED_FILE_CHIP_CLASS_NAME, CHANGED_FILE_CHIP_HOVER_CLASS_NAME)} style={CHANGED_FILE_CHIP_STYLE}>
-                    {expanded ? (
-                        // A text line tall, so the icon-only chip matches the file chips.
-                        <span className="inline-flex h-[round(1.35em,1px)] items-center">
-                            <Icon name="arrow-up-s" className="h-3.5 w-3.5" />
-                        </span>
-                    ) : `+${hiddenCount}`}
-                </span>
-            </button>
+            <HoverTooltip label={label}>
+                <button
+                    ref={toggleRef}
+                    type="button"
+                    className={CHANGED_FILE_CHIP_BUTTON_CLASS_NAME}
+                    aria-expanded={expanded}
+                    aria-label={label}
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        setExpanded((value) => !value);
+                    }}
+                >
+                    <span className={cn(CHANGED_FILE_CHIP_CLASS_NAME, CHANGED_FILE_CHIP_HOVER_CLASS_NAME)} style={CHANGED_FILE_CHIP_STYLE}>
+                        {expanded ? (
+                            // A text line tall, so the icon-only chip matches the file chips.
+                            <span className="inline-flex h-[round(1.35em,1px)] items-center">
+                                <Icon name="arrow-up-s" className="h-3.5 w-3.5" />
+                            </span>
+                        ) : `+${hiddenCount}`}
+                    </span>
+                </button>
+            </HoverTooltip>
         </>
     );
 });
@@ -291,7 +304,6 @@ interface MessageBodyProps {
     footerModelName?: string;
     footerAgentName?: string;
     footerVariant?: string;
-    isDarkTheme?: boolean;
     /** Actions installed extensions contribute for this message's role; rendered after the built-ins. */
     extraActions?: MessageExtraAction[];
     /** The session whose agent sent this user message, linked at the foot of the bubble. */
@@ -375,8 +387,7 @@ const CopyMessageLinkButton: React.FC<{ onCopyLink: () => void }> = ({ onCopyLin
     );
 };
 
-const UserMessageBody = React.memo(({ messageId, parts, messageCreatedAt, isMobile, alwaysShowActions = isMobile, hasTouchInput, hasTextContent, onCopyMessage, copiedMessage, onSaveAsSnippet, onShowPopup, agentMention, onRevert, onFork, contextPinned, contextPinPending, onToggleContextPin, userMessagePart = 'bubble', extraActions, promptOrigin }: {
-    messageId: string;
+const UserMessageBody = React.memo(({ parts, messageCreatedAt, isMobile, alwaysShowActions = isMobile, hasTouchInput, hasTextContent, onCopyMessage, copiedMessage, onSaveAsSnippet, onShowPopup, agentMention, onRevert, onFork, contextPinned, contextPinPending, onToggleContextPin, userMessagePart = 'bubble', extraActions, promptOrigin }: {
     parts: Part[];
     promptOrigin?: PromptOrigin;
     messageCreatedAt?: number | null;
@@ -409,11 +420,21 @@ const UserMessageBody = React.memo(({ messageId, parts, messageCreatedAt, isMobi
     const collapsibleUserMessages = useUIStore((state) => state.collapsibleUserMessages);
     const [messageExpanded, setMessageExpanded] = React.useState(false);
     const [truncatedPartIndexes, setTruncatedPartIndexes] = React.useState<ReadonlySet<number>>(() => new Set());
-    const expandMessage = React.useCallback(() => setMessageExpanded(true), []);
+    // Opening the message lets go of the end, as opening a tool row does:
+    // held on the end, the text grew upward and carried its start off the top.
+    // A prompt stuck on top in the sticky header opens in place over its turn,
+    // so the reply below keeps being followed.
+    const bubbleRef = React.useRef<HTMLDivElement>(null);
+    const expandMessage = React.useCallback(() => {
+        const bubble = bubbleRef.current;
+        if (!messageExpanded && !isInStuckTurnHeader(bubble)) dispatchRowExpand(bubble);
+        setMessageExpanded(true);
+    }, [messageExpanded]);
     const toggleMessageExpanded = React.useCallback((event: React.MouseEvent) => {
         event.stopPropagation();
-        setMessageExpanded((value) => !value);
-    }, []);
+        if (messageExpanded) setMessageExpanded(false);
+        else expandMessage();
+    }, [expandMessage, messageExpanded]);
     const handlePartTruncationChange = React.useCallback((partIndex: number, truncated: boolean) => {
         setTruncatedPartIndexes((current) => {
             if (current.has(partIndex) === truncated) return current;
@@ -423,7 +444,16 @@ const UserMessageBody = React.memo(({ messageId, parts, messageCreatedAt, isMobi
             return next;
         });
     }, []);
-    const showMessageExpandToggle = collapsibleUserMessages && (messageExpanded || truncatedPartIndexes.size > 0);
+    const [textLinesByPartIndex, setTextLinesByPartIndex] = React.useState<ReadonlyMap<number, number>>(() => new Map());
+    const handlePartCollapsedLinesChange = React.useCallback((partIndex: number, lines: number) => {
+        setTextLinesByPartIndex((current) => {
+            if ((current.get(partIndex) ?? 0) === lines) return current;
+            const next = new Map(current);
+            if (lines > 0) next.set(partIndex, lines);
+            else next.delete(partIndex);
+            return next;
+        });
+    }, []);
     React.useEffect(() => {
         if (!collapsibleUserMessages) setMessageExpanded(false);
     }, [collapsibleUserMessages]);
@@ -436,6 +466,13 @@ const UserMessageBody = React.memo(({ messageId, parts, messageCreatedAt, isMobi
             return false;
         });
     }, [parts]);
+    const contextPartsToHide = React.useMemo(() => {
+        let textLines = 0;
+        for (const lines of textLinesByPartIndex.values()) textLines += lines;
+        return contextPartsPastCollapse(userContentParts, textLines);
+    }, [textLinesByPartIndex, userContentParts]);
+    const hidesContextParts = collapsibleUserMessages && !messageExpanded && contextPartsToHide.size > 0;
+    const showMessageExpandToggle = collapsibleUserMessages && (messageExpanded || truncatedPartIndexes.size > 0 || hidesContextParts);
 
     const sessionMentionChips = React.useMemo(() => sessionMentionChipsOf(parts), [parts]);
     const attachmentFilenames = React.useMemo(() => parts.flatMap((part) => (
@@ -584,7 +621,7 @@ const UserMessageBody = React.memo(({ messageId, parts, messageCreatedAt, isMobi
                 {timestamp && !alwaysShowActions ? (
                     <span
                         className="me-1 flex items-center gap-1 typography-meta tabular-nums text-muted-foreground"
-                        aria-label={`Message time: ${timestamp}`}
+                        aria-label={t('contextTooltips.chat.messageTime', { time: timestamp })}
                     >
                         <Icon name="time" className="h-3.5 w-3.5" />
                         <span>{timestamp}</span>
@@ -614,30 +651,25 @@ const UserMessageBody = React.memo(({ messageId, parts, messageCreatedAt, isMobi
                             onClose={() => setUserActionSheetOpen(false)}
                             title={t('chat.messageBody.actions.moreActions')}
                         >
-                            <div className="flex flex-col">
-                                {timestamp ? (
-                                    <div className="mb-1 flex items-center gap-3 border-b border-edge px-3 pb-2 text-muted-foreground">
-                                        <Icon name="time" className="h-4 w-4" />
-                                        <span className="typography-ui-label">{timestamp}</span>
-                                    </div>
-                                ) : null}
-                                {userSheetActions.map((action) => (
-                                    <button
-                                        key={action.id}
-                                        type="button"
-                                        disabled={action.disabled}
-                                        className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-start text-foreground transition-colors active:bg-interactive-active disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-                                        onClick={() => {
-                                            setUserActionSheetOpen(false);
-                                            action.onSelect();
-                                        }}
-                                        style={{ touchAction: 'manipulation' }}
-                                    >
-                                        <span className="text-muted-foreground">{action.icon}</span>
-                                        <span className="typography-ui-label">{action.label}</span>
-                                    </button>
-                                ))}
-                            </div>
+                            {timestamp ? (
+                                <div className="mb-1 flex items-center gap-2.5 border-b border-edge-muted px-2 pb-2 typography-meta text-muted-foreground">
+                                    <Icon name="time" className="size-4" />
+                                    <span>{timestamp}</span>
+                                </div>
+                            ) : null}
+                            {userSheetActions.map((action) => (
+                                <MobileSheetRow
+                                    key={action.id}
+                                    disabled={action.disabled}
+                                    leading={<span className="flex size-4 flex-shrink-0 items-center justify-center text-muted-foreground [&>svg]:size-4">{action.icon}</span>}
+                                    onClick={() => {
+                                        setUserActionSheetOpen(false);
+                                        action.onSelect();
+                                    }}
+                                >
+                                    {action.label}
+                                </MobileSheetRow>
+                            ))}
                         </MobileOverlayPanel>
                     </>
                 ) : (
@@ -741,6 +773,7 @@ const UserMessageBody = React.memo(({ messageId, parts, messageCreatedAt, isMobi
 
     return (
         <div
+            ref={bubbleRef}
             className="relative w-full group/message"
             style={CONTAIN_LAYOUT_STYLE}
             onTouchStart={isTouchContext && canCopyMessage && hasCopyableText ? revealCopyHint : undefined}
@@ -762,6 +795,7 @@ const UserMessageBody = React.memo(({ messageId, parts, messageCreatedAt, isMobi
                     message swaps the optimistic part id, and id-based keys would
                     remount the text subtree (blank frame + height jump). */}
                 {userContentParts.map((part, index) => {
+                    if (hidesContextParts && contextPartsToHide.has(part)) return null;
                     let mentionForPart: AgentMentionInfo | undefined;
                     if (agentMention && mentionToken && !mentionInjected) {
                         const candidateText = extractTextContent(part);
@@ -774,13 +808,13 @@ const UserMessageBody = React.memo(({ messageId, parts, messageCreatedAt, isMobi
                         <React.Fragment key={`user-text-${index}`}>
                             <UserTextPart
                                 part={part}
-                                messageId={messageId}
                                 isMobile={isMobile}
                                 agentMention={mentionForPart}
                                 messageExpanded={messageExpanded}
                                 onExpandMessage={expandMessage}
                                 partIndex={index}
                                 onTruncationChange={handlePartTruncationChange}
+                                onCollapsedLinesChange={handlePartCollapsedLinesChange}
                                 attachmentFilenames={attachmentFilenames}
                                 attachmentFiles={attachmentFiles}
                                 onShowPopup={onShowPopup}
@@ -813,6 +847,15 @@ const UserMessageBody = React.memo(({ messageId, parts, messageCreatedAt, isMobi
         </div>
     );
 });
+
+// The list keeps a sticky header's row on the chat's top edge while its turn
+// scrolls under it.
+const isInStuckTurnHeader = (element: HTMLElement | null): boolean => {
+    const header = element?.closest<HTMLElement>('[data-turn-sticky-header]');
+    const chat = header?.closest<HTMLElement>('[data-scrollbar="chat"]');
+    if (!header || !chat) return false;
+    return Math.abs(header.getBoundingClientRect().top - chat.getBoundingClientRect().top) < 1;
+};
 
 const USER_BUBBLE_TEXT_LINK_CLASS = 'py-0.5 underline-offset-2 transition-colors hover:text-foreground hover:underline focus-visible:underline focus-visible:outline-none focus-visible:text-foreground';
 const INLINE_TEXT_LINK_STYLE = { minHeight: 0, minWidth: 0 };
@@ -1212,7 +1255,6 @@ const AssistantMessageBody = React.memo(({
     footerModelName,
     footerAgentName,
     footerVariant,
-    isDarkTheme = false,
     extraActions,
 }: Omit<MessageBodyProps, 'isUser'>) => {
     const { t, locale } = useI18n();
@@ -1223,7 +1265,6 @@ const AssistantMessageBody = React.memo(({
     const messageTextContentRef = React.useRef<HTMLDivElement>(null);
     const isTouchContext = Boolean(hasTouchInput ?? isMobile);
     const alwaysShowMessageActions = Boolean(alwaysShowActions ?? isMobile);
-    const { src: footerLogoSrc, onError: handleFooterLogoError, hasLogo: footerHasLogo } = useProviderLogo(footerProviderID ?? null);
     const awaitingMessageCompletion = !isMessageCompleted;
 
     const visibleParts = React.useMemo(() => {
@@ -2284,15 +2325,12 @@ const AssistantMessageBody = React.memo(({
                                 <Tooltip>
                                     <TooltipTrigger asChild>
                                         <span className="flex min-w-0 shrink items-center gap-1.5">
-                                            {footerHasLogo && footerLogoSrc ? (
-                                                <img
-                                                    src={footerLogoSrc}
+                                            {footerProviderID ? (
+                                                <ProviderLogo
+                                                    providerId={footerProviderID}
                                                     alt=""
+                                                    fallback={<AgentModelIcon agentName={footerAgentName} />}
                                                     className="h-[13px] w-[13px] flex-shrink-0"
-                                                    style={{
-                                                        filter: isDarkTheme ? 'brightness(0.9) contrast(1.1) invert(1)' : 'brightness(0.9) contrast(1.1)',
-                                                    }}
-                                                    onError={handleFooterLogoError}
                                                 />
                                             ) : (
                                                 <AgentModelIcon agentName={footerAgentName} />
@@ -2365,32 +2403,27 @@ const AssistantMessageBody = React.memo(({
                             onClose={() => setActionSheetOpen(false)}
                             title={t('chat.messageBody.actions.moreActions')}
                         >
-                            <div className="flex flex-col">
-                                {/* The row drops the timestamp first on a narrow screen,
-                                    so the sheet is where it is always readable. */}
-                                {footerTimestamp ? (
-                                    <div className="mb-1 flex items-center gap-3 border-b border-edge px-3 pb-2 text-muted-foreground">
-                                        <Icon name="time" className="h-4 w-4" />
-                                        <span className="typography-ui-label">{footerTimestamp}</span>
-                                    </div>
-                                ) : null}
-                                {footerSheetActions.map((action) => (
-                                    <button
-                                        key={action.id}
-                                        type="button"
-                                        disabled={action.disabled}
-                                        className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-start text-foreground transition-colors active:bg-interactive-active disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-                                        onClick={() => {
-                                            setActionSheetOpen(false);
-                                            action.onSelect();
-                                        }}
-                                        style={{ touchAction: 'manipulation' }}
-                                    >
-                                        <span className="text-muted-foreground">{action.icon}</span>
-                                        <span className="typography-ui-label">{action.label}</span>
-                                    </button>
-                                ))}
-                            </div>
+                            {/* The row drops the timestamp first on a narrow screen,
+                                so the sheet is where it is always readable. */}
+                            {footerTimestamp ? (
+                                <div className="mb-1 flex items-center gap-2.5 border-b border-edge-muted px-2 pb-2 typography-meta text-muted-foreground">
+                                    <Icon name="time" className="size-4" />
+                                    <span>{footerTimestamp}</span>
+                                </div>
+                            ) : null}
+                            {footerSheetActions.map((action) => (
+                                <MobileSheetRow
+                                    key={action.id}
+                                    disabled={action.disabled}
+                                    leading={<span className="flex size-4 flex-shrink-0 items-center justify-center text-muted-foreground [&>svg]:size-4">{action.icon}</span>}
+                                    onClick={() => {
+                                        setActionSheetOpen(false);
+                                        action.onSelect();
+                                    }}
+                                >
+                                    {action.label}
+                                </MobileSheetRow>
+                            ))}
                         </MobileOverlayPanel>
                     </div>
                 )}
@@ -2411,7 +2444,6 @@ const MessageBody = React.memo(({ isUser, ...props }: MessageBodyProps) => {
     if (isUser) {
         return (
             <UserMessageBody
-                messageId={props.messageId}
                 parts={props.parts}
                 messageCreatedAt={props.messageCreatedAt}
                 isMobile={props.isMobile}

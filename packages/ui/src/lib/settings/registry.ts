@@ -97,6 +97,7 @@ type SettingsSiblingView = {
   readonly draftStartersCraftGoalAdded?: boolean;
   readonly draftStartersScheduleTaskAdded?: boolean;
   readonly workStatusHiddenSectionsExplicit?: boolean;
+  readonly workStatusSectionOrderExplicit?: boolean;
 };
 
 /**
@@ -302,11 +303,11 @@ export const SETTINGS_REGISTRY = {
   browserProvider: field({ scope: 'instance', parse: parseNonEmptyString, ui: uiStore('browserProvider', (v) => useUIStore.getState().setBrowserProvider(v)) }),
   agentNotifyToolEnabled: field({ scope: 'instance', parse: parseBoolean, ui: uiStore('agentNotifyToolEnabled', (v) => useUIStore.getState().setAgentNotifyToolEnabled(v)) }),
   agentRenderToolEnabled: field({ scope: 'instance', parse: parseBoolean, ui: uiStore('agentRenderToolEnabled', (v) => useUIStore.getState().setAgentRenderToolEnabled(v)) }),
+  agentUsageToolEnabled: field({ scope: 'instance', parse: parseBoolean, ui: uiStore('agentUsageToolEnabled', (v) => useUIStore.getState().setAgentUsageToolEnabled(v)) }),
   agentImageToolEnabled: field({ scope: 'instance', parse: parseBoolean, ui: uiStore('agentImageToolEnabled', (v) => useUIStore.getState().setAgentImageToolEnabled(v)) }),
   // `provider/model` of an image model; the server checks the shape.
   agentImageModel: field({ scope: 'instance', parse: parseNonEmptyString, ui: uiStore('agentImageModel', (v) => useUIStore.getState().setAgentImageModel(v)) }),
   agentSecretToolEnabled: field({ scope: 'instance', parse: parseBoolean, ui: uiStore('agentSecretToolEnabled', (v) => useUIStore.getState().setAgentSecretToolEnabled(v)) }),
-  agentToolsCodeMode: field({ scope: 'instance', parse: parseBoolean, ui: uiStore('agentToolsCodeMode', (v) => useUIStore.getState().setAgentToolsCodeMode(v)) }),
   agentMemoryToolEnabled: field({ scope: 'instance', parse: parseBoolean, ui: uiStore('agentMemoryToolEnabled', (v) => useUIStore.getState().setAgentMemoryToolEnabled(v)) }),
   agentKnowledgeToolEnabled: field({ scope: 'instance', parse: parseBoolean, ui: uiStore('agentKnowledgeToolEnabled', (v) => useUIStore.getState().setAgentKnowledgeToolEnabled(v)) }),
   agentWorkflowToolEnabled: field({ scope: 'instance', parse: parseBoolean, ui: uiStore('agentWorkflowToolEnabled', (v) => useUIStore.getState().setAgentWorkflowToolEnabled(v)) }),
@@ -356,6 +357,7 @@ export const SETTINGS_REGISTRY = {
   autoDeleteAfterDays: field({ scope: 'instance', parse: parseIntegerInRange(1, 365), ui: uiStore('autoDeleteAfterDays', (v) => useUIStore.getState().setAutoDeleteAfterDays(v)) }),
   // Apply scope before action so leaving archived-only mode can restore an incoming archive choice.
   sessionRetentionOnlyArchived: field({ scope: 'instance', parse: parseBoolean, ui: uiStore('sessionRetentionOnlyArchived', (v) => useUIStore.getState().setSessionRetentionOnlyArchived(v)) }),
+  sessionRetentionIncludeInWork: field({ scope: 'instance', parse: parseBoolean, ui: uiStore('sessionRetentionIncludeInWork', (v) => useUIStore.getState().setSessionRetentionIncludeInWork(v)) }),
   sessionRetentionAction: field({ scope: 'instance', parse: parseOneOf(['archive', 'delete']), ui: uiStore('sessionRetentionAction', (v) => useUIStore.getState().setSessionRetentionAction(v)) }),
   mergedWorktreeCleanupEnabled: field({ scope: 'instance', parse: parseBoolean, ui: uiStore('mergedWorktreeCleanupEnabled', (v) => useUIStore.getState().setMergedWorktreeCleanupEnabled(v)) }),
   worktreeArchiveOnDoneEnabled: field({ scope: 'instance', parse: parseBoolean, ui: uiStore('worktreeArchiveOnDoneEnabled', (v) => useUIStore.getState().setWorktreeArchiveOnDoneEnabled(v)) }),
@@ -413,7 +415,20 @@ export const SETTINGS_REGISTRY = {
   workStatusSectionOrder: field({
     scope: 'profile',
     parse: mapParser(parseStringList, sanitizeWorkStatusSectionOrder),
-    ui: uiStore('workStatusSectionOrder', (value) => useUIStore.getState().setWorkStatusSectionOrder(value)),
+    // The explicit marker tells an order the user arranged from a saved default.
+    ui: uiStore('workStatusSectionOrder', (value, snapshot) => {
+      const explicit = snapshot.workStatusSectionOrderExplicit === true;
+      useUIStore.setState({
+        workStatusSectionOrder: sanitizeWorkStatusSectionOrder(value, explicit),
+        workStatusSectionOrderExplicit: explicit,
+      });
+    }),
+  }),
+  workStatusSectionOrderExplicit: field({
+    scope: 'profile',
+    parse: parseBoolean,
+    // Applied here too: the order above is skipped when it equals the local one.
+    ui: uiStore('workStatusSectionOrderExplicit', (value) => useUIStore.setState({ workStatusSectionOrderExplicit: value })),
   }),
   workStatusPanelEnabled: field({ scope: 'profile', parse: parseBoolean, ui: uiStore('workStatusPanelEnabled', (v) => useUIStore.getState().setWorkStatusPanelEnabled(v)) }),
   workStatusHiddenSections: field({
@@ -461,6 +476,7 @@ export const SETTINGS_REGISTRY = {
   codeBlockLineWrap: field({ scope: 'profile', parse: parseBoolean, ui: uiStore('codeBlockLineWrap', (v) => useUIStore.getState().setCodeBlockLineWrap(v)) }),
   tableCellWrap: field({ scope: 'profile', parse: parseBoolean, ui: uiStore('tableCellWrap', (v) => useUIStore.getState().setTableCellWrap(v)) }),
   copyMessagesAsPlainText: field({ scope: 'profile', parse: parseBoolean, ui: uiStore('copyMessagesAsPlainText', (v) => useUIStore.getState().setCopyMessagesAsPlainText(v)) }),
+  selectionApprovalText: field({ scope: 'profile', parse: parseTextUpTo(1000), ui: uiStore('selectionApprovalText', (v) => useUIStore.getState().setSelectionApprovalText(v)) }),
   showTurnChangedFiles: field({ scope: 'profile', parse: parseBoolean, ui: uiStore('showTurnChangedFiles', (v) => useUIStore.getState().setShowTurnChangedFiles(v)) }),
   toolJsonViewMode: field({ scope: 'profile', parse: parseOneOf(['summary', 'formatted', 'raw']), ui: uiStore('toolJsonViewMode', (v) => useUIStore.getState().setToolJsonViewMode(v)) }),
   timeFormatPreference: field({ scope: 'profile', parse: parseOneOf(['auto', '12h', '24h']), ui: uiStore('timeFormatPreference', (v) => useUIStore.getState().setTimeFormatPreference(v)) }),
@@ -542,6 +558,7 @@ export const SETTINGS_REGISTRY = {
 
   // ── Typography (profile; sizes per surface) ──
   fontSize: field({ scope: 'profile', perSurface: true, parse: parseFiniteNumber, ui: uiStore('fontSize', (v) => useUIStore.getState().setFontSize(v)) }),
+  chatFontSize: field({ scope: 'profile', perSurface: true, parse: parseFiniteNumber, ui: uiStore('chatFontSize', (v) => useUIStore.getState().setChatFontSize(v)) }),
   terminalFontSize: field({ scope: 'profile', perSurface: true, parse: parseFiniteNumber, ui: uiStore('terminalFontSize', (v) => useUIStore.getState().setTerminalFontSize(v)) }),
   editorFontSize: field({ scope: 'profile', perSurface: true, parse: parseFiniteNumber, ui: uiStore('editorFontSize', (v) => useUIStore.getState().setEditorFontSize(v)) }),
   uiFont: field({ scope: 'profile', parse: parseUiFont, ui: uiStore('uiFont', (v) => useUIStore.getState().setUiFont(v)) }),

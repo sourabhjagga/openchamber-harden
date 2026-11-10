@@ -49,20 +49,24 @@ initial and 45-second global poller, with bounded startup recovery.
 `useSessionListSync` must not create a second global polling lifecycle.
 
 The global sessions cache is the complete source for active and archived
-coverage. Initialized directory stores only supply sessions missing from that
-cache. Live busy and retry state comes from `global-session-status`, never from
-the global cache or persisted history. A failed global or directory fetch keeps
-existing data; it is never treated as an authoritative empty list.
+coverage. Raw active and archived IDs suppress directory fallback copies, even
+when archive display filtering leaves the archived record out. Initialized
+directory stores only supply sessions missing from that cache. Live busy and
+retry state comes from `global-session-status`, never from the global cache or
+persisted history. A failed global or directory fetch keeps existing data; it
+is never treated as an authoritative empty list.
 
 Activity indicators use `SessionActivityIndicator` in project and timeline rows,
 header tabs, switchers and collapsed aggregates. Each state is a static icon:
 the session's own run is `circle`, a pause held open by a background subagent
 is `robot`, one held open by a background command is `terminal`, an agent that
-ended its turn to wait on its pull request (`sync/pr-watch.ts`) is
-`git-pull-request` (all info color; `useSessionTurnActivity` in
-`sync/global-session-status.ts` decides, the session's own run first, then the
-subagent, the command, the pull request), and a finished unseen turn is
-`checkbox-circle` (success color). Collapsed aggregates show only running or
+ended its turn to wait on its pull request (`sync/pr-watch.ts`) is `circle`
+again, because a linked pull request already puts `git-pull-request` on the
+row, and only the tooltip tells it from a run (all info color;
+`useSessionTurnActivity` in `sync/global-session-status.ts` decides, the
+session's own run first, then the subagent, the command, the pull request), and
+a finished unseen turn is `checkbox-circle` (success color). Collapsed
+aggregates show only running or
 unread. The local Appearance preference `animatedActivityIndicators`
 is off by default. Enabling it swaps every running kind for a stepped spinner,
 even when the OS requests reduced motion; the unread icon stays. A permission
@@ -585,8 +589,9 @@ the same Mark all as read.
   its project too never collides; collapse and Show more state stay keyed by
   the group and are shared.
 - Grouped by time, all-projects mode replaces the project headers with one
-  `timeline` zone: project-root drafts first, then every work Pinned and In
-  work do not list, by the lifecycle order of its latest session, then the
+  `timeline` zone: the projects' root folders first (see "Where a work
+  files"), then project-root drafts, then every work Pinned, In work and the
+  folders do not list, by the lifecycle order of its latest session, then the
   worktrees nobody has started a session in. It is virtualized, so it has no
   reveal limit, and ends with the statuses a project header would show for
   projects it lists nothing for (one loading line, one line per failed
@@ -702,8 +707,39 @@ the folder store and the server file it with the same assign and unassign
 changes as a session. A filed worktree renders inside its folder, one level
 deeper, and nowhere else under the project; filed into a folder that is gone,
 it stays under the project. The work row's menu (the "⋯" button and a right-click on the row show the
-same items) files it (Move to folder);
+same items) files it (Move to folder), a new folder included;
 dragging a worktree onto a folder is not offered.
+
+### Where a work files
+
+Filing follows where a row lives. A session of the project root, a lane of a
+run and a chat file in the root's or the Chats folders. A session inside a
+worktree or a space is part of that work, which files whole, so the root's
+folders are not offered to it, in the menu, a drag or a selection: filed there
+it stayed in the worktree and left an empty folder. `folderOwnerKeyOf` in the
+row model gives such a session the worktree's own owner key
+(`getWorkFolderOwnerKey`), which only the folders inside that worktree carry;
+older data can hold these, and they stay usable. The selection scope stays the
+project, so a selection can still span a project and its worktrees; its folder
+action takes what files in the project and leaves the rest.
+
+Move to folder shows on every session row but the archive's: under a project,
+in Chats and with Detailed rows, and in the sections and the list by time. There the folder
+row may be off screen or not drawn at all, so a new folder is named in
+`folders/NewFolderDialog.tsx` instead of in place. A section reaches folders through the
+Folder condition (`sections/DOCUMENTATION.md`). The list by time draws every
+project's root folders first, as a file manager lists folders before files,
+with the project's name on the row while several projects are registered: what
+they hold leaves the flat list, which stays ordered by recency. A search lists
+it flat again. The project header's menu makes an empty folder. The phone neither
+files nor makes folders: its swipes have no room for it (maintainer,
+2026-11-05).
+
+A session or worktree a section took out of its project stays a member of its
+folder (`memberCount` on the folder row) and comes back there when it leaves
+the section: the rule is the section's own ("Also show in work under
+projects" keeps it in the folder as well). The folder then reads as empty, with no
+chevron, while its saved collapse stays and its delete dialog counts the members.
 
 ## Locations and detailed rows
 
@@ -851,7 +887,7 @@ matching and ordering. Search does not fetch sessions or broaden list membership
 - The sync scheduler deduplicates, promotes, retries, and limits work. Sidebar components must not reproduce that lifecycle with mount effects.
 - Hide speculative work when the sidebar/chat surface is hidden: message prefetch, Git/PR enrichment and subscriptions, search listeners, sticky-header observation, and archived-folder derivation stop. Paused work keeps its last result (branches, repository status) instead of clearing it, so reopening neither re-reads every project's Git status nor redraws the list without it. Once shown, the session row tree stays mounted while the desktop sidebar is closed: rebuilding and re-measuring it was the bulk of the reopen frame (`SessionProjectCollection`). The closed sidebar skips its rendering (`content-visibility: hidden` after the close animation, `inert`), so row-owned status, permission and unseen subscriptions still re-render rows on events but cause no style or layout work. The outer sidebar remains mounted, preserving UI state and authoritative directory refresh for an immediate reopen; deferred derived work reruns from current state when visibility returns.
 - A mouse resting within 18 px of the window's start edge below the titlebar while the desktop sidebar is closed shows it over the chat (`useSidebarPeek` in `components/layout`). The edge is measured from document pointer moves; no element sits there, so nothing under it loses clicks. The column stays at zero width, so the chat does not move; the same mounted tree slides out with its rendering resumed and `inert` lifted, and counts as visible for the work above. It slides back once the pointer has been away for 300 ms, on a click outside it, or on Escape. A menu or dialog opened from it (anything with a popup role portalled outside `#root`) or an inline rename holding focus keeps it out until done.
-- Change-request enrichment uses worktree topology only to discover at most 50 unique demanded directories in stable project order. Repository binding selects the primary provider, instance, account, revision, and primary remote; connected accounts outside that binding add no requests, and missing or `needs-attention` bindings create no provider request.
+- Change-request enrichment uses worktree topology only to discover at most 50 unique demanded directories in stable project order. Repository binding selects the primary provider, instance, account, revision, and primary remote; connected accounts outside that binding add no requests, and missing or `needs-attention` bindings create no provider request. The discovery effect keys its restart on the candidate set rather than on row order (`sourceControlDiscoverySignature`): ordinary session activity reorders rows constantly, and a reorder re-reads no binding and spawns no Git process for one (#6084).
 - Binding discovery shares the [repository binding owner](../../../lib/source-control/DOCUMENTATION.md) with editors and pickers. Mounted directory subscriptions refresh affected status demand after binding mutations; the existing status timer does not poll repository bindings. Auth-entry changes update only directories using that entry and do not release or reload bindings.
 - Linked change requests and issues take one path whatever their provider. `getLinkedSidebarChanges` and `getLinkedSidebarIssues` (`lib/linkedIssues.ts`) read each link's address through `useRepositoryUrlMatcher()` into a `RepositoryThreadRef`; rows, worktree headers and the list's followed items (`repositoryRefs` in `list/SessionProjectCollection.tsx`) turn it into a tracked item with `repositoryThread(kind, ref)` and read one `repositoryStates` array (`buildSessionIssueItems`). A change whose state has not arrived is listed uncoloured by its provider's reference (`#12`, `!12`), as is any change no provider reads. The row's reference and status wording come from the provider's descriptor (`formatChangeRequestReference`, `getPrStatusLabel(summary, term, t)`); no surface here names a provider. Tracker items (`source: 'tracker'`, a Linear issue) are followed as `workItem(provider, identifier)` and read through `useTrackedWorkItemStates`: the tracker's own state name, in the issue colour of its category (`getTrackerItemStateLook`), with the tracker's mark from `lib/trackers/presentation.ts`.
 - A worktree's PR badge reads the read contexts the sidebar registered for its directory. When the shown directories change (a sibling worktree deleted or created, a branch renamed), a directory still shown keeps its registration until the fresh read replaces it; only directories that left the shown set, or were registered under another runtime, are released (`list/registeredContextDirectories.ts`), and unmount releases all. Releasing every directory on each change blanked every other badge and branch tint until the binding reads came back (issue 5160).

@@ -11,6 +11,7 @@ import { messageQueueUpdatedEventSchema, type MessageQueueUpdatedEvent } from '@
 import { autoReviewUpdatedEventSchema, type AutoReviewUpdatedEvent } from '@/stores/useAutoReviewStore';
 import { prWatchUpdatedEventSchema, type PrWatchUpdatedEvent } from '@/sync/pr-watch';
 import { sessionWarmingSnapshotSchema, type SessionWarmingSnapshot } from '@/stores/useSessionWarmingStore';
+import { isJsonValue, type JsonValue } from '@openchamber/sdk';
 import { z } from 'zod';
 import { trackedItemRecordsSchema } from './trackedItems/model';
 import type { SyncEvent } from './opencode/events';
@@ -72,7 +73,8 @@ const UNKNOWN_BROWSER_CONTROL_CONTEXT: BrowserControlRequestContext = { director
 
 /**
  * The agent asked for a file to be shown in the user's file panel. Every
- * client receives it; one showing that project opens the file.
+ * client receives it; the desktop file panel opens the file, and the mobile
+ * shell opens it only for the session on screen and announces the others.
  */
 const fileOpenRequestSchema = z.object({
   path: z.string().min(1),
@@ -144,11 +146,21 @@ type SourceControlProvidersChangedEvent = { type: 'source-control-providers-chan
 type TrackerProvidersChangedEvent = { type: 'tracker-providers-changed' };
 
 /**
+ * The set of usage providers the server serves changed: an extension that
+ * reports usage was approved, enabled, updated, paused or removed. Carries
+ * nothing; listeners re-read the provider list.
+ */
+type QuotaProvidersChangedEvent = { type: 'quota-providers-changed' };
+
+/**
  * The extension catalog changed: an extension was installed, updated, approved,
  * paused, enabled or removed, or a folder install's files changed. Carries
  * nothing; listeners re-read the catalog.
  */
 type GuestsChangedEvent = { type: 'guests-changed' };
+
+/** An extension's service sent its open frames something (`emit`). */
+type GuestServiceEvent = { type: 'guest-service-event'; guestId: string; topic: string; data: JsonValue };
 
 /**
  * A theme file in the server's custom themes folder was added, removed or
@@ -308,7 +320,9 @@ type OpenChamberEvent =
   | BrowserProviderResetEvent
   | SourceControlProvidersChangedEvent
   | TrackerProvidersChangedEvent
+  | QuotaProvidersChangedEvent
   | GuestsChangedEvent
+  | GuestServiceEvent
   | ThemesChangedEvent
   | LimitFailoverEvent
   | ProjectContextChangedEvent
@@ -481,6 +495,8 @@ const getEventProperties = (properties: unknown): Record<string, unknown> | null
   return properties as Record<string, unknown>;
 };
 
+const guestServiceEventSchema = z.object({ guestId: z.string().min(1), topic: z.string().min(1), data: z.json() });
+
 const dispatchFromEnvelope = (envelope: { type: string; properties: unknown }) => {
   if (envelope.type === 'openchamber:terminal-sessions-changed') {
     for (const listener of listeners) listener({ type: 'terminal-sessions-changed' });
@@ -634,8 +650,20 @@ const dispatchFromEnvelope = (envelope: { type: string; properties: unknown }) =
     return;
   }
 
+  if (envelope.type === 'openchamber:quota-providers-changed') {
+    for (const listener of listeners) listener({ type: 'quota-providers-changed' });
+    return;
+  }
+
   if (envelope.type === 'openchamber:guests-changed') {
     for (const listener of listeners) listener({ type: 'guests-changed' });
+    return;
+  }
+
+  if (envelope.type === 'openchamber:guest-service-event') {
+    const parsed = guestServiceEventSchema.safeParse(envelope.properties);
+    if (!parsed.success || !isJsonValue(parsed.data.data)) return;
+    for (const listener of listeners) listener({ type: 'guest-service-event', ...parsed.data });
     return;
   }
 

@@ -5,7 +5,7 @@ import type { IconName } from '@/components/icon/icons';
 import { preloadProviderLogos } from '@/hooks/useProviderLogo';
 import { useTabletLayout } from '@/lib/device';
 import { useI18n } from '@/lib/i18n';
-import { clampPercent, resolveUsageTone } from '@/lib/quota';
+import { clampPercent, isExtensionQuotaProviderId, resolveUsageTone } from '@/lib/quota';
 import { UsageProviderCards } from '@/components/usage/UsageProviderCards';
 import { useUsageProviderGroups, type UsageProviderGroup } from '@/components/usage/usageGroups';
 import { cn } from '@/lib/utils';
@@ -15,6 +15,7 @@ import { useQuotaAutoRefresh, useQuotaStore } from '@/stores/useQuotaStore';
 import { useUIStore, type TimeFormatPreference } from '@/stores/useUIStore';
 import { useSelectionStore } from '@/sync/selection-store';
 import { useSessionMessages } from '@/sync/sync-context';
+import { MOBILE_HEADER_BUTTON_CLASS } from '@/components/ui/mobileHeader';
 
 const TABLET_METADATA_POPOVER_WIDTH = 380;
 
@@ -356,7 +357,8 @@ export const MobileSessionMetadataButton = React.memo(function MobileSessionMeta
 
 
   React.useEffect(() => {
-    preloadProviderLogos(dropdownProviderIds);
+    // An extension's icon comes from its package, not the logo set.
+    preloadProviderLogos(dropdownProviderIds.filter((id) => !isExtensionQuotaProviderId(id)));
   }, [dropdownProviderIds]);
 
 
@@ -408,7 +410,7 @@ export const MobileSessionMetadataButton = React.memo(function MobileSessionMeta
 
   React.useEffect(() => {
     if (!open || usageGroups.length === 0) return;
-    preloadProviderLogos(usageGroups.map((group) => group.providerId));
+    preloadProviderLogos(usageGroups.map((group) => group.providerId).filter((id) => !isExtensionQuotaProviderId(id)));
   }, [open, usageGroups]);
 
   return (
@@ -416,7 +418,7 @@ export const MobileSessionMetadataButton = React.memo(function MobileSessionMeta
       <button
         ref={metadataTriggerRef}
         type="button"
-        className="flex size-10 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-interactive-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className={MOBILE_HEADER_BUTTON_CLASS}
         aria-label={t('mobile.header.openMetadataAria')}
         aria-expanded={open}
         onClick={() => onOpenChange((currentOpen) => !currentOpen)}

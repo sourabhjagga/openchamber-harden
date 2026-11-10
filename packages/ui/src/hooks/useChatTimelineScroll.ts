@@ -14,6 +14,12 @@ import {
 } from '@/components/chat/lib/scroll/messageViewportAnchor';
 import { readSessionScrollPosition, rememberOutgoingSessionScrollPosition } from '@/components/chat/lib/scroll/sessionScrollMemory';
 import {
+    isWaitingPageRevealPending,
+    releaseWaitingPageRevealOutside,
+    subscribeRequestReveal,
+    takeWaitingPageReveal,
+} from '@/sync/request-reveal';
+import {
     peekMessageFocus,
     releaseMessageFocusOutside,
     settleMessageFocus,
@@ -43,8 +49,10 @@ import {
     isMiddleButtonPan,
     nestedScrollableConsumesWheelUp,
     onFrameScroll,
+    dispatchPageWaiting,
     onPageWaiting,
     onRowExpand,
+    onTabStep,
 } from '@/components/chat/lib/scroll/timelineScrollIntent';
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -121,6 +129,9 @@ interface UseChatTimelineScrollOptions {
     // the end instantly: an animated catch-up scrolls visibly through the
     // conversation and gets cut short by the next measurement.
     sessionIsWorking: boolean;
+    // A chat column pinned to its session: a toast opens the session in the
+    // main chat, so its request to show a waiting page is not for this list.
+    pinned?: boolean;
     // Reveal gate of the session being opened. Held until the viewport is
     // pinned to the end, so the session is never shown scrolled to the top.
     revealGate?: TimelineRevealGate | null;
@@ -330,6 +341,7 @@ export const useChatTimelineScroll = ({
     checkLinkedMessage,
     onLinkedMessageMissing,
     sessionIsWorking,
+    pinned = false,
     revealGate = null,
     onActiveTurnChange,
 }: UseChatTimelineScrollOptions): UseChatTimelineScrollResult => {
@@ -422,9 +434,10 @@ export const useChatTimelineScroll = ({
     // onRowExpand below), and whether that row has grown since.
     const rowExpandReleaseRef = React.useRef<{ generation: number; grew: boolean } | null>(null);
     // Waiting pages already brought into view, and the latest one while its
-    // late height still moves it.
+    // late height still moves it. Tabs stepped with Next go the same way, with
+    // no page id: a height report from their page must not take their place.
     const revealedPagesRef = React.useRef(new Set<string>());
-    const pageRevealRef = React.useRef<{ pageId: string; block: HTMLElement; generation: number; until: number } | null>(null);
+    const pageRevealRef = React.useRef<{ pageId: string | null; block: HTMLElement; generation: number; until: number } | null>(null);
     // The streaming reply the last follow frame saw. Its last block lands in
     // the same render that ends its streaming and drops its marker, so the
     // frame after that still checks it as a stop: a reply whose closing block
@@ -1446,6 +1459,18 @@ export const useChatTimelineScroll = ({
             }
             revealWaitingPageRef.current();
         });
+        // Next on a waiting form's Tabs is a press for the next question, so
+        // its start comes into view for any reader, whatever follow or
+        // auto-follow say: Next sat at the end of the tab they left, and the
+        // new tab can start above the viewport or run past it. The tab's height
+        // reaches the list a frame later, and the list's growth aims again
+        // until the reader scrolls. As when a row opens, a scroll command ends
+        // the hold on the end the session opened at.
+        const stopTabStep = onTabStep(scrollNode, (block) => {
+            void listRef.current?.scrollToOffset({ offset: scrollNode.scrollTop, animated: false });
+            pageRevealRef.current = { pageId: null, block, generation: userGenerationRef.current, until: performance.now() + PAGE_REVEAL_SETTLE_MS };
+            revealWaitingPageRef.current();
+        });
         const handleScroll = () => {
             const scrollTop = scrollNode.scrollTop;
             // The list's scroll length is the viewport height it measured,
@@ -1475,6 +1500,7 @@ export const useChatTimelineScroll = ({
             stopFrameScroll();
             stopRowExpand();
             stopPageWaiting();
+            stopTabStep();
             pageRevealRef.current = null;
         };
     }, [isLiveFollowActive, realContentOverflowsViewport, scrollNode]);
@@ -1494,6 +1520,7 @@ export const useChatTimelineScroll = ({
         // Entering another session drops a link request for this one; the
         // same session re-selected under its real directory keeps it.
         releaseMessageFocusOutside(currentSessionId);
+        if (!pinned) releaseWaitingPageRevealOutside(currentSessionId);
         linkServedRef.current = null;
         isAtEndRef.current = true;
         setUserOwnsScroll(false);
@@ -1506,7 +1533,7 @@ export const useChatTimelineScroll = ({
         // reopened.
         followStoppedAtGenerationRef.current = null;
         hideScrollButton();
-    }, [currentSessionId, currentSessionKey, hideScrollButton]);
+    }, [currentSessionId, currentSessionKey, hideScrollButton, pinned]);
 
     // ── entry pin ───────────────────────────────────────────────────────────
     // An opened session is shown once, already in place: the reveal gate is
@@ -1524,7 +1551,9 @@ export const useChatTimelineScroll = ({
         if (scrollRef.current === scrollNode && handledEntryKeyRef.current !== currentSessionKey) {
             handledEntryKeyRef.current = currentSessionKey;
             const linkRequest = peekMessageFocus(currentSessionIdRef.current);
-            const remembered = readSessionScrollPosition(currentSessionKey);
+            const remembered = !pinned && isWaitingPageRevealPending(currentSessionIdRef.current)
+                ? null
+                : readSessionScrollPosition(currentSessionKey);
             const target: PositionTarget | null = linkRequest
                 ? linkTarget(linkRequest, scrollNode)
                 : remembered ? { kind: 'remembered', anchor: remembered } : null;
@@ -1547,7 +1576,7 @@ export const useChatTimelineScroll = ({
             if (frame !== null) cancelAnimationFrame(frame);
             releaseReveal?.();
         };
-    }, [currentSessionKey, revealGate, scrollNode, showPositionTarget]);
+    }, [currentSessionKey, pinned, revealGate, scrollNode, showPositionTarget]);
 
     // ── message link in the open session ────────────────────────────────────
     // A link to a message of the session already on screen does not switch
@@ -1565,6 +1594,24 @@ export const useChatTimelineScroll = ({
         showRequested();
         return subscribeMessageFocus(showRequested);
     }, [currentSessionKey, scrollNode, showPositionTarget]);
+
+    // ── waiting page's toast ────────────────────────────────────────────────
+    // The click asks for the page, so it counts as a return to the end, where
+    // a waiting page lies, and the page comes again even if it came before. A
+    // page not mounted yet raises its own event once the end brings it in.
+    React.useEffect(() => {
+        if (pinned || !scrollNode || !currentSessionKey) return;
+        const showRequested = () => {
+            if (scrollRef.current !== scrollNode || handledEntryKeyRef.current !== currentSessionKey) return;
+            if (!takeWaitingPageReveal(currentSessionIdRef.current)) return;
+            restoreRef.current?.cancel();
+            jumpToEnd('instant', true);
+            revealedPagesRef.current.clear();
+            dispatchPageWaiting(scrollNode.querySelector<HTMLElement>('[data-waiting-page]'));
+        };
+        showRequested();
+        return subscribeRequestReveal(showRequested);
+    }, [currentSessionKey, jumpToEnd, pinned, scrollNode]);
 
     // ── keyboard follow glide ───────────────────────────────────────────────
     // On mobile the keyboard and the composer morph change the transcript's

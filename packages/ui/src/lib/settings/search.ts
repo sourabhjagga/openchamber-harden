@@ -153,6 +153,13 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     isAvailable: (ctx) => !ctx.isMobile,
   },
   {
+    id: 'appearance.chat-font-size',
+    page: 'appearance',
+    titleKey: 'settings.openchamber.visual.field.chatFontSize',
+    keywords: ['chat', 'font', 'text size', 'messages'],
+    isAvailable: (ctx) => !ctx.isMobile,
+  },
+  {
     id: 'appearance.interface-font-weight',
     page: 'appearance',
     titleKey: 'settings.openchamber.visual.field.interfaceFontWeight',
@@ -429,6 +436,13 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     titleKey: 'settings.openchamber.visual.field.copyMessagesAsPlainText',
     descriptionKey: 'settings.openchamber.visual.field.copyMessagesAsPlainTextInfo',
     keywords: ['copy', 'clipboard', 'plain text', 'markdown', 'selection'],
+  },
+  {
+    id: 'chat.selection-approval-text',
+    page: 'chat',
+    titleKey: 'settings.openchamber.visual.field.selectionApprovalText',
+    descriptionKey: 'settings.openchamber.visual.field.selectionApprovalTextInfo',
+    keywords: ['lgtm', 'sounds good', 'approval', 'feedback', 'selection', 'citation', 'comment', 'thumbs up', '👍'],
   },
   {
     id: 'chat.inline-assistant-actions',
@@ -714,6 +728,15 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     keywords: ['archive', 'archived', 'only', 'delete', 'cleanup', 'retention'],
   },
   {
+    id: 'sessions.retention-include-in-work',
+    page: 'sessions',
+    titleKey: 'settings.openchamber.sessionRetention.field.includeInWork',
+    descriptionKey: 'settings.openchamber.sessionRetention.field.includeInWorkInfo',
+    keywords: ['in work', 'done', 'cleanup', 'retention', 'archive', 'delete'],
+    // The checkbox shows only while sessions in work are on.
+    isAvailable: () => useUIStore.getState().sessionWorkEnabled,
+  },
+  {
     id: 'sessions.retention-period',
     page: 'sessions',
     titleKey: 'settings.openchamber.sessionRetention.field.retentionPeriod',
@@ -884,6 +907,14 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     isAvailable: (ctx) => !ctx.isVSCode,
   },
   {
+    id: 'sessions.agent-usage-tool',
+    page: 'general',
+    titleKey: 'settings.openchamber.tools.field.agentUsageTool',
+    descriptionKey: 'settings.openchamber.tools.field.agentUsageToolInfo',
+    keywords: ['agent', 'tool', 'usage', 'quota', 'limit', 'reset', 'openchamber'],
+    isAvailable: (ctx) => !ctx.isVSCode,
+  },
+  {
     id: 'sessions.agent-image-tool',
     page: 'general',
     titleKey: 'settings.openchamber.tools.field.agentImageTool',
@@ -977,14 +1008,6 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     descriptionKey: 'settings.routing.token.info',
     keywords: ['jev', 'typesafe', 'api key', 'token', 'routing'],
     isAvailable: (ctx) => !ctx.isVSCode && ctx.routingAvailable,
-  },
-  {
-    id: 'sessions.agent-tools-code-mode',
-    page: 'general',
-    titleKey: 'settings.openchamber.tools.field.agentToolsCodeMode',
-    descriptionKey: 'settings.openchamber.tools.field.agentToolsCodeModeInfo',
-    keywords: ['agent', 'tool', 'code mode', 'codemode', 'execute', 'openchamber'],
-    isAvailable: (ctx) => !ctx.isVSCode,
   },
   {
     id: 'routing.enabled',
@@ -1117,6 +1140,12 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     page: 'projects',
     titleKey: 'settings.projects.shared.replaceMode',
     keywords: ['worktree', 'setup commands', 'shared', 'team', 'only mine'],
+  },
+  {
+    id: 'projects.worktree.teardown',
+    page: 'projects',
+    titleKey: 'settings.openchamber.worktrees.teardown.title',
+    keywords: ['worktree', 'teardown', 'cleanup', 'delete', 'docker', 'stop'],
   },
   {
     id: 'projects.environment',
@@ -1485,6 +1514,7 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
       page: 'shortcuts',
       titleKey: action.settingsLabelKey,
       keywords: ['shortcut', 'hotkey', 'keyboard', 'keybinding'],
+      isAvailable: (ctx) => !('nativeMenu' in action) || (ctx.isDesktop && (action.nativeMenu === 'all' || !ctx.isMac)),
     })),
   {
     id: 'voice.playback',

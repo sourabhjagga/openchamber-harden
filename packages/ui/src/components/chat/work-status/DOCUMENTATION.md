@@ -197,6 +197,7 @@ which requests only providers enabled for this panel.
 | Block | Source | Notes |
 |---|---|---|
 | Context + cost | `contextUsage.ts` over `useSessionMessages`; cost via `useSubagentCostRollup` (own cost + every descendant subagent, recursively) | see below — the store getters cannot serve this |
+| Cache hit | `computeLastReplyCacheHit` over `useSessionMessages` | the reply the context reading comes from; see below |
 | Branch, ahead/behind, attention | `useGitStore` directory state | warmed via `runBackgroundNetworkTask(ensureStatus)` and refreshed from Git mutation hints |
 | Changed files | `useGitStore` status `files` + `diffStats` | working tree, not session-authored edits |
 | PR + checks | `useFreshestSourceControlVisualSummaryForBranch` | **read-only**; follows the freshest bound-identity entry for the branch |
@@ -370,6 +371,19 @@ There is no cost-only fallback row. A row labelled "Context" showing nothing but
 a price is not a context reading; cost rides along with the percentage or waits
 for it.
 
+### Why the cache row shows the last reply and not session totals
+
+The row under the context meter answers "what is the provider caching now":
+the cache hit of the reply the context reading comes from, on every surface.
+Its output was dropped as uninteresting for one reply. Whole-session totals
+were tried here and dropped too: they span every
+compaction, so a session's 97% average says nothing about the prompt that
+goes out next. They stay in the context panel's overview
+(`computeSessionTokenTotals`), read off the session record, which OpenCode
+adds every step's usage to; summing loaded messages would shrink as a long
+session keeps only its tail. Their "Input" counts the whole prompt, cache
+included, since OpenCode's `input` is only the uncached part.
+
 ### Pinned messages load only what they need
 
 Pins are most useful on a long session — which is exactly when the pinned
@@ -470,12 +484,13 @@ saved order, so it comes back where the user put it.
 The default order is by durability:
 
 1. **Session** (goal, context, cost), **Project** (attention, branch,
-   changes, PR, checks), **Usage**, and **Turn stats** (session telemetry:
-   throughput, duration, TTFT, cache hit rate) — true for as long as the session
-   is open. Usage sits here rather than lower down because a spent quota stops the
-   work outright;
+   changes, PR, checks), **Usage**, **Context sources**, and **Turn stats**
+   (session telemetry: throughput, duration, TTFT, cache hit rate) — true for as
+   long as the session is open. Usage sits here rather than lower down because a
+   spent quota stops the work outright, and Context sources because it holds the
+   linked issue and PR, which tell what the session is about;
 2. **Subagents** and **Workflows** — what is happening right now;
-3. **MCP**, **Pinned messages**, **Context sources** — supporting material.
+3. **MCP** and **Pinned messages** — supporting material.
 
 The sections dialog has drag handles for changing this order, including hidden
 sections. A drop updates the panel immediately. `workStatusSectionOrder` is a
@@ -483,6 +498,13 @@ profile preference persisted through the settings registry and the local UI
 store. Missing or empty order uses the default; duplicate and obsolete ids are
 discarded, and newly introduced sections append in default order. Visibility
 changes never alter positions.
+
+Clients saved the default as their order without the user choosing it, so a
+saved list can't tell a choice from the default on its own.
+`workStatusSectionOrderExplicit` turns true on the first drag. Without it, an
+order that matches the old default with Context sources last moves that section
+up, on load and on each settings apply; any other order stays. The marker keeps
+a user who drags Context sources back to the bottom from being moved again.
 
 `WorkStatusPrimaryGroup` supplies Session and Project through a composition
 callback so the panel can place them independently while retaining one set of

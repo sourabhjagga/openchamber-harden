@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom';
 import type { Message, Part, Session } from '@/lib/opencode/model';
 import { getLastConversationRecord, isIncompleteAssistantTurn } from '@/lib/opencode/model';
 import { keepCommandSubagentReports } from '@/lib/opencode/subagent-run';
+import { dropReplyCommandRows } from '@/lib/opencode/reply-command';
 import { isOpencodeNotFound, opencodeClient } from '@/lib/opencode/client';
 
 import { ChatInput } from './ChatInput';
@@ -72,6 +73,7 @@ import { TimelineDialog } from './TimelineDialog';
 import { useChatTurnNavigation } from './hooks/useChatTurnNavigation';
 import { ChatQuoteHighlightContext, useChatQuoteHighlightStore } from './hooks/chatQuoteHighlightStore';
 import { ChatQuoteHighlightLayer } from './message/ChatQuoteHighlightLayer';
+import { TextSelectionMenu } from './message/TextSelectionMenu';
 import { loadQuoteSource as loadQuoteSourceMessage, scrollToQuoteSource as scrollToQuoteSourceMessage } from './quoteNavigation';
 import { useChatSurfaceMode } from './useChatSurfaceMode';
 import { useMessageTTS } from '@/hooks/useMessageTTS';
@@ -105,9 +107,11 @@ import {
     useSessionStartTimes,
 } from '@/sync/sync-context';
 import { useSync } from '@/sync/use-sync';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useI18n } from '@/lib/i18n';
 import { useDraftHeading } from './useDraftHeading';
 import { isVSCodeRuntime } from '@/lib/desktop';
+import { SEMANTIC_TYPOGRAPHY, VSCODE_TYPOGRAPHY, getScaledTypographyStyle } from '@/lib/typography';
 import { eventMatchesShortcut, getEffectiveShortcutCombo } from '@/lib/shortcuts';
 import { ChatSearchBar } from './search/ChatSearchBar';
 import { WorkStatusPanel } from './work-status/WorkStatusPanel';
@@ -127,6 +131,14 @@ import { isMobileSurfaceRuntime } from '@/lib/runtimeSurface';
 import { createFirstVisibleSessionPerformanceTracker } from '@/sync/session-load-performance';
 import { isChatDirectoryPath } from '@/lib/chatDirectories';
 
+function HoistedUiPageSelection({ scrollNode, sessionId }: { scrollNode: HTMLElement; sessionId: string }) {
+    const containerRef = React.useMemo(() => ({ current: scrollNode }), [scrollNode]);
+    const surface = useChatSurfaceMode();
+    const showTTS = useConfigStore((state) => state.showMessageTTSButtons);
+    return <TextSelectionMenu containerRef={containerRef} readingKey={sessionId} uiRenderSelection
+        canReadAloud={surface !== 'mini-chat' && showTTS} />;
+}
+
 const EMPTY_MESSAGES: Array<{ info: Message; parts: Part[] }> = [];
 const IDLE_SESSION_STATUS = { type: 'idle' as const };
 const CHAT_FORCE_SCROLL_BOTTOM_EVENT = 'openchamber:chat-force-scroll-bottom';
@@ -134,6 +146,9 @@ const DEFAULT_RETRY_MESSAGE = 'Quota limit reached. Retrying automatically.';
 const DRAFT_EXIT_DURATION_MS = 120;
 const COMPOSER_MOVE_DURATION_MS = 180;
 const CHAT_SCROLL_STYLE = {
+    // A chat column squeezed to 0px gives the rows no area, and the browser
+    // drops the scroll position with the scrollable height.
+    minWidth: 1,
     overflowAnchor: 'none',
     overscrollBehavior: 'contain',
     overscrollBehaviorY: 'contain',
@@ -751,16 +766,20 @@ const ReadOnlyPromptBanner: React.FC<{ text: string; onStop?: () => void; stopLa
             <div className="flex items-center gap-2 rounded-2xl border border-edge bg-[var(--surface-background)] px-4 py-3 typography-ui-label text-muted-foreground">
                 <span className="min-w-0 flex-1 text-center">{text}</span>
                 {onStop ? (
-                    <Button
-                        variant="ghost"
-                        size="icon"
-                        className="-my-1.5 -me-2 shrink-0 text-[var(--status-error)] hover:text-[var(--status-error)]"
-                        onClick={onStop}
-                        aria-label={stopLabel}
-                        title={stopLabel}
-                    >
-                        <StopIcon className="size-4" />
-                    </Button>
+                    <Tooltip>
+                        <TooltipTrigger asChild>
+                            <Button
+                                variant="ghost"
+                                size="icon"
+                                className="-my-1.5 -me-2 shrink-0 text-[var(--status-error)] hover:text-[var(--status-error)]"
+                                onClick={onStop}
+                                aria-label={stopLabel}
+                            >
+                                <StopIcon className="size-4" />
+                            </Button>
+                        </TooltipTrigger>
+                        <TooltipContent side="top" sideOffset={6}>{stopLabel}</TooltipContent>
+                    </Tooltip>
                 ) : null}
             </div>
         </div>
@@ -957,6 +976,15 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({
     const stickyUserHeader = useUIStore((state) => state.stickyUserHeader);
     const promptNavigatorEnabled = useUIStore((state) => state.promptNavigatorEnabled);
     const allowPromptingSubagentSessions = useUIStore((state) => state.allowPromptingSubagentSessions);
+    const chatFontSize = useUIStore((state) => state.chatFontSize);
+    // The chat's own text size, on top of the interface size: the semantic
+    // text variables are redefined for this column only (as FilesView does
+    // for its preview), so the sidebar keeps the interface size.
+    // SAFETY: CSS custom properties are valid inline styles; React's type lists only standard ones.
+    const chatTypographyStyle = React.useMemo(() => getScaledTypographyStyle(
+        chatFontSize,
+        isVSCodeRuntime() ? VSCODE_TYPOGRAPHY : SEMANTIC_TYPOGRAPHY,
+    ) as React.CSSProperties | undefined, [chatFontSize]);
     // The timeline dialog of the main chat is app state (a global shortcut
     // opens it); a pinned column keeps its own.
     const globalTimelineDialogOpen = useUIStore((s) => s.isTimelineDialogOpen);
@@ -1242,20 +1270,26 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({
     }, [openColumnSession, parentSession]);
 
     const returnToParentButton = parentSession && !hideReturnToParent ? (
-        <Button
-            type="button"
-            variant="outline"
-            size="xs"
-            onClick={handleReturnToParentSession}
-            className="absolute inset-s-3 top-3 z-20 !font-normal bg-[var(--surface-background)]/95"
-            aria-label={t('chat.container.returnToParent.aria')}
-            title={parentSession.title?.trim()
-                ? t('chat.container.returnToParent.titleNamed', { title: parentSession.title })
-                : t('chat.container.returnToParent.title')}
-        >
-            <Icon name="arrow-left" className="h-4 w-4" />
-            {t('chat.container.returnToParent.label')}
-        </Button>
+        <Tooltip>
+            <TooltipTrigger asChild>
+                <Button
+                    type="button"
+                    variant="outline"
+                    size="xs"
+                    onClick={handleReturnToParentSession}
+                    className="absolute inset-s-3 top-3 z-20 !font-normal bg-[var(--surface-background)]/95"
+                    aria-label={t('chat.container.returnToParent.aria')}
+                >
+                    <Icon name="arrow-left" className="h-4 w-4" />
+                    {t('chat.container.returnToParent.label')}
+                </Button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom" sideOffset={6}>
+                {parentSession.title?.trim()
+                    ? t('chat.container.returnToParent.titleNamed', { title: parentSession.title })
+                    : t('chat.container.returnToParent.title')}
+            </TooltipContent>
+        </Tooltip>
     ) : null;
     // A chat of a deleted isolated space is on the Archive page and read-only; the server refuses
     // to run it whatever the screen shows. Its directory is the archive's own, and the list of
@@ -1375,6 +1409,7 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({
         checkLinkedMessage,
         onLinkedMessageMissing: handleLinkedMessageMissing,
         sessionIsWorking,
+        pinned,
         revealGate,
         onActiveTurnChange: handleActiveTurnChange,
     });
@@ -1425,10 +1460,11 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({
     // A subagent report opens a turn of its own at the end of the chat only for
     // a `subagent: true` command; a call's report finishes that call's row
     // (see `ToolPart`), and a run started before the loaded history stays in
-    // the session's subagent list, so the chat never shifts for either.
+    // the session's subagent list, so the chat never shifts for either. A
+    // command run from a code block of a reply shows in that block.
     const sessionStartTimes = useSessionStartTimes(effectiveSessionDirectory);
     const viewportMessages = React.useMemo(
-        () => keepCommandSubagentReports(sessionMessages, (childSessionID) => sessionStartTimes.get(childSessionID)),
+        () => dropReplyCommandRows(keepCommandSubagentReports(sessionMessages, (childSessionID) => sessionStartTimes.get(childSessionID))),
         [sessionStartTimes, sessionMessages],
     );
 
@@ -1528,6 +1564,12 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({
             ...options,
         });
     }, [currentSessionKey, scrollToTimelineMessage]);
+    const resolveUiPageMessageId = React.useCallback((messageId: string, partId: string) => (
+        messageListRef.current?.resolveUiPageMessageId(messageId, partId) ?? messageId
+    ), []);
+    const scrollToUiPageRow = React.useCallback((messageId: string) => (
+        messageListRef.current?.scrollToUiPageRow(messageId) ?? false
+    ), []);
 
     const navigation = useChatTurnNavigation({
         sessionId: currentSessionId,
@@ -1937,6 +1979,7 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({
 			data-chat-session-id={pinned ? currentSessionId ?? undefined : undefined}
 			data-chat-working={pinned && sessionIsWorking ? 'true' : undefined}
 			className="flex h-full min-h-0 bg-background"
+			style={chatTypographyStyle}
 		>
 		<ChatColumnSessionContext.Provider value={chatColumnSession}>
 		<ChatColumnActionsContext.Provider value={columnActions}>
@@ -1949,7 +1992,10 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({
 			scrollNode={scrollNode}
 			loadHistoryUntilMessage={loadQuoteSource}
 			scrollToMessage={scrollToQuoteSource}
+			resolveUiPageMessageId={resolveUiPageMessageId}
+			scrollToUiPageRow={scrollToUiPageRow}
 		/>
+		{scrollNode && currentSessionId ? <HoistedUiPageSelection key={currentSessionKey ?? currentSessionId} scrollNode={scrollNode} sessionId={currentSessionId} /> : null}
 		<div
 			ref={chatRootRef}
 			data-composer-bound

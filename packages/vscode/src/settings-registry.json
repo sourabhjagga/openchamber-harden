@@ -180,6 +180,9 @@
     "agentRenderToolEnabled": {
       "scope": "instance"
     },
+    "agentUsageToolEnabled": {
+      "scope": "instance"
+    },
     "agentImageToolEnabled": {
       "scope": "instance"
     },
@@ -187,9 +190,6 @@
       "scope": "instance"
     },
     "agentSecretToolEnabled": {
-      "scope": "instance"
-    },
-    "agentToolsCodeMode": {
       "scope": "instance"
     },
     "agentMemoryToolEnabled": {
@@ -236,6 +236,9 @@
       "scope": "instance"
     },
     "sessionRetentionOnlyArchived": {
+      "scope": "instance"
+    },
+    "sessionRetentionIncludeInWork": {
       "scope": "instance"
     },
     "sessionRetentionAction": {
@@ -376,6 +379,9 @@
     "workStatusSectionOrder": {
       "scope": "profile"
     },
+    "workStatusSectionOrderExplicit": {
+      "scope": "profile"
+    },
     "workStatusPanelEnabled": {
       "scope": "profile"
     },
@@ -441,6 +447,9 @@
       "scope": "profile"
     },
     "copyMessagesAsPlainText": {
+      "scope": "profile"
+    },
+    "selectionApprovalText": {
       "scope": "profile"
     },
     "showTurnChangedFiles": {
@@ -603,6 +612,10 @@
       "scope": "profile"
     },
     "fontSize": {
+      "scope": "profile",
+      "perSurface": true
+    },
+    "chatFontSize": {
       "scope": "profile",
       "perSurface": true
     },

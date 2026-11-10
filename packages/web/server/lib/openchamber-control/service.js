@@ -7,8 +7,10 @@ import { OPENCHAMBER_ALL_ACTIONS, OPENCHAMBER_KNOWLEDGE_ACTIONS } from './action
 import { writeScreenshot } from './screenshots.js';
 import { createProjectKnowledgeActions } from './project-knowledge.js';
 import { createPageAnswers, createRenderPageAction } from './render-page.js';
+import { completeFormAnswer } from './form-answer.js';
 import { createImageGenerationAction } from './generate-image.js';
 import { createSecretRequests } from './secret-request.js';
+import { createUsageReadAction } from './usage-read.js';
 import { createWorkNamer } from '../openchamber-sessions/work-naming.js';
 import { CHATS_SCOPE_PUBLIC_ID } from '../scheduled-tasks/chats-scope.js';
 
@@ -120,6 +122,30 @@ const buildSchedule = (input) => {
   return { kind: 'cron', cron, ...(timezone ? { timezone } : {}) };
 };
 
+/**
+ * Isolation fields (git only), checked before a task is written. The control
+ * route forwards raw JSON without the agent adapter's normalization, so a wrong
+ * type must fail here: read as false it turns isolation off, and read as empty
+ * it erases a stored branch. Empty and null stay the way to clear a branch.
+ * An existing session's own directory wins, so naming any of these on a task
+ * that runs there is refused instead of being stored and ignored.
+ */
+const assertWorktreeIsolation = (input, targetSessionId) => {
+  for (const field of ['runInWorktree', 'cleanupWorktree']) {
+    if (input[field] !== undefined && !isBoolean(input[field])) {
+      throw new OpenChamberControlError(`${field} must be a boolean`, 400);
+    }
+  }
+  const { baseBranch } = input;
+  if (baseBranch !== undefined && baseBranch !== null && baseBranch !== '' && !asNonEmptyString(baseBranch)) {
+    throw new OpenChamberControlError('baseBranch must be a branch name, or empty to clear it', 400);
+  }
+  const isolationNamed = ['runInWorktree', 'baseBranch', 'cleanupWorktree'].some((field) => input[field] !== undefined);
+  if (isolationNamed && asNonEmptyString(targetSessionId)) {
+    throw new OpenChamberControlError('runInWorktree, baseBranch and cleanupWorktree are not compatible with an existing session', 400);
+  }
+};
+
 const buildScheduledTask = (input) => {
   const name = asNonEmptyString(input.name);
   const prompt = asNonEmptyString(input.prompt);
@@ -134,6 +160,8 @@ const buildScheduledTask = (input) => {
   if (goalTokenBudget !== undefined && (!Number.isSafeInteger(goalTokenBudget) || goalTokenBudget < 1000 || goalTokenBudget > 100_000_000)) {
     throw new OpenChamberControlError('goalTokenBudget must be from 1000 to 100000000', 400);
   }
+  assertWorktreeIsolation(input, targetSessionId);
+  const baseBranch = asNonEmptyString(input.baseBranch);
   const task = {
     name,
     enabled: input.disabled !== true,
@@ -148,6 +176,9 @@ const buildScheduledTask = (input) => {
     },
   };
   if (input.targetSessionId !== undefined) task.targetSessionId = targetSessionId ?? input.targetSessionId;
+  if (input.runInWorktree === true) task.runInWorktree = true;
+  if (input.cleanupWorktree === false) task.cleanupWorktree = false;
+  if (baseBranch) task.baseBranch = baseBranch;
   return task;
 };
 
@@ -198,12 +229,33 @@ const patchScheduledTask = (existing, input) => {
     name = asNonEmptyString(input.name);
     if (!name) throw new OpenChamberControlError('name cannot be empty', 400);
   }
-  const replacesSchedule = ['daily', 'weekly', 'once', 'cron'].some((key) => asNonEmptyString(input[key]));
+  const selectors = ['daily', 'weekly', 'once', 'cron'].filter((key) => input[key] !== undefined);
+  if (selectors.length > 1 || (selectors.length === 1 && !asNonEmptyString(input[selectors[0]]))) {
+    throw new OpenChamberControlError('Provide exactly one nonempty daily, weekly, once, or cron selector', 400);
+  }
   const timezone = asNonEmptyString(input.timezone);
-  const schedule = replacesSchedule
+  let schedule = selectors.length === 1
     ? buildSchedule(input)
     : (timezone ? { ...existing.schedule, timezone } : existing.schedule);
-  return {
+  if (input.time !== undefined) {
+    const time = asNonEmptyString(input.time);
+    if (!time || !/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) {
+      throw new OpenChamberControlError('time must be HH:mm', 400);
+    }
+    if (schedule.kind === 'once') {
+      schedule = { ...schedule, time };
+    } else if (schedule.kind === 'weekly' && schedule.times.length === 1) {
+      schedule = { ...schedule, times: [time] };
+    } else {
+      throw new OpenChamberControlError('time requires a once or single-time weekly schedule; provide an explicit schedule to replace other schedules', 400);
+    }
+  }
+
+  assertWorktreeIsolation(
+    input,
+    input.targetSessionId === undefined ? existing.targetSessionId : input.targetSessionId,
+  );
+  const patch = {
     id: existing.id,
     targetSessionId: input.targetSessionId === undefined ? existing.targetSessionId : input.targetSessionId,
     name,
@@ -211,6 +263,11 @@ const patchScheduledTask = (existing, input) => {
     schedule,
     execution,
   };
+  if (input.runInWorktree !== undefined) patch.runInWorktree = input.runInWorktree;
+  if (input.cleanupWorktree !== undefined) patch.cleanupWorktree = input.cleanupWorktree;
+  // Empty or null clears the stored branch; absent leaves it to the store.
+  if (input.baseBranch !== undefined) patch.baseBranch = asNonEmptyString(input.baseBranch);
+  return patch;
 };
 
 export const createOpenChamberControlService = (dependencies) => {
@@ -241,6 +298,11 @@ export const createOpenChamberControlService = (dependencies) => {
     // Hears when a page an agent shows starts and stops waiting for the
     // user's answer (render.page with awaitAnswer, and secret.request).
     onPageWaitChange = () => {},
+    // The requests each session waits on the user to answer, by session id
+    // (`getPendingBlockingRequestsSnapshot`); an entry exists only while one is open.
+    readPendingRequests = () => ({}),
+    // Whether the server answers this permission for the user (auto-accept).
+    isPermissionAutoAnswered = async () => false,
     // Puts a plan in front of the user; answers how many windows it reached.
     showPlan = null,
     // Delivers a dispatched session's result back to the session that asked
@@ -260,6 +322,9 @@ export const createOpenChamberControlService = (dependencies) => {
     createClient = OpenCode.make,
     // Reads an agent's reference images and writes the generated ones.
     imageFsPromises = nodeFsPromises,
+    // Loads the quota module (`../quota/index.js`) for `usage.read`; absent
+    // means the server cannot read usage.
+    loadQuota = null,
     sleep = (duration) => new Promise((resolve) => setTimeout(resolve, duration)),
     now = Date.now,
   } = dependencies;
@@ -385,6 +450,7 @@ export const createOpenChamberControlService = (dependencies) => {
     readSettings: readSettingsFromDiskMigrated,
     fsPromises: imageFsPromises,
   });
+  const readUsage = loadQuota ? createUsageReadAction({ readSettings: readSettingsFromDiskMigrated, loadQuota }) : null;
 
   const models = async () => {
     const settings = await readSettingsFromDiskMigrated();
@@ -464,29 +530,7 @@ export const createOpenChamberControlService = (dependencies) => {
     };
   };
 
-  // Only validate a named model so tasks with a removed model stay editable.
-  const assertNamedModelKnown = async (projectID, input, task) => {
-    if (input.model === undefined) return;
-    const parsed = parseModel(input.model);
-    const directory = await scheduledTaskService.resolveExecutionDirectory(projectID, task.targetSessionId);
-    const client = await getClient(directory);
-    const catalog = await client.model.list();
-    const entries = Array.isArray(catalog.data) ? catalog.data : [];
-    if (entries.length === 0) return;
-    // Same matcher as the session routes' `findCatalogModel`: a catalog entry
-    // may carry a display override in `id`, and the `modelID` is the upstream
-    // name the fire path dispatches and the UI's model strings carry, so
-    // either form names a model that will run.
-    const known = entries
-      .some((model) => model.providerID === parsed.providerID
-        && (model.id === parsed.modelID || model.modelID === parsed.modelID));
-    if (!known) {
-      throw new OpenChamberControlError(`unknown model: ${parsed.providerID}/${parsed.modelID}`, 400);
-    }
-  };
-
   // /api/session/active is global in v2 and reports only `{ type: 'running' }`.
-  // The action contract stays busy/idle, so running is reported as busy.
   const activeSessions = async (client) => {
     const statuses = await client.session.active();
     if (!statuses || typeof statuses !== 'object' || Array.isArray(statuses)) {
@@ -495,11 +539,41 @@ export const createOpenChamberControlService = (dependencies) => {
     return statuses;
   };
 
-  const asPublicStatus = (active) => (active ? { type: 'busy' } : { type: 'idle' });
+  // A permission the server answers by itself never reaches the user.
+  const isWaitingForUser = async (sessionID) => {
+    const pending = readPendingRequests()[sessionID];
+    if (!pending) return false;
+    if (pending.forms.length > 0 || pending.pages.length > 0) return true;
+    const answered = await Promise.all(pending.permissions.map((permission) =>
+      isPermissionAutoAnswered(sessionID, permission.directory, permission.id)));
+    return answered.includes(false);
+  };
 
-  const sessionStatus = async (client, sessionID) => {
-    const statuses = await activeSessions(client);
-    return asPublicStatus(statuses[sessionID]);
+  // Only a running session can be waiting: the event that ends a stopped turn's
+  // pending requests arrives after the active map has dropped the session.
+  const asPublicStatus = async (statuses, sessionID) => {
+    if (!statuses[sessionID]) return { type: 'idle' };
+    return await isWaitingForUser(sessionID) ? { type: 'waiting' } : { type: 'busy' };
+  };
+
+  const sessionStatus = async (client, sessionID) => asPublicStatus(await activeSessions(client), sessionID);
+
+  // The active map names only running sessions, so a session it does not name
+  // is idle or does not exist. session.get tells them apart and starts no
+  // location. An id OpenCode refuses as malformed cannot name a session. A
+  // lookup that fails any other way says nothing about the session.
+  const assertSessionExists = async (client, sessionID) => {
+    try {
+      await client.session.get({ sessionID });
+    } catch (error) {
+      if (error?._tag === 'SessionNotFoundError' || error?._tag === 'InvalidRequestError') {
+        throw new OpenChamberControlError(`Session not found: ${sessionID}`, 404);
+      }
+      throw new OpenChamberControlError(
+        `Could not check whether session ${sessionID} exists: ${error instanceof Error ? error.message : String(error)}`,
+        503,
+      );
+    }
   };
 
   // The message list is cursor-paginated and `order: 'desc'` puts the newest
@@ -541,6 +615,8 @@ export const createOpenChamberControlService = (dependencies) => {
     while (true) {
       if (signal?.aborted) throw new OpenChamberControlError('OpenChamber action was cancelled', 499);
       const status = await sessionStatus(client, sessionID);
+      // Only the user can move this session on, so the caller hears it now.
+      if (status.type === 'waiting') return status;
       if (status.type === 'busy') {
         observedActivity = true;
       } else if (!requireActivity || observedActivity) {
@@ -582,6 +658,83 @@ export const createOpenChamberControlService = (dependencies) => {
       }
     } catch {
       return null;
+    }
+  };
+
+  // An extension's service acts on a session for the user (`../guests/service-host-api.js`):
+  // the stop button, a permission card, a form. Each goes to the instance of the
+  // session's own directory, since one sent elsewhere answers nothing and still succeeds.
+  const sessionClient = async (sessionID) => {
+    const directory = await resolveSessionDirectory(sessionID);
+    if (!directory) throw new OpenChamberControlError(`Session not found: ${sessionID}`, 404);
+    return getClient(directory);
+  };
+
+  const GONE_TAGS = new Set(['SessionNotFoundError', 'PermissionNotFoundError', 'FormNotFoundError', 'FormAlreadySettledError']);
+  const asAnswerError = (error) => {
+    if (GONE_TAGS.has(error?._tag)) return new OpenChamberControlError('This request is no longer waiting for an answer', 404);
+    if (error?._tag === 'FormInvalidAnswerError' || error?._tag === 'InvalidRequestError') {
+      return new OpenChamberControlError(`OpenCode refused the answer: ${error.message || error._tag}`, 400);
+    }
+    return asControlError(error, 'OpenCode did not take the answer');
+  };
+
+  const stopSession = async (sessionID) => {
+    const client = await sessionClient(sessionID);
+    try {
+      const result = await client.session.interrupt({ sessionID });
+      return result?.interrupted === true;
+    } catch (error) {
+      throw asAnswerError(error);
+    }
+  };
+
+  const answerPermission = async ({ sessionID, requestID, decision, message }) => {
+    const client = await sessionClient(sessionID);
+    try {
+      await client.permission.reply({ sessionID, requestID, decision, ...(message ? { message } : {}) });
+    } catch (error) {
+      throw asAnswerError(error);
+    }
+  };
+
+  /** `answer` replies; `null` dismisses the form, as the composer does when the user writes instead. */
+  const answerForm = async ({ sessionID, formID, answer, message }) => {
+    const client = await sessionClient(sessionID);
+    try {
+      if (!answer) {
+        await client.session.form.cancel({ sessionID, formID, ...(message ? { message } : {}) });
+        return;
+      }
+      const form = await client.session.form.get({ sessionID, formID });
+      await client.session.form.reply({ sessionID, formID, answer: completeFormAnswer(form?.fields, answer) });
+    } catch (error) {
+      throw asAnswerError(error);
+    }
+  };
+
+  /**
+   * A message the user writes while a form waits dismisses the form first, as
+   * the composer does: OpenCode holds a prompt until the form settles, so the
+   * message would otherwise wait behind a form nobody answers. The list comes
+   * from OpenCode, since this server's pending map is empty after a restart.
+   */
+  const dismissOpenForms = async (sessionID) => {
+    const client = await sessionClient(sessionID);
+    let forms;
+    try {
+      forms = await client.session.form.list({ sessionID });
+    } catch (error) {
+      throw asAnswerError(error);
+    }
+    for (const form of Array.isArray(forms) ? forms : []) {
+      if (!asNonEmptyString(form?.id) || (form.state && form.state.status !== 'pending')) continue;
+      try {
+        await client.session.form.cancel({ sessionID, formID: form.id });
+      } catch (error) {
+        // Answered meanwhile, elsewhere: nothing left to dismiss.
+        if (!GONE_TAGS.has(error?._tag)) throw asAnswerError(error);
+      }
     }
   };
 
@@ -630,7 +783,7 @@ export const createOpenChamberControlService = (dependencies) => {
     }
   };
 
-  const executeSessionAction = async (action, input, contextDirectory, signal, contextSessionId) => {
+  const executeSessionAction = async (action, input, contextDirectory, signal, contextSessionId, startedByExtension) => {
     // The tool path forwards raw JSON, so a boolean parameter can arrive as the
     // string "true". Both of these are compared with `=== true` below, which
     // would read a string as false and silently drop the behavior: a dispatch
@@ -695,7 +848,7 @@ export const createOpenChamberControlService = (dependencies) => {
     const startedAt = now();
     let result;
     if (action === 'session.create') {
-      result = await sessionService.create(payload);
+      result = await sessionService.create(payload, ...(startedByExtension ? [{ startedByExtension }] : []));
     } else {
       if (!sessionID) throw new OpenChamberControlError('sessionId is required', 400);
       if (action === 'session.send') {
@@ -944,6 +1097,10 @@ export const createOpenChamberControlService = (dependencies) => {
       if (action === 'image.generate') {
         return await generateImage(input, { directory: asNonEmptyString(contextDirectory), signal: options.signal });
       }
+      if (action === 'usage.read') {
+        if (!readUsage) throw new OpenChamberControlError('Usage is not available on this server', 503);
+        return await readUsage(input, { signal: options.signal });
+      }
       if (action === 'secret.request') {
         return await secretRequests.request(input, {
           sessionId: asNonEmptyString(options.contextSessionId),
@@ -985,7 +1142,6 @@ export const createOpenChamberControlService = (dependencies) => {
             return { scheduler: await scheduledTaskService.status(), tasks: await scheduledTaskService.list(projectID) };
           case 'schedule.create': {
             const task = buildScheduledTask(input);
-            await assertNamedModelKnown(projectID, input, task);
             const result = await scheduledTaskService.upsert(projectID, task);
             return { task: result.task, created: result.created };
           }
@@ -993,7 +1149,6 @@ export const createOpenChamberControlService = (dependencies) => {
             const existing = (await scheduledTaskService.list(projectID)).find((task) => task.id === taskID);
             if (!existing) throw new OpenChamberControlError(`Scheduled task not found: ${taskID}`, 404);
             const task = patchScheduledTask(existing, input);
-            await assertNamedModelKnown(projectID, input, task);
             const result = await scheduledTaskService.upsert(projectID, task);
             return { task: result.task, updated: true };
           }
@@ -1012,7 +1167,7 @@ export const createOpenChamberControlService = (dependencies) => {
         }
       }
       if (action === 'session.create' || action === 'session.send' || action === 'session.fork') {
-        return executeSessionAction(action, input, contextDirectory, options.signal, options.contextSessionId);
+        return executeSessionAction(action, input, contextDirectory, options.signal, options.contextSessionId, options.startedByExtension);
       }
       if (action === 'session.link') {
         if (!sessionLinks) throw new OpenChamberControlError('Linking is not available on this server', 503);
@@ -1116,15 +1271,16 @@ export const createOpenChamberControlService = (dependencies) => {
           if (input.withStatus === true) {
             // One global call now: v2 reports active sessions across directories.
             const statuses = await activeSessions(client).catch(() => null);
-            sessions = sessions.map((session) => ({
+            sessions = await Promise.all(sessions.map(async (session) => ({
               ...session,
-              status: statuses ? asPublicStatus(statuses[session.id]) : { type: 'unknown' },
-            }));
+              status: statuses ? await asPublicStatus(statuses, session.id) : { type: 'unknown' },
+            })));
           }
           return { sessions, limit, directory, archived: input.all === true ? 'included' : 'excluded' };
         }
         if (!directory) throw new OpenChamberControlError('directory is required', 400);
         if (action === 'session.status') {
+          await assertSessionExists(client, sessionID);
           return { sessionId: sessionID, directory, sessionStatus: await sessionStatus(client, sessionID) };
         }
         if (action === 'session.messages') {
@@ -1134,6 +1290,7 @@ export const createOpenChamberControlService = (dependencies) => {
           const last = input.last === true || input.lastAssistant === true;
           if (input.all === true && (last || input.limit !== undefined)) throw new OpenChamberControlError('all cannot be combined with last or limit', 400);
           if (last && input.limit !== undefined) throw new OpenChamberControlError('last cannot be combined with limit', 400);
+          await assertSessionExists(client, sessionID);
           const currentStatus = input.wait === true
             ? await waitForIdle({ client, sessionID, directory, timeoutMs: normalizeWaitTimeoutMs(input.timeout), requireActivity: false, startedAt: now(), signal: options.signal })
             : await sessionStatus(client, sessionID);
@@ -1152,5 +1309,19 @@ export const createOpenChamberControlService = (dependencies) => {
   // id and the directory is resolved here, where it is authoritative.
   // `answerPage` is the chat's side of a page that waits (render.page with
   // awaitAnswer), `answerSecret` the chat's side of a secret.request card.
-  return { execute, resolveSessionDirectory, answerPage: pageAnswers.answer, answerSecret: secretRequests.answer };
+  const releaseAnswerWaits = (sessionId) => {
+    pageAnswers.release(sessionId);
+    secretRequests.release(sessionId);
+  };
+  return {
+    execute,
+    resolveSessionDirectory,
+    answerPage: pageAnswers.answer,
+    answerSecret: secretRequests.answer,
+    releaseAnswerWaits,
+    stopSession,
+    answerPermission,
+    answerForm,
+    dismissOpenForms,
+  };
 };

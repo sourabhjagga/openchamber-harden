@@ -522,6 +522,16 @@ describe("sendMessage", () => {
     expect(requests[0].body).toEqual({ model: { id: "gpt-5.6-luna", providerID: "openai", variant: "high" } })
   })
 
+  test("a selection whose last switch outlives the runtime rejects, so no reply follows it", async () => {
+    responses.push(agentList("build"), noContent(), () => {
+      runtimeKey = "other"
+      return noContent()
+    })
+    await expect(
+      opencodeClient.applySendSelection("ses_1", { model: { id: "grok-4.7", providerID: "xai" }, agent: "build" }, null, "test"),
+    ).rejects.toThrow("runtime changed")
+  })
+
   test("refuses to send when the runtime changed underneath the caller", async () => {
     await expect(
       opencodeClient.sendMessage({ runtimeKey: "other", id: "ses_1", providerID: "openai", text: "x" }),
@@ -614,6 +624,16 @@ describe("sendMessage", () => {
       }),
     ).rejects.toThrow("runtime changed")
     expect(requests.map((r) => r.url.pathname)).toEqual(["/api/session/ses_1/synthetic"])
+  })
+
+  // OpenCode's commit deletes everything admitted past the revert's boundary (#6244).
+  test("commits a staged revert once, before the first context message, and only when there is one", async () => {
+    responses.push(noContent(), json({ id: "syn_1" }), json({ id: "syn_2" }), json({ id: "msg_1" }), noContent(), json({ id: "syn_3" }), noContent(), json({ id: "msg_2" }))
+    const commitRevert = () => opencodeClient.commitRevert("ses_1")
+    await opencodeClient.sendMessage({ id: "ses_1", providerID: "openai", text: "", context: [{ text: "a" }, { text: "b" }], commitRevert })
+    await opencodeClient.sendCommand({ id: "ses_1", command: "review", context: [{ text: "c" }], commitRevert })
+    await opencodeClient.sendMessage({ id: "ses_1", providerID: "openai", text: "plain", commitRevert })
+    expect(requests.map((r) => r.url.pathname.split("/").pop())).toEqual(["commit", "synthetic", "synthetic", "prompt", "commit", "synthetic", "command", "prompt"])
   })
 })
 
@@ -1051,6 +1071,26 @@ describe("read timeouts (#2470)", () => {
     )
     await new Promise((resolve) => setTimeout(resolve, 60))
     expect(settled).toBe(false)
+  })
+
+  test("a usage stats read outlasts the read timeout (#6366)", async () => {
+    const client = createRuntimeOpencodeClient({ baseUrl: "http://runtime.test/api", requestTimeoutMs: 20 })
+    const caller = new AbortController()
+    let settled = false
+    responses.push(HANG)
+    const read = client.experimental.session.stats({}, { signal: caller.signal }).then(
+      () => {
+        settled = true
+      },
+      () => {
+        settled = true
+      },
+    )
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    expect(settled).toBe(false)
+    // The caller's abort ends the hanging read so the test leaves nothing pending.
+    caller.abort()
+    await read
   })
 })
 

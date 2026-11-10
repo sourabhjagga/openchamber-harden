@@ -11,6 +11,7 @@ import { CommitComparisonSelector } from '@/components/views/git/CommitCompariso
 import { useEffectiveDirectory } from '@/hooks/useEffectiveDirectory';
 import { useNestedGitDirectory } from '@/hooks/useNestedGitDirectory';
 import { NestedRepoPicker } from '@/components/views/git/NestedRepoPicker';
+import { GitRepositoryUnreadableState } from '@/components/views/git/GitRepositoryUnreadableState';
 import { ContextPanelHeaderToolbar } from '@/components/layout/contextPanelHeaderSlot';
 import { useInContextPanelHeader } from '@/components/layout/contextPanelHeaderSlotContext';
 import { BranchComparisonSelector } from '@/components/views/git/BranchComparisonSelector';
@@ -39,7 +40,9 @@ import { statusToGitCode } from './turnSnapshotDiff';
 import { toast } from '@/components/ui';
 
 import { ScrollableOverlay } from '@/components/ui/ScrollableOverlay';
-import { getLanguageFromExtension, isImageFile } from '@/lib/toolHelpers';
+import { isDocumentVersions } from './files/documentVersions';
+import { OfficeDocumentDiff } from './files/OfficeDocumentDiff';
+import { getLanguageFromExtension, hasFileVersionsDiff, isImageFile, isOfficePreviewFile } from '@/lib/toolHelpers';
 import { useRuntimeAPIs } from '@/hooks/useRuntimeAPIs';
 import { DiffViewToggle } from '@/components/chat/message/DiffViewToggle';
 import type { DiffViewMode } from '@/components/chat/message/types';
@@ -68,7 +71,8 @@ import { ReviewSubmitButton } from '@/components/review/ReviewSubmitButton';
 import { ChangeRequestReviewContext, useComparisonReview } from '@/components/review/useChangeRequestReview';
 import { toastContextFileOpenFailure, validateContextFileOpen } from '@/lib/contextFileOpenGuard';
 import { StatusImage } from '@/components/ui/status-image';
-import { toAbsoluteFilePath } from '@/lib/path-utils';
+import { findRepoFile, isAbsoluteFilePath, toAbsoluteFilePath } from '@/lib/path-utils';
+import { findFileRepository } from '@/lib/nestedRepositories';
 import { sessionEvents } from '@/lib/sessionEvents';
 import { findDiffScrollAnchor, getRestoredDiffScrollTop, type DiffScrollAnchor } from './diffScrollAnchor';
 import { isRightToLeft, useI18n } from '@/lib/i18n';
@@ -92,6 +96,7 @@ import type { DiffFindMatch } from '@/lib/diff/diffFind';
 import { DiffFindBar } from './diffFind/DiffFindBar';
 import { resolveFindDiff, useDiffFind, type DiffFindLayout, type DiffFindNestedSources, type DiffFindSource } from './diffFind/useDiffFind';
 import { useDiffFindSurface } from './diffFind/useDiffFindSurface';
+import { useKeybinds } from '@/hooks/useKeybind';
 import { createFindDiffBatchReader } from './diffFind/findDiffBatch';
 import { diffCommentOriginFromSource, type DiffCommentOrigin } from '@/lib/diffCommentOrigin';
 import { useWholeFileComment, WholeFileCommentButton } from '@/components/comments';
@@ -519,7 +524,7 @@ interface InlineDiffViewerProps {
   onFindWordRequest?: (request: DiffFindWordRequest) => void;
 }
 
-const InlineDiffViewer = React.memo<InlineDiffViewerProps>(({
+const InlineDiffViewer: React.FC<InlineDiffViewerProps> = React.memo<InlineDiffViewerProps>(({
   filePath,
   diff,
   commentOrigin,
@@ -545,6 +550,27 @@ const InlineDiffViewer = React.memo<InlineDiffViewerProps>(({
 
   if (diff.isBinary) {
     return <BinaryDiffPlaceholder />;
+  }
+
+  if (isOfficePreviewFile(filePath) && isDocumentVersions(diff.original, diff.modified)) {
+    return (
+      <OfficeDocumentDiff
+        filePath={filePath}
+        original={diff.original}
+        modified={diff.modified}
+        renderText={(text) => (
+          <InlineDiffViewer
+            filePath={filePath}
+            diff={{ ...diff, original: text.original, modified: text.modified }}
+            commentOrigin={commentOrigin}
+            staged={staged}
+            renderSideBySide={renderSideBySide}
+            wrapLines={wrapLines}
+            hideWhitespace={hideWhitespace}
+          />
+        )}
+      />
+    );
   }
 
   if (isImageFile(filePath)) {
@@ -651,7 +677,7 @@ const NestedRepositoryFileDiff = React.memo<NestedRepositoryFileDiffProps>(({
         const runtimeKey = getRuntimeKey();
         const request: Promise<DiffData> = !git.getGitFileDiff || !git.getGitDiff
             ? Promise.reject(new Error(t('diffView.unavailable.missingTitle')))
-            : isImageFile(file.path)
+            : hasFileVersionsDiff(file.path)
                 ? git.getGitFileDiff(directory, { path: file.path, staged }).then((response) => ({
                     original: response.original ?? '',
                     modified: response.modified ?? '',
@@ -816,9 +842,14 @@ const NestedRepositoryChanges = React.memo<NestedRepositoryChangesProps>(({
                         {t('diffView.nestedRepository.description')}
                     </div>
                 </div>
-                <Button variant="outline" size="sm" className="shrink-0" onClick={() => void openAsProject()}>
-                    {t('diffView.nestedRepository.openAsProject')}
-                </Button>
+                <Tooltip>
+                    <TooltipTrigger asChild>
+                        <Button variant="outline" size="sm" className="shrink-0" onClick={() => void openAsProject()}>
+                            {t('diffView.nestedRepository.openAsProject')}
+                        </Button>
+                    </TooltipTrigger>
+                    <TooltipContent sideOffset={6}>{t('contextTooltips.diff.openAsProject')}</TooltipContent>
+                </Tooltip>
             </div>
             {status.kind === 'loading' ? (
                 <div className="flex items-center justify-center gap-2 px-4 py-4 typography-meta text-muted-foreground">
@@ -1051,7 +1082,7 @@ export const MultiFileDiffEntry = React.memo<MultiFileDiffEntryProps>(({
     const renderSideBySide = layout === 'side-by-side';
     const desiredContextMode: DiffContextMode = loadFullFiles ? 'full' : 'patch';
     const fileStatusKey = `${file.index}:${file.working_dir}:${file.insertions}:${file.deletions}`;
-    const hunkEligible = hunkActionsEnabled && !readOnlyActions && !initialDiffData && !comparisonDiff && !isImageFile(file.path);
+    const hunkEligible = hunkActionsEnabled && !readOnlyActions && !initialDiffData && !comparisonDiff && !hasFileVersionsDiff(file.path);
     const patchScope = JSON.stringify([getRuntimeKey(), directory, file.path, staged, fileStatusKey, diffRetryNonce, contentRevision]);
     const actionPatch = canonicalPatch?.scope === patchScope ? canonicalPatch.patch : null;
     const actionSubmodule = canonicalPatch?.scope === patchScope ? canonicalPatch.submodule : null;
@@ -1142,7 +1173,7 @@ export const MultiFileDiffEntry = React.memo<MultiFileDiffEntryProps>(({
         const contextLines = loadFullFiles ? FULL_CONTEXT_DIFF_LINES : DEFAULT_CONTEXT_DIFF_LINES;
         const displayRequest = !git.getGitFileDiff || !git.getGitDiff
             ? Promise.reject(new Error(t('diffView.unavailable.missingTitle')))
-            : isImageFile(file.path)
+            : hasFileVersionsDiff(file.path)
                 ? git.getGitFileDiff(directory, { path: file.path, staged })
                 : !loadFullFiles && actionPatch !== null
                     ? Promise.resolve({ diff: actionPatch, submodule: actionSubmodule })
@@ -1567,7 +1598,7 @@ export const DiffView: React.FC<DiffViewProps> = ({
     const runtimeKey = useGitStore((state) => state.runtimeKey);
     // Diffs belong to the repository being diffed: the picked one, or the
     // root when nothing is picked.
-    const { gitDirectory: nestedGitDirectory, repositoryOptions } = useNestedGitDirectory(rootDirectory ?? null, { enabled: visible, recheckOnOpen: true });
+    const { gitDirectory: nestedGitDirectory, rootIsGitRepo, repositoryOptions, repositoriesKnown, unreadable } = useNestedGitDirectory(rootDirectory ?? null, { enabled: visible, recheckOnOpen: true });
     const effectiveDirectory = nestedGitDirectory ?? rootDirectory;
     // The binding follows the repository actually being diffed.
     const binding = useRepositoryBinding(effectiveDirectory, sourceControl);
@@ -1588,6 +1619,10 @@ export const DiffView: React.FC<DiffViewProps> = ({
     const setDiff = useGitStore((state) => state.setDiff);
     const [displayFile, setDisplayFile] = React.useState<string | null>(null);
     const [displayFileStaged, setDisplayFileStaged] = React.useState(false);
+    // A file the last turn's diff did not have, on its way to Changed. The
+    // repository is picked for it once, and its status read once per repository.
+    const [changedFallback, setChangedFallback] = React.useState<{ file: string; picked: boolean; statusReadFor: string | null } | null>(null);
+    const fallbackStatusRequestRef = React.useRef<string | null>(null);
     const [pinnedStackedTarget, setPinnedStackedTarget] = React.useState<string | null>(null);
     const [expandedFiles, setExpandedFiles] = React.useState<Set<string>>(() => new Set());
     const [mountedStackedFiles, setMountedStackedFiles] = React.useState<Set<string>>(() => new Set());
@@ -1613,6 +1648,8 @@ export const DiffView: React.FC<DiffViewProps> = ({
     const pendingDiffStaged = useUIStore((state) => state.pendingDiffStaged);
     const pendingDiffScope = useUIStore((state) => state.pendingDiffScope);
     const setPendingDiffFile = useUIStore((state) => state.setPendingDiffFile);
+    const pendingTurnDiffFile = useUIStore((state) => state.pendingTurnDiffFile);
+    const setPendingTurnDiffFile = useUIStore((state) => state.setPendingTurnDiffFile);
     const diffLayoutPreference = useUIStore((state) => state.diffLayoutPreference);
     const diffFileLayout = useUIStore((state) => state.diffFileLayout);
     const setDiffLayoutForAllFiles = useUIStore((state) => state.setDiffLayoutForAllFiles);
@@ -1688,6 +1725,7 @@ export const DiffView: React.FC<DiffViewProps> = ({
         diffs: lastTurnDiffs,
         count: turnFileCount,
         loaded: turnDiffLoaded,
+        settled: turnDiffSettled,
         error: turnDiffError,
         retry: retryTurnDiff,
     } = useLastTurnDiff(currentSessionId, rootDirectory ?? undefined, { enabled: visible, live: activeDiffScope === 'turn' });
@@ -1850,7 +1888,7 @@ export const DiffView: React.FC<DiffViewProps> = ({
     );
     const { review: changeRequestReview, provider: reviewProvider } = useComparisonReview(prComparison, effectiveDirectory, visible && activeDiffScope === 'pr' && !isVSCodeRuntime());
     const comparison = useGitComparison(effectiveDirectory ?? null, comparisonSource, visible && !isVSCodeRuntime(), activeDiffScope === 'branch' ? branchRevision : '', prComparison.readContext, prComparison.provider);
-    const { fetchDiff: loadComparisonDiff, fetchFullFile: loadComparisonFullFile } = comparison;
+    const { fetchDiff: loadComparisonDiff, fetchFullFile: loadComparisonFullFile, fetchVersions: loadComparisonVersions } = comparison;
     const commitFiles = activeDiffScope === 'commit' ? comparison.files : null;
     const commitFilesError = activeDiffScope === 'commit' ? comparison.error : null;
     const branchFiles = activeDiffScope === 'branch' ? comparison.files : null;
@@ -1870,13 +1908,22 @@ export const DiffView: React.FC<DiffViewProps> = ({
     const fetchComparisonDiffEntry = React.useCallback(
         async (filePath: string, fullContext = false): Promise<ComparisonDiffResult> => {
             try {
+                if (isOfficePreviewFile(filePath)) {
+                    const versions = await loadComparisonVersions(filePath);
+                    return {
+                        status: 'ready',
+                        data: isDocumentVersions(versions.original, versions.modified)
+                            ? { ...versions, contextMode: 'full' }
+                            : { original: '', modified: '', isBinary: true, contextMode: 'full' },
+                    };
+                }
                 const response = await loadComparisonDiff(filePath, fullContext ? FULL_CONTEXT_DIFF_LINES : DEFAULT_CONTEXT_DIFF_LINES);
                 return { status: 'ready', data: createTextDiffDataFromPatch(filePath, response.diff, fullContext ? 'full' : 'patch') };
             } catch (error) {
                 return { status: 'error', message: error instanceof Error ? error.message : t('diffView.state.failedToLoadDiff') };
             }
         },
-        [loadComparisonDiff, t]
+        [loadComparisonDiff, loadComparisonVersions, t]
     );
     // Branch and commit diffs are re-read from git with the whole file as
     // context; a PR diff comes from GitHub at fixed context, so its full view
@@ -1884,6 +1931,7 @@ export const DiffView: React.FC<DiffViewProps> = ({
     const fetchComparisonFullFileEntry = React.useCallback(
         async (filePath: string): Promise<ComparisonDiffResult> => {
             try {
+                if (isOfficePreviewFile(filePath)) return await fetchComparisonDiffEntry(filePath);
                 const { original, modified } = await loadComparisonFullFile(filePath);
                 // Complete-file metadata, like the git-backed full patches: the
                 // viewer keeps the highlighted partial diff on screen until this
@@ -1894,7 +1942,7 @@ export const DiffView: React.FC<DiffViewProps> = ({
                 return { status: 'error', message: error instanceof Error ? error.message : t('diffView.state.failedToLoadDiff') };
             }
         },
-        [loadComparisonFullFile, t]
+        [fetchComparisonDiffEntry, loadComparisonFullFile, t]
     );
     const loadFullComparisonDiff = React.useMemo(
         () => activeDiffScope === 'branch' || activeDiffScope === 'commit'
@@ -2240,7 +2288,9 @@ export const DiffView: React.FC<DiffViewProps> = ({
         }
 
         const normalizedTarget = targetFilePath?.trim();
-        if (!normalizedTarget) {
+        // Listings are relative, so a chip's absolute path names no row here.
+        // Its click resolves the row through pendingTurnDiffFile below.
+        if (!normalizedTarget || isAbsoluteFilePath(normalizedTarget)) {
             return;
         }
 
@@ -2252,6 +2302,76 @@ export const DiffView: React.FC<DiffViewProps> = ({
         expandStackedFile(normalizedTarget);
         setScrollRequestNonce((value) => value + 1);
     }, [activeDiffScope, expandStackedFile, targetFilePath]);
+
+    const revealListedFile = React.useCallback((path: string) => {
+        setDisplayFile(path);
+        setDisplayFileStaged(false);
+        shouldPinAfterAlignRef.current = true;
+        pendingScrollTargetRef.current = path;
+        expandStackedFile(path);
+        setScrollRequestNonce((value) => value + 1);
+    }, [expandStackedFile]);
+
+    // A click asked for a file in the last turn's diff. Only an answer to the
+    // session's current state decides: a list kept from an earlier turn would
+    // send a file this turn did change to Changed, and a failed read keeps its
+    // retry. Asked once per click, so picking Last turn by hand stays there.
+    React.useEffect(() => {
+        if (!pendingTurnDiffFile || !visible) return;
+        if (diffScope !== 'turn' || pendingTurnDiffFile.sessionId !== currentSessionId) {
+            setPendingTurnDiffFile(null);
+            return;
+        }
+        // Entering the scope resets what is expanded, so wait for that first.
+        if (!turnDiffSettled || activeDiffScope !== 'turn') return;
+        setPendingTurnDiffFile(null);
+        const file = toAbsoluteFilePath(rootDirectory, pendingTurnDiffFile.file);
+        const listed = findRepoFile(file, rootDirectory, lastTurnDiffs.flatMap((diff) => diff.file ?? []));
+        if (listed) {
+            revealListedFile(listed);
+            return;
+        }
+        fallbackStatusRequestRef.current = null;
+        setChangedFallback({ file, picked: false, statusReadFor: null });
+        setActiveDiffScope('working');
+        onDiffScopeChange?.('working');
+    }, [activeDiffScope, currentSessionId, diffScope, lastTurnDiffs, onDiffScopeChange, pendingTurnDiffFile, revealListedFile, rootDirectory, setPendingTurnDiffFile, turnDiffSettled, visible]);
+
+    // Changed reads one repository, and the status on hand may predate the
+    // turn, so the file is looked for in its own repository's fresh status. A
+    // repository the picker drops again (a broken `.git`) ends the attempt.
+    React.useEffect(() => {
+        if (!changedFallback || !visible || !effectiveDirectory) return;
+        if (activeDiffScope !== 'working') {
+            setChangedFallback(null);
+            return;
+        }
+        if (!repositoriesKnown) return;
+        const repository = findFileRepository(changedFallback.file, [
+            ...(rootIsGitRepo && rootDirectory ? [rootDirectory] : []),
+            ...(repositoryOptions ?? []),
+        ]);
+        if (repository && repository !== effectiveDirectory && rootDirectory) {
+            if (changedFallback.picked) {
+                setChangedFallback(null);
+                return;
+            }
+            setChangedFallback({ ...changedFallback, picked: true });
+            selectNestedRepo(rootDirectory, repository);
+            return;
+        }
+        if (changedFallback.statusReadFor !== effectiveDirectory) {
+            if (fallbackStatusRequestRef.current === effectiveDirectory) return;
+            fallbackStatusRequestRef.current = effectiveDirectory;
+            void fetchStatus(effectiveDirectory, git, { silent: true }).finally(() => {
+                setChangedFallback((current) => current && { ...current, statusReadFor: effectiveDirectory });
+            });
+            return;
+        }
+        setChangedFallback(null);
+        const listed = findRepoFile(changedFallback.file, effectiveDirectory, changedFiles.map((file) => file.path));
+        if (listed) revealListedFile(listed);
+    }, [activeDiffScope, changedFallback, changedFiles, effectiveDirectory, fetchStatus, git, repositoriesKnown, repositoryOptions, revealListedFile, rootDirectory, rootIsGitRepo, selectNestedRepo, visible]);
 
     React.useEffect(() => {
         if (!displayFile) {
@@ -2495,38 +2615,34 @@ export const DiffView: React.FC<DiffViewProps> = ({
         scrollToFile(value);
     }, [cancelPendingScrollAlignment, expandStackedFile, isTreeMode, scrollToFile]);
 
-    // Step review to the adjacent changed file (alt+arrow): selects, expands
-    // a collapsed section, and scrolls to it. Window-level because the diff
-    // surface has no persistent focus target; guarded off editable fields.
-    React.useEffect(() => {
-        const handleKeyDown = (event: KeyboardEvent) => {
-            if (!visible) return;
-            if (!event.altKey || event.metaKey || event.ctrlKey || event.shiftKey) return;
-            if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
-            const target = event.target;
-            if (target instanceof HTMLElement && (
-                target.isContentEditable
-                || target.tagName === 'INPUT'
-                || target.tagName === 'TEXTAREA'
-                || target.closest('[role="dialog"]')
-            )) {
-                return;
-            }
-            event.preventDefault();
-            if (navigationFiles.length === 0) return;
-            const delta = event.key === 'ArrowDown' ? 1 : -1;
-            const currentPath = isTreeMode ? treeSelectedFile?.path : displayFile;
-            const index = currentPath ? navigationFiles.findIndex((file) => file.path === currentPath) : -1;
-            const nextIndex = index === -1
-                ? (delta > 0 ? 0 : navigationFiles.length - 1)
-                : index + delta;
-            const next = navigationFiles[nextIndex];
-            if (!next) return;
-            handleSelectFileAndScroll(next.path);
-        };
-        window.addEventListener('keydown', handleKeyDown);
-        return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [displayFile, handleSelectFileAndScroll, isTreeMode, navigationFiles, treeSelectedFile, visible]);
+    // Step review to the adjacent changed file: selects, expands a collapsed
+    // section, and scrolls to it. Guarded off editable fields, because the
+    // diff surface has no persistent focus target.
+    const stepChangedFile = (event: KeyboardEvent, delta: -1 | 1): boolean | void => {
+        if (!visible) return false;
+        const target = event.target;
+        if (target instanceof HTMLElement && (
+            target.isContentEditable
+            || target.tagName === 'INPUT'
+            || target.tagName === 'TEXTAREA'
+            || target.closest('[role="dialog"]')
+        )) {
+            return false;
+        }
+        if (navigationFiles.length === 0) return;
+        const currentPath = isTreeMode ? treeSelectedFile?.path : displayFile;
+        const index = currentPath ? navigationFiles.findIndex((file) => file.path === currentPath) : -1;
+        const nextIndex = index === -1
+            ? (delta > 0 ? 0 : navigationFiles.length - 1)
+            : index + delta;
+        const next = navigationFiles[nextIndex];
+        if (!next) return;
+        handleSelectFileAndScroll(next.path);
+    };
+    useKeybinds({
+        diff_next_file: (event) => stepChangedFile(event, 1),
+        diff_previous_file: (event) => stepChangedFile(event, -1),
+    });
 
     // ----- Find in diff -----
     // Files the bar can search. `load` mirrors the viewer's own read: the side
@@ -2564,7 +2680,7 @@ export const DiffView: React.FC<DiffViewProps> = ({
                 layout,
                 revision,
                 load: async () => {
-                    if (isImageFile(nestedFile.path)) return null;
+                    if (hasFileVersionsDiff(nestedFile.path)) return null;
                     if (!git.getGitDiff) return null;
                     const staged = isStagedStatusFile(nestedFile) && !isWorkingStatusFile(nestedFile);
                     const response = await git.getGitDiff(nestedDirectory, { path: nestedFile.path, staged, contextLines: DEFAULT_CONTEXT_DIFF_LINES });
@@ -2589,7 +2705,7 @@ export const DiffView: React.FC<DiffViewProps> = ({
     ): Promise<GitPathDiffBatchEntry | null> => {
         if (!git.getGitDiffs) return Promise.resolve(null);
         const peers = diffFindSourcesRef.current
-            .filter((source) => !isImageFile(source.filePath)
+            .filter((source) => !hasFileVersionsDiff(source.filePath)
                 && getFileStaged(source.filePath) === staged
                 && findFullContextFiles.has(source.filePath) === fullContext)
             .map((source) => ({ filePath: source.filePath, revision: source.revision ?? '' }));
@@ -2627,7 +2743,7 @@ export const DiffView: React.FC<DiffViewProps> = ({
             if (result.status !== 'ready') throw new Error(result.status === 'error' ? result.message : 'Diff not loaded');
             return resolveFindDiff(diffDataToFileDiff(filePath, result.data), diffHideWhitespace);
         }
-        if (!effectiveDirectory || isImageFile(filePath)) return null;
+        if (!effectiveDirectory || hasFileVersionsDiff(filePath)) return null;
         if (!git.getGitDiff) return null;
         const getGitDiff = git.getGitDiff;
         // Search exactly the side the viewer renders. `getGitDiff` reads the
@@ -2745,9 +2861,9 @@ export const DiffView: React.FC<DiffViewProps> = ({
         try {
             let targetLine: number | null = null;
 
-            if (cachedDiffData?.patch && !cachedDiffData.isBinary && !isImageFile(filePath)) {
+            if (cachedDiffData?.patch && !cachedDiffData.isBinary && !hasFileVersionsDiff(filePath)) {
                 targetLine = getFirstChangedModifiedLineFromPatch(cachedDiffData.patch);
-            } else if (cachedDiffData && cachedDiffData.contextMode === 'full' && !cachedDiffData.isBinary && !isImageFile(filePath)) {
+            } else if (cachedDiffData && cachedDiffData.contextMode === 'full' && !cachedDiffData.isBinary && !hasFileVersionsDiff(filePath)) {
                 targetLine = getFirstChangedModifiedLine(cachedDiffData.original, cachedDiffData.modified);
             }
 
@@ -2780,7 +2896,7 @@ export const DiffView: React.FC<DiffViewProps> = ({
             }
 
             const resolvedTargetLine = targetLine
-            ?? (diffForNavigation && !diffForNavigation.isBinary && !isImageFile(filePath)
+            ?? (diffForNavigation && !diffForNavigation.isBinary && !hasFileVersionsDiff(filePath)
               ? getFirstChangedModifiedLine(diffForNavigation.original, diffForNavigation.modified)
               : 1);
 
@@ -2946,6 +3062,10 @@ export const DiffView: React.FC<DiffViewProps> = ({
             );
         }
 
+        if (activeDiffScope !== 'turn' && unreadable) {
+            return <GitRepositoryUnreadableState directory={unreadable.directory} message={unreadable.message} />;
+        }
+
         if (activeDiffScope !== 'turn' && isLoadingStatus && !status) {
             return (
                 <div className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground">
@@ -3063,7 +3183,7 @@ export const DiffView: React.FC<DiffViewProps> = ({
             );
         }
 
-        if (activeDiffScope === 'turn' && !turnDiffLoaded && currentSessionId) {
+        if (activeDiffScope === 'turn' && (!turnDiffLoaded || pendingTurnDiffFile) && currentSessionId) {
             return (
                 <div className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground">
                     <Icon name="loader-4" className="size-4 animate-spin" />
@@ -3223,29 +3343,42 @@ export const DiffView: React.FC<DiffViewProps> = ({
                 )}
                 {activeDiffScope === 'pr' && <>
                     <PullRequestComparisonSelector key={JSON.stringify([runtimeKey, effectiveDirectory, currentBranch])} comparison={prComparison} />
-                    {selectedPr && <Button variant="ghost" size="sm" disabled={comparison.loading}
-                        aria-label={t('session.githubIssuePicker.actions.refresh')} title={t('session.githubIssuePicker.actions.refresh')}
-                        onClick={() => void comparison.refresh()}><Icon name="refresh" className="size-4" /></Button>}
+                    {selectedPr && <Tooltip>
+                        <TooltipTrigger asChild>
+                            <span className="inline-flex flex-shrink-0">
+                                <Button variant="ghost" size="sm" disabled={comparison.loading}
+                                    aria-label={t('session.githubIssuePicker.actions.refresh')}
+                                    onClick={() => void comparison.refresh()}><Icon name="refresh" className="size-4" /></Button>
+                            </span>
+                        </TooltipTrigger>
+                        <TooltipContent side="bottom" sideOffset={6}>{t('session.githubIssuePicker.actions.refresh')}</TooltipContent>
+                    </Tooltip>}
                 </>}
                 {changedFiles.length > 0 && (
-                    <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={handleExpandOrCollapseAll}
-                        className={cn(
-                            'diff-toolbar__expand-button h-7 flex-shrink-0 gap-1 px-1.5 text-muted-foreground hover:text-foreground',
-                            'ms-auto',
-                        )}
-                        title={expandedFiles.size > 0 ? t('diffView.actions.collapseAll') : t('diffView.actions.expandAll')}
-                    >
-                        <Icon
-                            name="expand-up-down"
-                            className="size-4"
-                        />
-                        <span className="diff-toolbar__expand-label typography-ui-label">
-                            {expandedFiles.size > 0 ? t('diffView.actions.collapseAll') : t('diffView.actions.expandAll')}
-                        </span>
-                    </Button>
+                    <Tooltip>
+                        <TooltipTrigger asChild>
+                            <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={handleExpandOrCollapseAll}
+                                className={cn(
+                                    'diff-toolbar__expand-button h-7 flex-shrink-0 gap-1 px-1.5 text-muted-foreground hover:text-foreground',
+                                    'ms-auto',
+                                )}
+                            >
+                                <Icon
+                                    name="expand-up-down"
+                                    className="size-4"
+                                />
+                                <span className="diff-toolbar__expand-label typography-ui-label">
+                                    {expandedFiles.size > 0 ? t('diffView.actions.collapseAll') : t('diffView.actions.expandAll')}
+                                </span>
+                            </Button>
+                        </TooltipTrigger>
+                        <TooltipContent side="bottom" sideOffset={6}>
+                            {expandedFiles.size > 0 ? t('contextTooltips.diff.collapseAll') : t('contextTooltips.diff.expandAll')}
+                        </TooltipContent>
+                    </Tooltip>
                 )}
                 {changeRequestReview && reviewProvider ? (
                     <ReviewSubmitButton
@@ -3256,37 +3389,49 @@ export const DiffView: React.FC<DiffViewProps> = ({
                     />
                 ) : null}
                 {changedFiles.length > 0 && showReviewAction && (
-                    <Button
-                        variant="default"
-                        size="sm"
-                        onClick={() => setReviewDialogOpen(true)}
-                        disabled={reviewFlowSubmitting}
-                        className="diff-toolbar__review-button h-7 flex-shrink-0 gap-1.5 px-2"
-                        aria-label={t('diffView.actions.reviewAria')}
-                    >
-                        {reviewFlowSubmitting ? (
-                            <Icon name="loader-4" className="size-4 animate-spin" />
-                        ) : (
-                            <Icon name="search-eye" className="size-4" />
-                        )}
-                        <span className="diff-toolbar__review-label typography-ui-label">
-                            {t('diffView.actions.review')}
-                        </span>
-                    </Button>
+                    <Tooltip>
+                        <TooltipTrigger asChild>
+                            <span className="inline-flex flex-shrink-0">
+                                <Button
+                                    variant="default"
+                                    size="sm"
+                                    onClick={() => setReviewDialogOpen(true)}
+                                    disabled={reviewFlowSubmitting}
+                                    className="diff-toolbar__review-button h-7 flex-shrink-0 gap-1.5 px-2"
+                                    aria-label={t('diffView.actions.reviewAria')}
+                                >
+                                    {reviewFlowSubmitting ? (
+                                        <Icon name="loader-4" className="size-4 animate-spin" />
+                                    ) : (
+                                        <Icon name="search-eye" className="size-4" />
+                                    )}
+                                    <span className="diff-toolbar__review-label typography-ui-label">
+                                        {t('chat.work.reviewHint.aiReview')}
+                                    </span>
+                                </Button>
+                            </span>
+                        </TooltipTrigger>
+                        <TooltipContent side="bottom" sideOffset={6}>{t('contextTooltips.diff.review')}</TooltipContent>
+                    </Tooltip>
                 )}
                 {showWalkthroughButton && (
-                    <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={openWalkthrough}
-                        className={cn('diff-toolbar__walkthrough-button h-7 flex-shrink-0 gap-1.5 px-2', WALKTHROUGH_ACTION_CLASS)}
-                        aria-label={t('walkthrough.action.open')}
-                    >
-                        <Icon name="route" className="size-4" />
-                        <span className="diff-toolbar__walkthrough-label typography-ui-label">
-                            {t('walkthrough.action.open')}
-                        </span>
-                    </Button>
+                    <Tooltip>
+                        <TooltipTrigger asChild>
+                            <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={openWalkthrough}
+                                className={cn('diff-toolbar__walkthrough-button h-7 flex-shrink-0 gap-1.5 px-2', WALKTHROUGH_ACTION_CLASS)}
+                                aria-label={t('walkthrough.action.open')}
+                            >
+                                <Icon name="route" className="size-4" />
+                                <span className="diff-toolbar__walkthrough-label typography-ui-label">
+                                    {t('walkthrough.action.open')}
+                                </span>
+                            </Button>
+                        </TooltipTrigger>
+                        <TooltipContent side="bottom" sideOffset={6}>{t('contextTooltips.diff.walkthrough')}</TooltipContent>
+                    </Tooltip>
                 )}
                 {changedFiles.length > 0 && !isMobileLayout && (
                     <span className="diff-toolbar__tree-toggle flex flex-shrink-0">
