@@ -72,7 +72,10 @@ services:
     # OPENCODE_SKIP_START: true            # skip start opencode
     # OPENCHAMBER_OPENCODE_HOSTNAME: 0.0.0.0 # Bind OpenCode to all interfaces
     healthcheck:
-      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/3000"]
+      # A TCP connect only proves the port is open; it says nothing about the
+      # app. This asks for / and requires a 2xx, so a container that serves
+      # errors is marked unhealthy and the deploy script can roll it back.
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:3000/"]
       interval: 30s
       timeout: 5s
       retries: 3
