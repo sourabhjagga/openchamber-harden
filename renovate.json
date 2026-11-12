@@ -1,6 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "enabled": false,
+  "enabled": true,
   "extends": [
     "config:recommended"
   ],
@@ -8,7 +8,7 @@
   "schedule": [
     "* 1 1 * *"
   ],
-  "minimumReleaseAge": "1 day",
+  "minimumReleaseAge": "3 days",
   "dependencyDashboard": true,
   "prConcurrentLimit": 5,
   "prHourlyLimit": 2,
@@ -58,13 +58,20 @@
     },
     {
       "description": "@types/node follows the oldest Node we run on (engines >=24.14, CI, Electron 44); lift it with the runtime floor",
-      "matchPackageNames": ["@types/node"],
+      "matchPackageNames": [
+        "@types/node"
+      ],
       "allowedVersions": "<25"
     },
     {
       "description": "plugin-react majors track Vite majors (v6 needs Vite 8), so they land together",
-      "matchPackageNames": ["vite", "@vitejs/plugin-react"],
-      "matchUpdateTypes": ["major"],
+      "matchPackageNames": [
+        "vite",
+        "@vitejs/plugin-react"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
       "groupName": "vite"
     }
   ],
