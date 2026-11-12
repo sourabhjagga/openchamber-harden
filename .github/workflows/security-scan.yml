@@ -1,12 +1,14 @@
 name: Security scan
 
 # Two free, self-hosted scanners, run in the checkout:
-#   gitleaks  - secrets in the working tree; fails the job so a secret cannot be
-#               merged (it scans the files, not the history, so old commits that
-#               were already cleaned do not keep the job red)
-#   Trivy     - vulnerable dependencies and IaC misconfiguration; reports only,
-#               because most findings have no immediate fix and failing on them
-#               would make the job noise
+#   gitleaks - secrets in the working tree
+#   Trivy    - vulnerable dependencies and IaC misconfiguration
+#
+# Both report and neither fails the job. That is deliberate for a first
+# rollout: forks carry upstream documentation full of example credentials, and
+# test fixtures look like secrets, so a blocking gate would be red on day one
+# and get ignored. Read the findings, triage them, then flip the exit codes
+# (gitleaks: --exit-code 1, Trivy: exit-code "1") to make it a gate.
 #
 # Dependabot alerts are a separate, repository-level setting: they watch
 # dependencies over time, this workflow looks at one checkout.
@@ -44,7 +46,7 @@ jobs:
           gitleaks version
 
       - name: Scan the working tree
-        run: gitleaks dir . --redact --verbose --exit-code 1
+        run: gitleaks dir . --redact --verbose --exit-code 0
 
   trivy:
     name: Dependencies and IaC (Trivy)
@@ -56,7 +58,7 @@ jobs:
           persist-credentials: false
 
       - name: Scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: .
