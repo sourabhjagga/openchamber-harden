@@ -3,7 +3,7 @@ name: Upstream Sync (Nightly Maintenance)
 on:
   schedule:
     # 21:30 UTC = 03:00 AM IST every night
-    - cron: '30 19 8-14,22-28 * 5'
+    - cron: "30 19 * * 5"  # Fridays 19:30 UTC = Saturdays 01:00 IST (within 1-3 AM window)
   workflow_dispatch:
     inputs:
       force:
