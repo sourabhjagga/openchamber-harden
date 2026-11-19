@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       force:
-        description: 'Bypass the 96h minimum age and sync immediately'
+        description: 'Bypass the 48h minimum age and sync immediately'
         type: boolean
         default: false
 
@@ -60,8 +60,27 @@ jobs:
           git remote add upstream https://github.com/openchamber/openchamber.git || true
           git fetch upstream --tags
 
-          # Find the latest release tag matching v*
-          LATEST_TAG="$(git tag -l "v*" --sort=-creatordate | head -n 1)"
+          # Pick the newest upstream v* tag that is at least ${SOAK_HOURS}h old
+          # (sorted newest first). A brand-new release (< soak window) is skipped
+          # in favour of the previous one, so a failed/half-baked latest tag
+          # never blocks the fork. If every tag is still inside the window we
+          # take the newest anyway so the fork can never get stuck.
+          SOAK_HOURS="${SOAK_HOURS:-48}"
+          NOW="$(date +%s)"
+          LATEST_TAG=""
+          while read -r T; do
+            [ -z "$T" ] && continue
+            T_DATE=$(git log -1 --format=%ct "$T" 2>/dev/null || echo 0)
+            T_AGE=$(( NOW - T_DATE ))
+            echo "candidate $T age=$((T_AGE/3600))h"
+            if [ "$T_AGE" -ge $(( SOAK_HOURS * 3600 )) ]; then
+              LATEST_TAG="$T"
+              break
+            fi
+          done < <(git tag -l "v*" --sort=-creatordate)
+          if [ -z "$LATEST_TAG" ]; then
+            LATEST_TAG="$(git tag -l "v*" --sort=-creatordate | head -n 1)"
+          fi
           if [ -z "$LATEST_TAG" ]; then
             echo "No upstream tags found."
             exit 0
@@ -82,8 +101,8 @@ jobs:
           echo "Tag age: ${AGE_HOURS}h"
 
           FORCE="${{ inputs.force }}"
-          if [ "$FORCE" != "true" ] && [ "$AGE_HOURS" -lt 96 ]; then
-            echo "Release $LATEST_TAG is ${AGE_HOURS}h old (< 96h minimum age). Waiting for stability."
+          if [ "$FORCE" != "true" ] && [ "$AGE_HOURS" -lt 48 ]; then
+            echo "Release $LATEST_TAG is ${AGE_HOURS}h old (< 48h minimum age). Waiting for stability."
             echo "sync_needed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
