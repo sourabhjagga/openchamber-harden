@@ -22,7 +22,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
 
       - name: Configure Git Author
         run: |
@@ -135,4 +137,8 @@ jobs:
           fi
 
           echo "Pushing changes to main branch (triggers CircleCI deploy pipeline)..."
-          git push origin main
+          if [ -n "${GH_PAT:-}" ]; then
+            git push "https://x-access-token:${GH_PAT}@github.com/${{ github.repository }}.git" main
+          else
+            git push origin main
+          fi
