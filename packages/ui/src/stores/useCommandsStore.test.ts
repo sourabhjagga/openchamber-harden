@@ -1,6 +1,9 @@
-import { beforeEach, describe, expect, mock, test } from 'bun:test';
+import { beforeEach, describe, expect, test } from 'bun:test';
 import type { Command } from './useCommandsStore';
 import { runSessionListNetworkTask } from '../lib/background-network';
+import { directoryEnvironment } from './test-support/directoryEnvironment';
+
+const environment = directoryEnvironment({ home: '/workspace', fakeTimers: false });
 
 function deferred<T>() {
   let resolve: (value: T) => void = () => { throw new Error('Promise not initialized'); };
@@ -12,7 +15,6 @@ let activeProjectPath = '/workspace/project';
 
 let listCommandsCalls = 0;
 let listCommandsImpl: (directory?: string | null) => Promise<Command[]> = async () => [];
-let getDirectoryImpl: () => string = () => '/fallback/project';
 // `/api/config/commands/:name/config` answers the stored entity plus where it
 // lives; the v2 `CommandInfo` the list returns carries only name + description.
 let runtimeFetchImpl: () => Promise<Response> = async () => new Response(
@@ -25,7 +27,6 @@ const listCommandsMock = async (directory?: string | null) => {
   return listCommandsImpl(directory);
 };
 
-const getDirectoryMock = () => getDirectoryImpl();
 // These tests read entries per command, as against a server without the batch
 // route; `batchEntries` answers that route when a test sets it.
 let batchEntries: ((names: string[]) => Promise<Response>) | null = null;
@@ -35,47 +36,31 @@ const runtimeFetchMock = async (input: string) => {
   return batchEntries(new URLSearchParams(input.split('?')[1]).getAll('name'));
 };
 
-mock.module('@/lib/opencode/client', () => ({
-  opencodeClient: {
-    getDirectory: getDirectoryMock,
-    listCommands: listCommandsMock,
-  },
-}));
-
-mock.module('@/stores/useProjectsStore', () => ({
-  useProjectsStore: {
-    getState: () => ({
-      getActiveProject: () => ({ path: activeProjectPath }),
-    }),
-  },
-}));
-
-mock.module('@/lib/runtime-fetch', () => ({
-  runtimeFetch: runtimeFetchMock,
-}));
-
-mock.module('@/lib/configUpdate', () => ({
-  startConfigUpdate: mock(() => undefined),
-  finishConfigUpdate: mock(() => undefined),
-  updateConfigUpdateMessage: mock(() => undefined),
-}));
-
-mock.module('@/lib/configSync', () => ({
-  emitConfigChange: mock(() => undefined),
-  scopeMatches: mock(() => false),
-  subscribeToConfigChanges: mock(() => () => undefined),
-}));
+environment.respond(async (url, init) => {
+  if (url.pathname === '/api/command') {
+    const directory = decodeURIComponent(new Headers(init?.headers).get('x-opencode-directory') ?? '');
+    return Response.json({ data: await listCommandsMock(directory) });
+  }
+  if (url.pathname.startsWith('/api/config/command')) return runtimeFetchMock(`${url.pathname}${url.search}`);
+  if (url.pathname === '/api/fs/home') return Response.json({ home: '/workspace', chatsRoot: '/workspace/chats' });
+  if (url.pathname === '/api/location' || url.pathname === '/api/session') return Response.json({}, { status: 401 });
+  throw new Error(`Unexpected request: ${url}`);
+});
+const { useProjectsStore } = await import('./useProjectsStore');
+const selectProject = (path: string) => {
+  activeProjectPath = path;
+  useProjectsStore.setState({ projects: [{ id: path, path }], activeProjectId: path });
+};
 
 const { useCommandsStore, invalidateCommandsLoadCache, resolveCommandDirectory, selectCommandsForComposer, selectCommandsForDirectory, isCommandOfferedInComposer } = await import('./useCommandsStore');
 
 describe('useCommandsStore', () => {
   beforeEach(() => {
-    activeProjectPath = '/workspace/project';
+    selectProject('/workspace/project');
     invalidateCommandsLoadCache(activeProjectPath);
     invalidateCommandsLoadCache('/workspace/other');
     listCommandsCalls = 0;
     listCommandsImpl = async () => [];
-    getDirectoryImpl = () => '/fallback/project';
     runtimeFetchImpl = async () => new Response(
       JSON.stringify({ source: 'md', scope: 'project', path: null, legacy: false, config: {} }),
       { headers: { 'Content-Type': 'application/json' } },
@@ -117,6 +102,38 @@ describe('useCommandsStore', () => {
       { name: 'git/commit', scope: 'user', description: 'Commit', path: '/home/commands/git/commit.md' },
       { name: 'unknown' },
     ]);
+  });
+
+  test('an invalidated batch metadata read cannot publish stale entries', async () => {
+    const pending = deferred<Response>();
+    const started = deferred<void>();
+    let reads = 0;
+    listCommandsImpl = async () => [{ name: 'review' }];
+    batchEntries = async () => {
+      reads += 1;
+      if (reads === 1) {
+        started.resolve();
+        return pending.promise;
+      }
+      return Response.json({ commands: [{ name: 'review', entry: { config: { description: 'fresh' } } }] });
+    };
+    const descriptions: Array<string | undefined> = [];
+    const unsubscribe = useCommandsStore.subscribe(state => descriptions.push(state.commands[0]?.description));
+    try {
+      const first = useCommandsStore.getState().loadCommands();
+      await started.promise;
+      invalidateCommandsLoadCache(activeProjectPath);
+      const refreshed = useCommandsStore.getState().loadCommands();
+      pending.resolve(Response.json({ commands: [{ name: 'review', entry: { config: { description: 'stale' } } }] }));
+      expect(await Promise.all([first, refreshed])).toEqual([true, true]);
+      expect(useCommandsStore.getState().commands[0]?.description).toBe('fresh');
+      expect(descriptions).not.toContain('stale');
+      expect(reads).toBe(2);
+    } finally {
+      pending.resolve(Response.json({ commands: [] }));
+      unsubscribe();
+      batchEntries = null;
+    }
   });
 
   test('command scope enrichment stays bounded and leaves room for session lists', async () => {
@@ -257,10 +274,10 @@ describe('useCommandsStore', () => {
     listCommandsImpl = async () => [{ name: 'first' }];
     await useCommandsStore.getState().loadCommands();
     const firstCommands = useCommandsStore.getState().commands;
-    activeProjectPath = '/workspace/other';
+    selectProject('/workspace/other');
     listCommandsImpl = async () => [{ name: 'second' }];
     await useCommandsStore.getState().loadCommands();
-    activeProjectPath = '/workspace/project';
+    selectProject('/workspace/project');
 
     await useCommandsStore.getState().loadCommands();
     expect(useCommandsStore.getState().commands).toBe(firstCommands);
@@ -283,7 +300,7 @@ describe('useCommandsStore', () => {
     };
     const firstLoad = useCommandsStore.getState().loadCommands();
     await started.promise;
-    activeProjectPath = '/workspace/other';
+    selectProject('/workspace/other');
     listCommandsImpl = async () => [{ name: 'second' }];
     await useCommandsStore.getState().loadCommands();
     const secondCommands = useCommandsStore.getState().commands;
@@ -294,14 +311,14 @@ describe('useCommandsStore', () => {
     expect(selectCommandsForDirectory(useCommandsStore.getState(), '/workspace/project').map(c => c.name)).toEqual(['first']);
   });
 
-  test('successful empty discovery clears only that project and is cached', async () => {
+  test('successful empty discovery clears only that project and allows a fresh read', async () => {
     const commands = [{ name: 'old' }];
     useCommandsStore.setState({ commands, commandsByDirectory: { [activeProjectPath]: commands } });
     expect(await useCommandsStore.getState().loadCommands()).toBe(true);
     expect(selectCommandsForDirectory(useCommandsStore.getState(), activeProjectPath)).toEqual([]);
     expect(useCommandsStore.getState().commands).toEqual([]);
     await useCommandsStore.getState().loadCommands();
-    expect(listCommandsCalls).toBe(1);
+    expect(listCommandsCalls).toBe(2);
   });
 
 
@@ -323,7 +340,7 @@ describe('useCommandsStore', () => {
     const pending = deferred<Command[]>();
     listCommandsImpl = () => pending.promise;
     const settingsLoad = useCommandsStore.getState().loadCommands('/workspace/other');
-    activeProjectPath = '/workspace/other';
+    selectProject('/workspace/other');
     const activeLoad = useCommandsStore.getState().loadCommands();
     pending.resolve([{ name: 'selected' }]);
     expect(await settingsLoad).toBe(true);

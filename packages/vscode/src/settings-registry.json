@@ -183,6 +183,9 @@
     "agentUsageToolEnabled": {
       "scope": "instance"
     },
+    "agentTerminalToolEnabled": {
+      "scope": "instance"
+    },
     "agentImageToolEnabled": {
       "scope": "instance"
     },
@@ -208,6 +211,9 @@
       "scope": "instance"
     },
     "agentWorkflowToolEnabled": {
+      "scope": "instance"
+    },
+    "agentWorkflowAutoApprove": {
       "scope": "instance"
     },
     "isolatedSpacesEnabled": {
@@ -1045,6 +1051,10 @@
       "local": true
     },
     "alwaysShowScrollbars": {
+      "scope": "device",
+      "local": true
+    },
+    "mobileKeepScreenAwake": {
       "scope": "device",
       "local": true
     },

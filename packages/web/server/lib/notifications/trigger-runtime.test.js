@@ -216,7 +216,8 @@ describe('ready notification while background subagents run', () => {
         return jobs ? Response.json({ data: jobs() }) : new Response(null, { status: 404 });
       }
       if (url.pathname === '/api/session/active') return Response.json({ data: active() });
-      if (url.pathname === '/api/session') return Response.json({ data: children, cursor: {} });
+      const child = children.find((record) => url.pathname === `/api/session/${record.id}`);
+      if (child) return Response.json({ data: child });
       return Response.json({});
     }));
   };
@@ -947,6 +948,7 @@ describe('clearing a pushed notification once its cause is handled', () => {
   });
 
   it('sends no ready for a turn the session moved on from while it was prepared', async () => {
+    vi.useFakeTimers();
     let release;
     const prepared = new Promise((resolve) => { release = resolve; });
     const buildTemplateVariables = async () => { await prepared; return {}; };
@@ -954,7 +956,7 @@ describe('clearing a pushed notification once its cause is handled', () => {
     vi.stubGlobal('fetch', vi.fn(async () => Response.json({ data: [] })));
     await runtime.maybeSendPushForTrigger(stepStarted('ses_1', 'msg_1'));
     const ready = runtime.maybeSendPushForTrigger(turnEnded('ses_1'));
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await vi.advanceTimersByTimeAsync(20);
     for (const event of translated('session.execution.started', { sessionID: 'ses_1' })) {
       await runtime.maybeSendPushForTrigger(event);
     }

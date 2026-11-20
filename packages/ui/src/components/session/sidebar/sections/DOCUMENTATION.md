@@ -23,11 +23,28 @@ with its named pin lists. How the rows are drawn stays with the row model
   drag anywhere but their controls, as the sidebar's do (`../rowDrag.ts`); in
   the sidebar a section drags by its caption
   (`projects/SortableSidebarSection.tsx`), and both write the same order.
+  It also holds the sidebar's batch size (`sidebarSessionBatchSize`), one
+  number for every limited list: the manager is where sections are arranged,
+  and a number field reads badly in a menu or far away in Settings. A limit
+  per section was rejected as more controls for a need one number covers.
 - `PinToMenu.tsx`, `NewPinListDialog.tsx`, `apps/mobileSidebar/MobilePinToSheet.tsx`:
   Pin to on the row menus, the swipe on the phone, and naming a new list.
 
 ## Invariants
 
+- The manager ignores outside-close events on its own toggle, preventing the
+  following click from reopening it. Escape inside a child menu closes that menu
+  before it can discard the section editor.
+- Batch-size digits commit on blur or Enter, so typing a multi-digit value cannot
+  clamp its first digit and corrupt the value being entered.
+- Switching between work filters and project grouping retains the unsaved editor
+  choices. Saving a project group keeps only its projects, and an empty work
+  filter cannot save a section that would list nothing.
+- Phrase entry handles Enter and Escape before the surrounding form and panel;
+  IME composition retains both keys for text entry.
+- Facts derived from session metadata cache by record identity because records
+  replace on updates and a sidebar can contain thousands of them. Subagent work
+  state does not count as the user's work state.
 - A section of the user's own lists every work that matches its filter, so one
   work can show in several. Its one choice is about projects: with "Also show
   under projects" off (`claims`), its works leave their projects; on, they stay

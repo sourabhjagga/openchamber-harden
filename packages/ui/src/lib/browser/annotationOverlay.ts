@@ -1,44 +1,16 @@
-/**
- * The annotation overlay that runs *inside* the previewed page.
- *
- * This module produces a self-contained script string. It is injected through
- * `webview.executeJavaScript`, so it cannot import anything, cannot reference
- * our theme variables (the page has its own `:root`), and must not disturb the
- * document it lands in. Consequences that drive the implementation:
- *
- * - All chrome lives in a **closed** shadow root on a single host element, so
- *   page CSS cannot restyle it and page scripts cannot walk into it.
- * - Every color and every label is passed in from the host, already resolved
- *   and already translated. Nothing user-facing is hardcoded here.
- *
- * The chrome is two small pieces rather than one bar: the tools sit at the top
- * of the page, and the comment box follows whatever was just marked. A single
- * bar pinned to one edge covers the part of the page people most often want to
- * point at, and accumulates into something that feels like an application.
- *
- * Lifecycle: the script resolves with a payload (or null when cancelled) and
- * tears down its own chrome *before* resolving, waiting for a repaint, so a
- * screenshot taken by the host contains the page and none of our UI.
- */
-
 export type BrowserAnnotationOverlayTheme = {
   readonly colorScheme: 'light' | 'dark';
   readonly primary: string;
-  /** Translucent primary, already resolved to a concrete color by the host. */
   readonly primarySoft: string;
-  /** Faint primary used for hover backgrounds. */
   readonly primaryFaint: string;
   readonly primaryContrast: string;
   readonly surface: string;
   readonly surfaceElevated: string;
-  /** Translucent elevated surface, matching the app's floating panels. */
   readonly glassSurface: string;
-  /** A ready `backdrop-filter` value; '' when the theme has no glass. */
   readonly glassFilter: string;
   readonly border: string;
   readonly text: string;
   readonly mutedText: string;
-  /** The recording dot of dictation. */
   readonly danger: string;
 };
 
@@ -50,15 +22,7 @@ export type BrowserAnnotationOverlayLabels = {
   readonly submit: string;
 };
 
-/**
- * Dictation into the comment. The microphone is the app's: the overlay asks
- * for it through `ANNOTATION_BINDING`, a function the desktop shell exposes
- * only to the isolated world the overlay runs in, so the page itself can
- * neither start a recording nor answer in the app's place. Without that
- * function (the overlay running in the page's own world) there is no mic.
- */
 export type BrowserAnnotationVoice = {
-  /** The app's dictation shortcut as this platform's keys; null when it has none the overlay can match. */
   readonly shortcut: { key: string; meta: boolean; ctrl: boolean; alt: boolean; shift: boolean } | null;
   readonly labels: {
     readonly start: string;
@@ -67,30 +31,21 @@ export type BrowserAnnotationVoice = {
     readonly listening: string;
     readonly processing: string;
   };
-  /** SVG path markup from the app's icon sprite. */
   readonly icons: { readonly mic: string; readonly close: string; readonly check: string; readonly loader: string };
 };
 
-/** What the overlay sends the app, as JSON through the binding. */
 export type AnnotationOverlayMessage = { type: 'voice'; action: 'start' | 'finish' | 'cancel' };
 
-/**
- * What the app sends the overlay. `failed` keeps a submit that waited on the
- * recording from going out; `level` is the microphone's, 0 to 1.
- */
 export type AnnotationAppMessage =
   | { type: 'voice'; phase: 'idle' | 'recording' | 'processing'; note?: string; failed?: boolean }
   | { type: 'insert'; text: string }
   | { type: 'level'; level: number };
 
-/** The shell's binding into the overlay's world; `browser-panel-driver.mjs` names it the same. */
 const ANNOTATION_BINDING = '__openchamberAnnotationSend';
-/** Where the overlay takes the app's messages, in its own world. */
 const ANNOTATION_RECEIVER = '__openchamberAnnotationReceive';
 
 const ANNOTATION_ACTIVE_FLAG = '__openchamberBrowserAnnotationActive';
 
-/** Cancels an overlay left behind by an earlier session. Safe when none is active. */
 export const ANNOTATION_TEARDOWN_SCRIPT = `(() => {
   try {
     var host = document.querySelector('[data-openchamber-annotation]');
@@ -310,11 +265,14 @@ export const buildAnnotationOverlayScript = (
     // A status such as a model download is cut short, so the comment keeps its room.
     '.rec span:last-child{max-width:120px;overflow:hidden;text-overflow:ellipsis}',
     '.wave{display:block;width:48px;height:16px}',
-    '.dot{width:6px;height:6px;border-radius:50%;background:' + THEME.danger + ';animation:oc-blink 1s steps(2,start) infinite}',
+    // The dot and the spinner step on timers instead of infinite CSS
+    // animations, which draw every frame for as long as they show: the dot
+    // dims every other second, the spinner turns four times a second.
+    '.dot{width:6px;height:6px;border-radius:50%;background:' + THEME.danger + '}',
+    '.dot.dim{opacity:.4}',
+    '@media (prefers-reduced-motion:reduce){.dot.dim{opacity:1}}',
     '.spin{display:flex;width:28px;height:28px;align-items:center;justify-content:center;color:' + THEME.mutedText + '}',
-    '.spin svg{width:16px;height:16px;animation:oc-spin 1s linear infinite}',
-    '@keyframes oc-blink{to{visibility:hidden}}',
-    '@keyframes oc-spin{to{transform:rotate(360deg)}}',
+    '.spin svg{width:16px;height:16px}',
     '[hidden]{display:none !important}'
   ].join('');
   shadow.appendChild(style);
@@ -384,6 +342,8 @@ export const buildAnnotationOverlayScript = (
   var voiceNote = '';
   var voiceStartedAt = 0;
   var voiceTimer = null;
+  var voiceBusyTimer = null;
+  var voiceBusyStep = 0;
   // Enter while the recording runs finishes it, and the annotation goes once
   // the words are in the comment.
   var submitAfterVoice = false;
@@ -477,12 +437,13 @@ export const buildAnnotationOverlayScript = (
 
   var renderVoiceTime = function () {
     if (!voiceText) return;
+    var elapsed = Math.max(0, Math.floor((Date.now() - voiceStartedAt) / 1000));
+    dot.classList.toggle('dim', voicePhase === 'recording' && elapsed % 2 === 1);
     if (voiceNote) {
       voiceText.textContent = voiceNote;
       return;
     }
-    var seconds = Math.max(0, Math.floor((Date.now() - voiceStartedAt) / 1000));
-    voiceText.textContent = Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0');
+    voiceText.textContent = Math.floor(elapsed / 60) + ':' + String(elapsed % 60).padStart(2, '0');
   };
 
   var renderVoice = function () {
@@ -509,6 +470,13 @@ export const buildAnnotationOverlayScript = (
     try { comment.setSelectionRange(caret, caret); } catch (error) { /* field went away */ }
   };
 
+  /** Turns the processing spinner by one eighth. */
+  var stepVoiceBusy = function () {
+    voiceBusyStep = (voiceBusyStep + 1) % 8;
+    var icon = voiceBusy && voiceBusy.firstChild;
+    if (icon) icon.style.transform = 'rotate(' + voiceBusyStep * 45 + 'deg)';
+  };
+
   var applyVoice = function (message) {
     var was = voicePhase;
     voicePhase = message.phase === 'recording' || message.phase === 'processing' ? message.phase : 'idle';
@@ -522,6 +490,15 @@ export const buildAnnotationOverlayScript = (
     if (voicePhase !== 'recording' && voiceTimer) {
       clearInterval(voiceTimer);
       voiceTimer = null;
+    }
+    if (voicePhase === 'processing' && !voiceBusyTimer) {
+      voiceBusyStep = -1;
+      stepVoiceBusy();
+      voiceBusyTimer = setInterval(stepVoiceBusy, 250);
+    }
+    if (voicePhase !== 'processing' && voiceBusyTimer) {
+      clearInterval(voiceBusyTimer);
+      voiceBusyTimer = null;
     }
     renderVoice();
     if (voicePhase !== 'idle') return;
@@ -995,6 +972,7 @@ export const buildAnnotationOverlayScript = (
     if (host.parentNode) host.parentNode.removeChild(host);
     if (inputLayer && inputLayer.parentNode) inputLayer.parentNode.removeChild(inputLayer);
     if (voiceTimer) clearInterval(voiceTimer);
+    if (voiceBusyTimer) clearInterval(voiceBusyTimer);
     if (voiceBox) {
       try { delete window['${ANNOTATION_RECEIVER}']; } catch (error) { /* non-configurable */ }
     }

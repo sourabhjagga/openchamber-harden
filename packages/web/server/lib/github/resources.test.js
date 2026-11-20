@@ -1,6 +1,6 @@
 import { describe, expect, spyOn, test, vi } from 'bun:test';
 
-import { createGitHubResources } from './resources.js';
+import { createGitHubResources, gitHubRefusalMessage, responseError } from './resources.js';
 import { isGitHubRateLimitError } from './rate-limit.js';
 
 const openPull = {
@@ -22,6 +22,24 @@ const openPull = {
 const httpError = (status, message) => Object.assign(new Error(message), {
   status,
   response: { status, data: { message } },
+});
+
+describe('resource error boundaries', () => {
+  test('refusal messages retain inherited fields and unchecked fallback values', () => {
+    const refusal = Object.create({ response: { data: { message: 'Provider refused' } } });
+    expect(gitHubRefusalMessage(refusal)).toBe('Provider refused');
+    expect(gitHubRefusalMessage({ response: { data: { message: ' ' } }, message: 17 })).toBe(17);
+    expect(gitHubRefusalMessage(null)).toBeUndefined();
+  });
+
+  test('response errors preserve the original body while Error coerces its message', () => {
+    const body = { error: 17, code: 'PROVIDER_FAILURE' };
+    const failure = responseError(403, body);
+    expect(failure.message).toBe('17');
+    expect(failure.sourceControlResponse).toEqual({ status: 403, body });
+    expect(failure.sourceControlResponse.body).toBe(body);
+    expect(responseError(403, { error: undefined }).message).toBe('');
+  });
 });
 
 const makeResources = (permission) => createGitHubResources({
@@ -201,5 +219,81 @@ describe('changeRequestStatus merge permission', () => {
     } finally {
       clock.mockRestore();
     }
+  });
+});
+
+describe('listChangeRequests filters', () => {
+  const makeListResources = () => {
+    const list = vi.fn(async () => ({ data: [], headers: {} }));
+    const search = vi.fn(async () => ({ data: { total_count: 0, items: [] } }));
+    const resources = createGitHubResources({
+      load: async () => ({
+        rateLimit: {
+          isGitHubRateLimited: () => false,
+          noteIfGitHubRateLimit: () => false,
+          isGitHubRateLimitError,
+        },
+      }),
+      accountOf: () => ({
+        user: { login: 'octocat' },
+        octokit: { rest: { pulls: { list, get: async () => ({ data: openPull }) }, search: { issuesAndPullRequests: search } } },
+      }),
+      resolveRepo: async () => ({ repo: { owner: 'acme', repo: 'app', host: 'github.com' } }),
+      resolveNetwork: async () => null,
+      resolvePrStatus: async () => ({ repo: null }),
+      readContributorProvenance: undefined,
+      invalidateAccount: () => {},
+    });
+    return { resources, list, search };
+  };
+  const read = (resources, options = {}) => resources.listChangeRequests({
+    session, directory: '/repo', page: 1, remote: 'origin', ...options,
+  });
+
+  test('reads the default open board view from the REST list', async () => {
+    const { resources, list, search } = makeListResources();
+    await read(resources);
+    expect(search).not.toHaveBeenCalled();
+    expect(list).toHaveBeenCalledWith(expect.objectContaining({ state: 'open', per_page: 50, page: 1 }));
+  });
+
+  test('an unknown state or people value reads the default open board view', async () => {
+    const { resources, list, search } = makeListResources();
+    await read(resources, { state: 'everything', people: 'everyone' });
+    expect(search).not.toHaveBeenCalled();
+    expect(list).toHaveBeenCalledWith(expect.objectContaining({ state: 'open' }));
+  });
+
+  test('a closed or all board view reads the REST list, which answers those states', async () => {
+    const { resources, list, search } = makeListResources();
+    await read(resources, { state: 'closed' });
+    expect(search).not.toHaveBeenCalled();
+    expect(list).toHaveBeenCalledWith(expect.objectContaining({ state: 'closed', per_page: 50, page: 1 }));
+
+    await read(resources, { state: 'all' });
+    expect(search).not.toHaveBeenCalled();
+    expect(list).toHaveBeenLastCalledWith(expect.objectContaining({ state: 'all' }));
+  });
+
+  test('merged, labels, people and text still search, which is all the REST list cannot express', async () => {
+    const merged = makeListResources();
+    await read(merged.resources, { state: 'merged' });
+    expect(merged.list).not.toHaveBeenCalled();
+    expect(merged.search).toHaveBeenCalledWith(expect.objectContaining({ q: expect.stringContaining('is:merged') }));
+
+    const labelled = makeListResources();
+    await read(labelled.resources, { state: 'closed', labels: ['bug'] });
+    expect(labelled.list).not.toHaveBeenCalled();
+  });
+
+  test('a board page narrowed by state, people or labels searches instead', async () => {
+    const { resources, list, search } = makeListResources();
+    await read(resources, { state: 'closed', people: 'reviewRequested', labels: ['bug'] });
+    expect(list).not.toHaveBeenCalled();
+    expect(search).toHaveBeenCalledWith(expect.objectContaining({
+      q: 'repo:acme/app is:pr is:closed sort:updated-desc review-requested:@me label:"bug"',
+      per_page: 50,
+      page: 1,
+    }));
   });
 });
