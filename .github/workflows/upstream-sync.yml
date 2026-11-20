@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       force:
-        description: 'Bypass the 48h minimum age and sync immediately'
+        description: 'Force sync (soak window removed)'
         type: boolean
         default: false
 
@@ -40,7 +40,7 @@ jobs:
           # in favour of the previous one, so a failed/half-baked latest tag
           # never blocks the fork. If every tag is still inside the window we
           # take the newest anyway so the fork can never get stuck.
-          SOAK_HOURS="${SOAK_HOURS:-48}"
+          SOAK_HOURS="${SOAK_HOURS:-0}"
           NOW="$(date +%s)"
           LATEST_TAG=""
           while read -r T; do
