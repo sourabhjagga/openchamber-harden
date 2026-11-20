@@ -3,7 +3,7 @@ import { cn, formatPathForDisplay } from '@/lib/utils';
 import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import type { PermissionReply, PermissionRequest } from '@/types/permission';
 import { useRoutingStore } from '@/stores/useRoutingStore';
-import { WorkerHighlightedCode } from '@/components/code/WorkerHighlightedCode';
+import { HighlightedCode } from '@/components/code/HighlightedCode';
 import { ScrollableOverlay } from '@/components/ui/ScrollableOverlay';
 import { Icon } from "@/components/icon/Icon";
 import { Button } from '@/components/ui/button';
@@ -134,7 +134,7 @@ export const PermissionRequestContent: React.FC<{ permission: PermissionRequest 
       return (
         <>
           {description && (
-            <div className="typography-meta text-muted-foreground mb-2">{description}</div>
+            <div dir="auto" className="typography-meta text-muted-foreground mb-2">{description}</div>
           )}
           {workingDir && (
             <div className="typography-meta text-muted-foreground mb-2">
@@ -149,7 +149,7 @@ export const PermissionRequestContent: React.FC<{ permission: PermissionRequest 
           {}
           {bashCommand && (
             <div>
-              <WorkerHighlightedCode
+              <HighlightedCode
                 language="bash"
                 code={bashCommand}
                 style={PERMISSION_BASH_CUSTOM_STYLE}
@@ -227,7 +227,7 @@ export const PermissionRequestContent: React.FC<{ permission: PermissionRequest 
             <div className="mb-2">
               <div className="typography-meta text-muted-foreground mb-1">{t('chat.permissionCard.headers')}</div>
               <ScrollableOverlay outerClassName="max-h-24" className="p-0">
-                <WorkerHighlightedCode
+                <HighlightedCode
                   language="json"
                   code={JSON.stringify(headers, null, 2)}
                   style={PERMISSION_JSON_CUSTOM_STYLE}
@@ -240,7 +240,7 @@ export const PermissionRequestContent: React.FC<{ permission: PermissionRequest 
             <div className="mb-2">
               <div className="typography-meta text-muted-foreground mb-1">{t('chat.permissionCard.body')}</div>
               <ScrollableOverlay outerClassName="max-h-32" className="p-0">
-                <WorkerHighlightedCode
+                <HighlightedCode
                   language={typeof body === 'object' ? 'json' : 'text'}
                   code={typeof body === 'object' ? JSON.stringify(body, null, 2) : String(body)}
                   style={PERMISSION_JSON_CUSTOM_STYLE}
@@ -266,13 +266,13 @@ export const PermissionRequestContent: React.FC<{ permission: PermissionRequest 
     return (
       <>
         {description && (
-          <div className="typography-meta text-muted-foreground mb-2">{description}</div>
+          <div dir="auto" className="typography-meta text-muted-foreground mb-2">{description}</div>
         )}
         {genericContent && (
           <div className="mb-2">
             <div className="typography-meta text-muted-foreground mb-1">{t('chat.permissionCard.action')}</div>
             <ScrollableOverlay outerClassName="max-h-32" className="p-0">
-              <pre className="typography-meta font-mono px-2 py-1 bg-muted/30 rounded whitespace-pre-wrap break-all">
+              <pre dir="ltr" className="typography-meta font-mono px-2 py-1 bg-muted/30 rounded whitespace-pre-wrap break-all">
                 {String(genericContent)}
               </pre>
             </ScrollableOverlay>
@@ -286,7 +286,7 @@ export const PermissionRequestContent: React.FC<{ permission: PermissionRequest 
               {t('chat.permissionCard.showDetails')}
             </summary>
             <ScrollableOverlay outerClassName="mt-1 max-h-32" className="p-0">
-              <pre className="typography-meta font-mono px-2 py-1 bg-muted/30 rounded whitespace-pre-wrap break-all">
+              <pre dir="ltr" className="typography-meta font-mono px-2 py-1 bg-muted/30 rounded whitespace-pre-wrap break-all">
                 {JSON.stringify(metadata, null, 2)}
               </pre>
             </ScrollableOverlay>
@@ -311,7 +311,7 @@ export const PermissionRequestContent: React.FC<{ permission: PermissionRequest 
       <div className="px-2 py-2">
         {/* v2 lets the agent explain in its own words why it needs this. */}
         {permission.message ? (
-          <div className="typography-meta text-foreground/80 mb-2 whitespace-pre-wrap break-words">
+          <div dir="auto" className="typography-meta text-foreground/80 mb-2 whitespace-pre-wrap break-words">
             {permission.message}
           </div>
         ) : null}
@@ -481,7 +481,7 @@ export const PermissionCard: React.FC<PermissionCardProps> = ({ permission, onRe
               </div>
               <div className="flex items-center gap-1.5">
                 {tool.icon}
-                <span className="typography-meta text-muted-foreground font-medium">{tool.name}</span>
+                <span dir="auto" className="typography-meta text-muted-foreground font-medium">{tool.name}</span>
               </div>
             </div>
           </div>

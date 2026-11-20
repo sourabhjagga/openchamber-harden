@@ -15,8 +15,9 @@ import { copyTextToClipboard } from '@/lib/clipboard';
 import { useUIStore } from '@/stores/useUIStore';
 import { HoverTooltip } from '@/components/ui/row-tooltip';
 import { useI18n } from '@/lib/i18n';
-import { useMarkdownPresentation, type MarkdownPresentation } from './MarkdownPresentationContext';
+import { MarkdownSvgFailureContext, useMarkdownPresentation, type MarkdownPresentation } from './MarkdownPresentationContext';
 import { activateMarkdownFile, useOpenMarkdownFile } from './markdownFileReferences';
+import { stripAnsi } from './highlightsEngine';
 import type { MarkdownCodePlugin } from './streamdownCode';
 import { MarkdownDiff } from './MarkdownDiff';
 import { MarkdownSuggestionContext, isSuggestionLanguage, suggestionPatch } from './markdownSuggestion';
@@ -25,7 +26,7 @@ import { isRunnableLanguage } from '@/lib/opencode/reply-command';
 import { onDemand } from '../uiBlocks/useUiBlockComponent';
 import type { RenderedCommand } from './ReplyCommand';
 
-// Complete prefix rows keep their identity in the worker client, so appending
+// Complete prefix rows keep their identity in the highlighter, so appending
 // code only renders changed rows. React owns every node; no HTML patching.
 const CodeLine = React.memo(function CodeLine({ tokens }: { tokens: HighlightToken[] }) {
   const empty = tokens.length === 0 || (tokens.length === 1 && tokens[0].content === '');
@@ -50,8 +51,7 @@ const MarkdownCodeBody = React.memo(function MarkdownCodeBody({ source, language
   plugin: MarkdownCodePlugin;
 }) {
   const input = React.useMemo(() => ({
-    code: source,
-    language,
+    ...shownCode(source, language),
     isIncomplete: incomplete,
     themes: plugin.getThemes(),
   }), [source, language, incomplete, plugin]);
@@ -115,6 +115,15 @@ const MarkdownCodeBody = React.memo(function MarkdownCodeBody({ source, language
   );
 });
 
+// What a fence shows: terminal output tagged `ansi` is plain text without its
+// escape sequences. Copy still takes the fence's own source.
+const shownCode = (source: string, language: string): { code: string; language: string } => (
+  language.toLowerCase() === 'ansi' ? { code: stripAnsi(source), language: 'text' } : { code: source, language }
+);
+
+// An svg fence with a script or an event handler stays an ordinary code block, so the reader sees what it carries.
+const activeSvg = /<script|\son[a-z]+\s*=/i;
+
 type CodeProps = React.ComponentProps<'code'> & ExtraProps;
 
 const languageOf = (className: string | undefined): string => /language-([^\s]+)/.exec(className ?? '')?.[1] ?? '';
@@ -153,6 +162,8 @@ function MarkdownCodeBlock({ children, className, node, command, ...props }: Cod
   const incomplete = useIsCodeFenceIncomplete();
   const openFile = useOpenMarkdownFile();
   const [copied, setCopied] = React.useState(false);
+  // The svg source the browser could not draw; a changed source is drawn again.
+  const [failedSvg, setFailedSvg] = React.useState<string | null>(null);
   const timer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   React.useEffect(() => () => {
     if (timer.current) clearTimeout(timer.current);
@@ -166,8 +177,21 @@ function MarkdownCodeBlock({ children, className, node, command, ...props }: Cod
   const copySource = sourceOf(node);
   const { purpose, onExportCode } = presentation;
   React.useLayoutEffect(() => {
-    if (purpose && language !== 'mermaid') onExportCode?.(code, language);
+    if (purpose && language !== 'mermaid') {
+      const shown = shownCode(code, language);
+      onExportCode?.(shown.code, shown.language);
+    }
   }, [purpose, onExportCode, code, language]);
+
+  if (language === 'svg' && presentation.svgFences && !activeSvg.test(code) && failedSvg !== code) {
+    return (
+      <MarkdownSvgFailureContext.Provider value={() => setFailedSvg(code)}>
+        <defaultComponents.code {...props} node={node} className={className}>
+          {children}
+        </defaultComponents.code>
+      </MarkdownSvgFailureContext.Provider>
+    );
+  }
 
   if (language === 'mermaid' || (language === 'openui-lang' && presentation.uiBlocks)) {
     return (

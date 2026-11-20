@@ -3,8 +3,9 @@
  * branch on a tool name.
  *
  * v2 renamed and reshaped the built-ins: `bash` became `shell`, `task` became
- * `subagent`, `apply_patch` became `patch`, and `todowrite`, `todoread`, `lsp`,
- * `multiedit` and `list` are gone. File tools take `path` (not `filePath`), and
+ * `subagent`, `apply_patch` became `patch`, and `todoread`, `lsp`, `multiedit`
+ * and `list` are gone; `todowrite` came back behind `experimental.todo`. File
+ * tools take `path` (not `filePath`), and
  * a tool state no longer carries a server-rendered `title` — the row's
  * description has to be derived from the call's own input and metadata.
  *
@@ -34,6 +35,7 @@ export const OPENCODE_TOOLS = {
   shell: "shell",
   skill: "skill",
   subagent: "subagent",
+  todowrite: "todowrite",
   webfetch: "webfetch",
   websearch: "websearch",
   write: "write",
@@ -78,6 +80,7 @@ export const isSkillTool = is(OPENCODE_TOOLS.skill)
 export const isEditTool = is(OPENCODE_TOOLS.edit)
 export const isWriteTool = is(OPENCODE_TOOLS.write)
 export const isPatchTool = is(OPENCODE_TOOLS.patch)
+export const isTodoWriteTool = is(OPENCODE_TOOLS.todowrite)
 
 // Tools whose transcript row opens the read file or skill in the app and never
 // shows the call's result.
@@ -175,6 +178,7 @@ const inputSchema = z
         taskId: optionalText,
         providerId: optionalText,
         body: optionalText,
+        identifier: optionalText,
         link: z.object({ identifier: optionalText, title: optionalText }).optional().catch(undefined),
       })
       .optional()
@@ -222,18 +226,78 @@ type ParsedInput = z.infer<typeof inputSchema>
 
 const readInput = (input: ToolInput | undefined): ParsedInput => inputSchema.parse(input ?? {})
 
+// A page shared with other people through the relay: who gets a link, for an
+// html page the agent's one-line summary of what it asks, and whether it takes
+// an answer (a report the recipients only read does not). A model
+// sometimes sends the object as JSON text, which the server reads once
+// (parseShareRequest in packages/web/server/lib/share-pages/runtime.js), so
+// the chat does too; otherwise such a call would draw as an ordinary page.
+const renderPageShareObjectSchema = z.object({
+  recipients: z.array(z.string()).catch([]),
+  summary: optionalText,
+  expectAnswer: booleanish,
+})
+
+const renderPageShareSchema = z.union([
+  renderPageShareObjectSchema,
+  z.string().transform((text, context) => {
+    try {
+      return JSON.parse(text)
+    } catch {
+      context.addIssue({ code: "custom", message: "share is not JSON" })
+      return z.NEVER
+    }
+  }).pipe(renderPageShareObjectSchema),
+])
+
 const renderPageFields = z.object({
   html: z.string().optional().catch(undefined),
   ui: z.string().optional().catch(undefined),
   title: optionalText,
   awaitAnswer: booleanish,
+  answerLater: booleanish,
+  share: renderPageShareSchema.optional().catch(undefined),
 })
+
+export type RenderedPageShare = { recipients: string[]; summary?: string; expectAnswer?: boolean }
 
 // The plugin accepts the inputs inside `parameters` or beside `action`, and an
 // explicit `parameters` object wins, so the page is read the same way.
 const renderPageInputSchema = renderPageFields
   .extend({ parameters: renderPageFields.optional().catch(undefined) })
   .catch({})
+
+/**
+ * The plugin also revives a call a harness spilled into `action` as JSON text,
+ * and the server then waits on the page it revived. The chat reads the same
+ * fields, or a waiting page had nothing to draw and its wait ended as "the
+ * user wrote in the chat" (#6709). A field the call carried itself wins, and
+ * the spilled object's own `parameters` wins over its siblings, as in the
+ * plugin. A `parameters` that is not an object is ignored there and here, so
+ * its siblings still make the page.
+ */
+const jsonObject = z.record(z.string(), z.json())
+
+const spilledCallSchema = z
+  .object({ action: z.string() })
+  .transform(({ action }): z.infer<typeof renderPageFields> => {
+    let revived: unknown
+    try {
+      revived = JSON.parse(action)
+    } catch {
+      return {}
+    }
+    const spilled = jsonObject.safeParse(revived)
+    if (!spilled.success) return {}
+    const { parameters, ...siblings } = spilled.data
+    const nested = jsonObject.safeParse(parameters)
+    return renderPageFields.parse({ ...siblings, ...nested.data })
+  })
+  .catch({})
+
+const spilledCallFields = (input: JsonValue | undefined): z.infer<typeof renderPageFields> => (
+  spilledCallSchema.parse(input ?? {})
+)
 
 // What the user answered on a page that waited (render.page with
 // awaitAnswer), as the plugin records it in the call's metadata.
@@ -330,6 +394,7 @@ const executeRawCallSchema = z
       .array(z.object({ tool: optionalText, status: optionalText, input: z.json().optional().catch(undefined) }).nullable().catch(null))
       .optional()
       .catch(undefined),
+    error: z.boolean().optional().catch(undefined),
   })
   .catch({})
 
@@ -343,6 +408,20 @@ export function lastExecuteToolCall(metadata: Metadata | undefined): { tool: str
   return undefined
 }
 
+type SoleCall = { tool: string; input: { [key: string]: JsonValue }; status: string | undefined }
+
+/** The one call an `execute` script made, as Code Mode recorded it; `undefined` when it made none or several. */
+function soleRawCall(metadata: Metadata | undefined): { tool: string; input?: JsonValue; status?: string } | undefined {
+  const calls = executeRawCallSchema.parse(metadata ?? {}).toolCalls ?? []
+  if (calls.length !== 1 || !calls[0]?.tool) return undefined
+  return { ...calls[0], tool: calls[0].tool }
+}
+
+/** A sole call under the name the row shows it by; arguments that are not an object count as none. */
+function soleCallAs(tool: string, { input, status }: { input?: JsonValue; status?: string }): SoleCall {
+  return { tool, input: input && typeof input === "object" && !Array.isArray(input) ? input : {}, status }
+}
+
 /**
  * The one call an `execute` script made to OpenChamber's own tools or to
  * OpenCode's `opencode` namespace, or `undefined` when it made none, several,
@@ -351,14 +430,47 @@ export function lastExecuteToolCall(metadata: Metadata | undefined): { tool: str
  * tool's own, with its action, detail and icon. `status` is the call's own:
  * a script can catch a failed call and still finish.
  */
-export function soleNamedCall(metadata: Metadata | undefined): { tool: string; input: { [key: string]: JsonValue }; status: string | undefined } | undefined {
-  const calls = executeRawCallSchema.parse(metadata ?? {}).toolCalls ?? []
-  if (calls.length !== 1 || !calls[0]?.tool) return undefined
-  const { tool: called, input, status } = calls[0]
-  const opencodeTool = opencodeNamespaceTool(called)
-  const tool = openChamberToolCall(called, input)?.tool ?? (opencodeTool ? `opencode.${opencodeTool}` : undefined)
-  if (!tool) return undefined
-  return { tool, input: input && typeof input === "object" && !Array.isArray(input) ? input : {}, status }
+export function soleNamedCall(metadata: Metadata | undefined): SoleCall | undefined {
+  const call = soleRawCall(metadata)
+  if (!call) return undefined
+  const opencodeTool = opencodeNamespaceTool(call.tool)
+  const tool = openChamberToolCall(call.tool, call.input)?.tool ?? (opencodeTool ? `opencode.${opencodeTool}` : undefined)
+  return tool ? soleCallAs(tool, call) : undefined
+}
+
+/**
+ * The name OpenCode gives a tool called directly, from the name a Code Mode
+ * script calls it by. A script reaches a tool through its namespace
+ * (`linear.list_issues`); the direct name joins the two with `_`
+ * (`linear_list_issues`). A tool without a namespace has one name for both.
+ */
+export function directToolName(called: string): string {
+  return called.replaceAll(".", "_")
+}
+
+/** What Code Mode puts in a script's scope beside the tools; a call to one is recorded like a tool without a namespace. */
+const CODE_MODE_HELPERS = new Set(["search", "fetch"])
+
+const BUILT_IN_TOOLS = new Set<string>(Object.values(OPENCODE_TOOLS))
+
+/**
+ * The one call an `execute` script made, under the name a direct call of the
+ * same tool has. Rules written for a tool's direct name (an extension's
+ * `contributes.tools`) find the call through it.
+ *
+ * `undefined` whenever the script's result is not that call's: it made no
+ * call or several, the call did not complete, or the script failed after it
+ * (OpenCode then finishes the part with `error: true` and the error as its
+ * output). Also for Code Mode's own `search` and `fetch`, and for a name a
+ * built-in tool has, which a script cannot call: neither is the tool a rule
+ * for that name was written for.
+ */
+export function soleDirectCall(metadata: Metadata | undefined): SoleCall | undefined {
+  const call = soleRawCall(metadata)
+  if (!call || call.status !== "completed" || CODE_MODE_HELPERS.has(call.tool)) return undefined
+  if (executeRawCallSchema.parse(metadata ?? {}).error) return undefined
+  const tool = directToolName(call.tool)
+  return BUILT_IN_TOOLS.has(normalizeToolName(tool)) ? undefined : soleCallAs(tool, call)
 }
 
 /**
@@ -406,22 +518,52 @@ export function executeScript(input: ToolInput | undefined): string | undefined 
   return readInput(input).code
 }
 
+const todoItemSchema = z.object({
+  content: z.string().trim().min(1),
+  status: z.enum(["pending", "in_progress", "completed", "cancelled"]).catch("pending"),
+})
+
+const todoWriteInputSchema = z
+  .object({ todos: z.array(todoItemSchema.nullable().catch(null)).optional().catch(undefined) })
+  .catch({})
+
+export type TodoItem = z.infer<typeof todoItemSchema>
+
+/**
+ * The whole list a `todowrite` call set, in the agent's order, or `null` when
+ * the input carries no list yet (still streaming) or none at all. An entry
+ * without text drops out; an unknown status reads as pending, as the server's
+ * session list does (`packages/web/server/lib/session-todos`).
+ */
+export function todoWriteItems(input: ToolInput | undefined): TodoItem[] | null {
+  const todos = todoWriteInputSchema.parse(input ?? {}).todos
+  if (!todos) return null
+  return todos.filter((item): item is TodoItem => item !== null)
+}
+
 /** The agent a `subagent` call runs (`input.agent`). */
 const isRenderTool = (toolName: ToolName): boolean => toolName === OPENCHAMBER_RENDER_TOOL
 
 /** Where a page stands on the user's answer. */
 export type RenderedPageAsk =
   | { kind: "show" }
-  | { kind: "waiting" }
-  | { kind: "answered"; summary: string; data: JsonValue }
+  /** `later`: shown with answerLater, so the turn does not wait on it. */
+  | { kind: "waiting"; later?: true }
+  /** `undelivered`: a later page's answer the agent has not got yet. */
+  | { kind: "answered"; summary: string; data: JsonValue; undelivered?: true }
   | { kind: "answered-in-chat" }
   /** The user had written in the chat before the page appeared, so it did not wait. */
   | { kind: "chat-sent-earlier" }
   /** The chat could not draw the page's ui; the agent got the parser's errors. */
-  | { kind: "not-drawn" }
+  | { kind: "not-drawn"; undelivered?: true }
   /** The user declined to answer on the page. */
-  | { kind: "declined" }
+  | { kind: "declined"; undelivered?: true }
   | { kind: "unanswered" }
+  /**
+   * A page shown with answerLater: its call returned at once and the server
+   * keeps it open (`usePageAsk` reads where it stands).
+   */
+  | { kind: "later" }
 
 // A page sent without a title is named after its own <title>, else its first
 // h1 to h3: the server accepts such a call and names it with the same rule
@@ -449,19 +591,28 @@ const pageTitleFromHtml = (html: string): string => (
 export function renderedPage(
   toolName: ToolName,
   state: ToolState,
-): { html: string; ui?: string; title: string; ask: RenderedPageAsk } | null {
+): { html: string; ui?: string; title: string; ask: RenderedPageAsk; share?: RenderedPageShare } | null {
   if (!isRenderTool(toolName)) return null
   const parsed = renderPageInputSchema.parse(state.input ?? {})
-  const html = parsed.parameters?.html ?? parsed.html ?? ""
+  const spilled = spilledCallFields(state.input)
+  const html = parsed.parameters?.html ?? parsed.html ?? spilled.html ?? ""
   // A ui page (the UI block language) is drawn by the chat's own components.
-  const ui = parsed.parameters?.ui ?? parsed.ui
+  const ui = parsed.parameters?.ui ?? parsed.ui ?? spilled.ui
   const page = ui?.trim() ? { html: "", ui } : html.trim() ? { html } : null
   if (!page) return null
   // Empty when neither the call nor the page names it; the chat shows its own word then.
-  const title = (parsed.parameters?.title ?? parsed.title)?.trim() || pageTitleFromHtml(html)
+  const title = (parsed.parameters?.title ?? parsed.title ?? spilled.title)?.trim() || pageTitleFromHtml(html)
+  // A shared page goes to other people; the chat shows its card, never the page
+  // itself, and it never waits in the chat (the server refuses share with awaitAnswer or answerLater).
+  const share = parsed.parameters?.share ?? parsed.share ?? spilled.share
+  if (share) {
+    if (state.status !== "completed") return null
+    const result = openChamberResultSchema.parse(state.metadata ?? {}).openchamber
+    return result?.ok === true ? { ...page, title, ask: { kind: "show" }, share } : null
+  }
   // A page that waited stays in the chat when its call ends without an
   // answer (the user stopped the turn), so the question it asked is still there.
-  if ((parsed.parameters?.awaitAnswer ?? parsed.awaitAnswer) === true) {
+  if ((parsed.parameters?.awaitAnswer ?? parsed.awaitAnswer ?? spilled.awaitAnswer) === true) {
     if (state.status === "running") return { ...page, title, ask: { kind: "waiting" } }
     if (state.status === "error") return { ...page, title, ask: { kind: "unanswered" } }
   }
@@ -469,6 +620,7 @@ export function renderedPage(
   const result = openChamberResultSchema.parse(state.metadata ?? {}).openchamber
   if (result?.ok !== true) return null
   const answer = result.answer
+  if ((parsed.parameters?.answerLater ?? parsed.answerLater ?? spilled.answerLater) === true && !answer) return { ...page, title, ask: { kind: "later" } }
   if (answer?.answered === true) return { ...page, title, ask: { kind: "answered", summary: answer.summary, data: answer.data } }
   if (answer?.answered === false) {
     const kind = answer.reason === "chat-sent-earlier" ? "chat-sent-earlier"
@@ -491,43 +643,100 @@ const secretRequestInputSchema = secretRequestFields
   .extend({ parameters: secretRequestFields.optional().catch(undefined) })
   .catch({})
 
-/** Where a secret request stands. `not-given`: the user wrote in the chat, or the turn ended first. */
-export type SecretRequestState = "waiting" | "saved" | "declined" | "not-given"
+export type RequestedSecret = { label: string; reason: string; placeholder: string | undefined }
 
-// How a secret request ended, as the plugin records it in the call's metadata:
-// the server's status, or the plugin's own answer when the user wrote in the
-// chat. The file path the agent got is not needed here.
-const secretResultSchema = z
-  .object({
-    openchamber: z.object({
-      ok: z.boolean().optional().catch(undefined),
-      answer: z.union([
-        z.object({ status: z.enum(["saved", "declined"]) }).transform(({ status }): SecretRequestState => status),
-        z.object({ answered: z.literal(false) }).transform((): SecretRequestState => "not-given"),
-      ]).optional().catch(undefined),
-    }).optional().catch(undefined),
-  })
+const secretRunField = z.object({ env: z.string().trim().min(1), label: z.string().trim().min(1), placeholder: optionalText })
+
+const secretRunFields = z.object({
+  program: optionalText,
+  args: z.array(z.string()).optional().catch(undefined),
+  reason: optionalText,
+  inputs: z.array(secretRunField).min(1).optional().catch(undefined),
+})
+
+// Read like the other actions' input: inside `parameters` or beside `action`.
+const secretRunInputSchema = secretRunFields
+  .extend({ action: z.string().optional().catch(undefined), parameters: secretRunFields.optional().catch(undefined) })
   .catch({})
 
-export type RequestedSecret = { label: string; reason: string; placeholder: string | undefined; state: SecretRequestState }
+const isSecretRun = (action: string | undefined) => action === "secret.run" || action === "run"
+const isSecretForget = (action: string | undefined) => action === "secret.forget" || action === "forget"
+
+export type RequestedSecretRun = {
+  reason: string
+  command: string
+  program: string
+  fields: { env: string; label: string; placeholder: string | undefined }[]
+}
 
 /**
- * The card an `openchamber_secret` call asks on. A call the server refused
- * keeps its tool row, so the refusal stays readable.
+ * The command line as the user approved it, the same line the plugin shows in
+ * the permission request (`secretRunCommandLine` in
+ * packages/web/server/lib/openchamber-control/secret-run.js): change both together.
+ */
+export function secretRunCommandLine(program: string, args: readonly string[]): string {
+  // C0 and C1 controls, the Arabic letter mark, zero-width and direction marks,
+  // line and paragraph separators, embeddings and overrides, isolates, BOM.
+  const hidden = (code: number) => code < 0x20 || (code >= 0x7f && code <= 0x9f) || code === 0x61c
+    || (code >= 0x200b && code <= 0x200f) || (code >= 0x2028 && code <= 0x202e)
+    || (code >= 0x2060 && code <= 0x2069) || code === 0xfeff
+  const visible = (value: string) => Array.from(value, (char) => {
+    const code = char.codePointAt(0) ?? 0
+    return hidden(code) ? `\\u{${code.toString(16).toUpperCase().padStart(4, "0")}}` : char
+  }).join("")
+  const word = (value: string) => (/^[A-Za-z0-9_/.,:=@%+-]+$/.test(value) ? value : `'${visible(value).replaceAll("'", "'\\''")}'`)
+  return [program, ...args].map(word).join(" ")
+}
+
+/** The detail of a secret tool row: the command line a `secret.run` ran, the label a `secret.request` asked for. */
+function secretDetail(action: string | undefined, input: ToolInput | undefined): string | undefined {
+  if (action === "secret.run" || action === "run") {
+    const parsed = secretRunInputSchema.parse(input ?? {})
+    const program = parsed.parameters?.program ?? parsed.program
+    return program ? secretRunCommandLine(program, parsed.parameters?.args ?? parsed.args ?? []) : undefined
+  }
+  if (action === "secret.request" || action === "request") {
+    const parsed = secretRequestInputSchema.parse(input ?? {})
+    return parsed.parameters?.label ?? parsed.label
+  }
+  return undefined
+}
+
+/**
+ * The card a running `secret.run` call asks on, or `null` otherwise. A
+ * finished run is an ordinary tool row: the command line, then what it
+ * printed (`ToolPart`, `secretRunView`).
+ */
+export function requestedSecretRun(toolName: ToolName, state: ToolState): RequestedSecretRun | null {
+  if (toolName !== OPENCHAMBER_SECRET_TOOL || state.status !== "running") return null
+  const parsed = secretRunInputSchema.parse(state.input ?? {})
+  if (!isSecretRun(parsed.action)) return null
+  const program = parsed.parameters?.program ?? parsed.program
+  const reason = parsed.parameters?.reason ?? parsed.reason
+  const inputs = parsed.parameters?.inputs ?? parsed.inputs
+  if (!program || !reason || !inputs) return null
+  const args = parsed.parameters?.args ?? parsed.args ?? []
+  return {
+    reason,
+    program,
+    command: secretRunCommandLine(program, args),
+    fields: inputs.map((field) => ({ env: field.env, label: field.label, placeholder: field.placeholder })),
+  }
+}
+
+/**
+ * The card a running `secret.request` call asks on, or `null` otherwise. An
+ * answered request is an ordinary tool row (`ToolPart`, `secretRowView`).
  */
 export function requestedSecret(toolName: ToolName, state: ToolState): RequestedSecret | null {
-  if (toolName !== OPENCHAMBER_SECRET_TOOL) return null
+  if (toolName !== OPENCHAMBER_SECRET_TOOL || state.status !== "running") return null
+  const action = secretRunInputSchema.parse(state.input ?? {}).action
+  if (isSecretRun(action) || isSecretForget(action)) return null
   const parsed = secretRequestInputSchema.parse(state.input ?? {})
   const label = parsed.parameters?.label ?? parsed.label
   const reason = parsed.parameters?.reason ?? parsed.reason
   if (!label || !reason) return null
-  const request = { label, reason, placeholder: parsed.parameters?.placeholder ?? parsed.placeholder }
-  if (state.status === "running") return { ...request, state: "waiting" }
-  if (state.status === "error") return { ...request, state: "not-given" }
-  if (state.status !== "completed") return null
-  const result = secretResultSchema.parse(state.metadata ?? {}).openchamber
-  if (result?.ok !== true || !result.answer) return null
-  return { ...request, state: result.answer }
+  return { label, reason, placeholder: parsed.parameters?.placeholder ?? parsed.placeholder }
 }
 
 export function subagentAgent(input: ToolInput | undefined): string | undefined {
@@ -645,6 +854,7 @@ export const isShownInPlace = (toolName: ToolName, state: ToolState): boolean =>
   || proposedWorkflowRunId(toolName, state) !== null
   || generatedImagePaths(toolName, state).length > 0
   || requestedSecret(toolName, state) !== null
+  || requestedSecretRun(toolName, state) !== null
 )
 
 const openChamberCallSchema = z
@@ -714,7 +924,11 @@ export function openChamberToolCall(toolName: ToolName, input: JsonValue | undef
   const tool = normalizeToolName(toolName)
   if (!OPENCHAMBER_TOOLS.has(tool)) return null
   const parsed = openChamberCallSchema.parse(input ?? {})
-  const awaitsAnswer = tool === OPENCHAMBER_SECRET_TOOL || (parsed.parameters?.awaitAnswer ?? parsed.awaitAnswer) === true
+  // Only the render tool revives a spilled action; the multi-action tools
+  // refuse that input, so it never waits there.
+  const spilledWait = tool === OPENCHAMBER_RENDER_TOOL ? spilledCallFields(input).awaitAnswer : undefined
+  const waits = parsed.parameters?.awaitAnswer ?? parsed.awaitAnswer ?? spilledWait
+  const awaitsAnswer = (tool === OPENCHAMBER_SECRET_TOOL && !isSecretForget(parsed.action)) || waits === true
   return { tool, action: parsed.action, awaitsAnswer }
 }
 
@@ -727,6 +941,7 @@ function openChamberDetail(parsed: ParsedInput): string | undefined {
   const link = parameters?.link
   const linked = link ? [link.identifier, link.title].filter(Boolean).join(" ") : undefined
   const detail = linked
+    || parameters?.identifier
     || parameters?.title
     || parameters?.name
     || parameters?.path
@@ -761,8 +976,8 @@ function describeOpencodeNamespaceTool(parsed: ParsedInput): ToolDescription | n
  * The action an OpenChamber tool call ran and its detail. Notifications have
  * no action, so their title stands alone.
  */
-function describeOpenChamberTool(parsed: ParsedInput): ToolDescription | null {
-  const label = [parsed.action, openChamberDetail(parsed)].filter(Boolean).join(" · ")
+function describeOpenChamberTool(parsed: ParsedInput, input: ToolInput | undefined): ToolDescription | null {
+  const label = [parsed.action, secretDetail(parsed.action, input) ?? openChamberDetail(parsed)].filter(Boolean).join(" · ")
   return label ? { kind: "text", value: label.slice(0, MAX_COMMAND_LENGTH) } : null
 }
 
@@ -792,7 +1007,7 @@ export function openChamberCallSummary(toolName: ToolName, input: ToolInput | un
   const prefix = ACTION_PREFIX_BY_TOOL.get(tool)
   const raw = parsed.action ?? (tool === "openchamber_notify" ? "send" : undefined)
   const action = raw && prefix && !raw.includes(".") ? `${prefix}.${raw}` : raw
-  return { action, detail: openChamberDetail(parsed) }
+  return { action, detail: secretDetail(action, input) ?? openChamberDetail(parsed) }
 }
 
 const text = (value: string | undefined): ToolDescription | null =>
@@ -829,6 +1044,7 @@ const LISTING_NEUTRAL_TOOLS = new Set<string>([
   OPENCODE_TOOLS.webfetch,
   OPENCODE_TOOLS.websearch,
   OPENCODE_TOOLS.question,
+  OPENCODE_TOOLS.todowrite,
   // A subagent's own calls arrive in its child session.
   OPENCODE_TOOLS.subagent,
   OPENCODE_TOOLS.sessionRename,
@@ -948,9 +1164,19 @@ export function toolDescription(
       return count > 0 ? { kind: "questions", count } : null
     }
 
+    // "1/7 · <the item in progress>", the Tasks panel's count: cancelled
+    // items are out of the list there, so they are out of the count here.
+    case OPENCODE_TOOLS.todowrite: {
+      const items = (todoWriteItems(input) ?? []).filter((item) => item.status !== "cancelled")
+      if (items.length === 0) return null
+      const done = items.filter((item) => item.status === "completed").length
+      const active = items.find((item) => item.status === "in_progress")
+      return text(active ? `${done}/${items.length} · ${active.content}` : `${done}/${items.length}`)
+    }
+
     // MCP and plugin tools: anything they call a description, then a path.
     default:
-      if (OPENCHAMBER_TOOLS.has(name)) return describeOpenChamberTool(parsed)
+      if (OPENCHAMBER_TOOLS.has(name)) return describeOpenChamberTool(parsed, input)
       if (opencodeNamespaceTool(toolName)) return describeOpencodeNamespaceTool(parsed)
       return text(parsed.description) ?? asPath(parsed.path ?? parsed.filePath ?? parsed.file_path)
   }

@@ -195,6 +195,15 @@
     "agentMemoryToolEnabled": {
       "scope": "instance"
     },
+    "agentMemoryDreamingEnabled": {
+      "scope": "instance"
+    },
+    "agentMemoryDreamingModel": {
+      "scope": "instance"
+    },
+    "agentMemoryDreamingVariant": {
+      "scope": "instance"
+    },
     "agentKnowledgeToolEnabled": {
       "scope": "instance"
     },
@@ -344,6 +353,13 @@
       "scope": "profile",
       "perSurface": true
     },
+    "sidebarKeepPinnedInPlace": {
+      "scope": "profile",
+      "perSurface": true
+    },
+    "sidebarSessionBatchSize": {
+      "scope": "profile"
+    },
     "sidebarProjectSortOrder": {
       "scope": "profile"
     },
@@ -427,6 +443,10 @@
       "perSurface": true
     },
     "promptNavigatorEnabled": {
+      "scope": "profile",
+      "perSurface": true
+    },
+    "chatWidth": {
       "scope": "profile",
       "perSurface": true
     },
@@ -532,6 +552,12 @@
         "desktop"
       ]
     },
+    "agentBrowserSharesLogins": {
+      "scope": "profile",
+      "surfaces": [
+        "desktop"
+      ]
+    },
     "openTrackerLinksOnBoard": {
       "scope": "profile",
       "surfaces": [
@@ -546,6 +572,13 @@
         "web",
         "desktop",
         "mobile"
+      ]
+    },
+    "terminalOpenOnProjectAction": {
+      "scope": "profile",
+      "surfaces": [
+        "web",
+        "desktop"
       ]
     },
     "autoCreateWorktree": {
@@ -699,6 +732,9 @@
       "scope": "profile"
     },
     "customProviderIcons": {
+      "scope": "profile"
+    },
+    "customProviderLogos": {
       "scope": "profile"
     },
     "recentModels": {
@@ -1009,6 +1045,10 @@
       "local": true
     },
     "alwaysShowScrollbars": {
+      "scope": "device",
+      "local": true
+    },
+    "questionsInChat": {
       "scope": "device",
       "local": true
     },

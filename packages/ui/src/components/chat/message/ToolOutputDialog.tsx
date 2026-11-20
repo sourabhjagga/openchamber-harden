@@ -2,7 +2,7 @@ import { isShellTool, isSubagentTool, isWriteTool } from '@/lib/opencode/tools';
 import React from 'react';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
 import { File as PierreFile, PatchDiff } from '@pierre/diffs/react';
-import { WorkerHighlightedCode } from '@/components/code/WorkerHighlightedCode';
+import { HighlightedCode } from '@/components/code/HighlightedCode';
 import { createPortal } from 'react-dom';
 
 import { cn } from '@/lib/utils';
@@ -38,7 +38,7 @@ import { isVSCodeRuntime } from '@/lib/desktop';
 import { toast } from '@/components/ui';
 import { saveFile } from './parts/saveFile';
 import { MermaidLoadFailure, getMermaidDataUrlSourcePromise, isCurrentMermaidLoadRequest, isMermaidLoadFailure, nextMermaidLoadRequestId } from './toolOutputDialogMermaid';
-import { PIERRE_DIFF_TINT_CSS } from '@/lib/shiki/pierreDiffTint';
+import { PIERRE_DIFF_TINT_CSS, PIERRE_SEPARATOR_CSS } from '@/lib/shiki/pierreDiffTint';
 import { ScrollableOverlay } from '@/components/ui/ScrollableOverlay';
 
 interface ToolOutputDialogProps {
@@ -65,12 +65,7 @@ type PierreThemeConfig = {
 
 const TOOL_DIFF_UNSAFE_CSS = `
   ${PIERRE_DIFF_TINT_CSS}
-  [data-diff-header],
-  [data-diff] {
-    [data-separator] {
-      height: 24px !important;
-    }
-  }
+  ${PIERRE_SEPARATOR_CSS}
 `;
 
 const TOOL_DIFF_METRICS = {
@@ -1074,7 +1069,7 @@ const ToolOutputDialog: React.FC<ToolOutputDialogProps> = ({ popup, onOpenChange
                                     </div>
                                     {isShellTool(metaTool) && getInputValue('command') ? (
                                         <div className="tool-input-surface oc-tile rounded-xl mx-3">
-                                            <WorkerHighlightedCode
+                                            <HighlightedCode
                                                 language="bash"
                                                 code={getInputValue('command')!}
                                                 style={toolDisplayStyles.getPopupStyles()}
@@ -1163,7 +1158,7 @@ const ToolOutputDialog: React.FC<ToolOutputDialogProps> = ({ popup, onOpenChange
                                 if (tool === 'web-search' || tool === 'websearch' || tool === 'search_web') {
                                     return (
                                         renderWebSearchOutput(popup.content) || (
-                                            <WorkerHighlightedCode
+                                            <HighlightedCode
                                                 language="text"
                                                 code={popup.content}
                                                 style={toolDisplayStyles.getPopupContainerStyles()}
@@ -1191,7 +1186,7 @@ const ToolOutputDialog: React.FC<ToolOutputDialogProps> = ({ popup, onOpenChange
                                 }
 
                                 return (
-                                    <WorkerHighlightedCode
+                                    <HighlightedCode
                                         language={popup.language || 'text'}
                                         code={popup.content}
                                         style={toolDisplayStyles.getPopupContainerStyles()}

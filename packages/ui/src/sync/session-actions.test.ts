@@ -1,5 +1,6 @@
 import { describe, expect, test, beforeEach, afterEach, mock } from "bun:test"
 import type { PermissionRequest } from "@/types/permission"
+import type { WorktreeMetadata } from "@/types/worktree"
 import type { FormRequest } from "@/lib/opencode/model"
 import type { InputState } from "./input-store"
 
@@ -17,10 +18,15 @@ let agentUnavailableForSelection = false
 let formCancelError: unknown | null = null
 let permissionReplyError: unknown | null = null
 const sessionMessageRecords = new Map<string, Array<{ info: Message; parts: Part[] }>>()
+// The single-message read; null answers not-found.
+let sessionMessageRead: ((sessionID: string, messageID: string) => { info: Message; parts: Part[] } | Promise<{ info: Message; parts: Part[] }>) | null = null
 // Optional cursor pages for getSessionMessages: the request's cursor selects
 // the page by index, so a paged lookup can be pinned without the flat records.
 let cursorMessagePages: Array<{ items: Array<{ info: Message; parts: Part[] }>; cursor: { next?: string } }> | null = null
 const sessionRecords = new Map<string, Session>()
+// Records the server returns for a session no sync store holds, so a test can
+// shape the cache-miss read without the lookup chain finding the record.
+const fetchedSessionRecords = new Map<string, Session>()
 const failingRevertSessionIds = new Set<string>()
 let commitRevertError: Error | null = null
 let sessionDeleteError: unknown | null = null
@@ -60,6 +66,11 @@ let activeStatusSnapshot: Record<string, SessionStatus> | null = {}
 let readActiveStatusSnapshot: (directory?: string | null) => Promise<Record<string, SessionStatus> | null> = async () => activeStatusSnapshot
 const deletedCleanupIdentities: Array<{ runtimeKey: string; directory: string; sessionId: string }> = []
 const movedSessionDirectories: Array<{ sessionID: string; directory: string }> = []
+const queueMoves: Array<{ sessionId: string; directory: string }> = []
+const tabMoves: Array<{ sessionId: string; directory: string }> = []
+const folderMoves: Array<{ sessionId: string; directory: string; worktree: string | null }> = []
+const worktreeMetadataCalls: Array<{ sessionID: string; metadata: WorktreeMetadata | null; cwd?: string }> = []
+let availableWorktreesByProject = new Map<string, WorktreeMetadata[]>()
 const globalArchivedSessions: Session[] = []
 let runtimeKey = "default-runtime"
 let runtimeGeneration = 0
@@ -83,9 +94,14 @@ mock.module("@/lib/opencode/client", () => ({
     getSession: mock(async (sessionId: string, directory?: string | null): Promise<Session> => {
       replyCalls.push({ method: "session.get", params: { sessionID: sessionId, directory } })
       beforeSessionGetResolve?.()
-      const record = sessionRecords.get(sessionId)
+      const record = sessionRecords.get(sessionId) ?? fetchedSessionRecords.get(sessionId)
       if (!record) throw notFound("Session")
       return record
+    }),
+    getSessionMessage: mock(async (sessionId: string, messageId: string, directory?: string | null) => {
+      replyCalls.push({ method: "session.message", params: { sessionID: sessionId, messageID: messageId, directory } })
+      if (!sessionMessageRead) throw notFound("Message")
+      return sessionMessageRead(sessionId, messageId)
     }),
     getSessionMessages: mock(async (
       sessionId: string,
@@ -256,7 +272,10 @@ mock.module("./session-ui-store", () => ({
         selectedSessions.push({ sessionId, directoryHint })
       },
       markSessionAsOpenChamberCreated: () => {},
-      setWorktreeMetadata: () => {},
+      availableWorktreesByProject,
+      setWorktreeMetadata: (sessionID: string, metadata: WorktreeMetadata | null, cwd?: string) => {
+        worktreeMetadataCalls.push({ sessionID, metadata, cwd })
+      },
       setSessionDirectory: (sessionID: string, directory: string) => {
         movedSessionDirectories.push({ sessionID, directory })
       },
@@ -362,6 +381,33 @@ mock.module("@/stores/useInlineCommentDraftStore", () => ({
 mock.module("@/lib/messages/contextParts", () => ({
   draftFromContextPayload: () => null,
   readContextPart: () => null,
+}))
+
+mock.module("@/stores/messageQueueStore", () => ({
+  createMessageQueueTarget: (sessionId: string, directory: string) => ({ runtimeKey, directory, sessionId }),
+  useMessageQueueStore: {
+    getState: () => ({
+      followSessionMove: (destination: { sessionId: string; directory: string }) => {
+        queueMoves.push({ sessionId: destination.sessionId, directory: destination.directory })
+      },
+    }),
+  },
+}))
+
+mock.module("@/stores/useSessionFoldersStore", () => ({
+  useSessionFoldersStore: {
+    getState: () => ({
+      followSessionMove: (sessionId: string, directory: string, worktree: string | null) => {
+        folderMoves.push({ sessionId, directory, worktree })
+      },
+    }),
+  },
+}))
+
+mock.module("@/lib/sessionTabs", () => ({
+  followSessionTabMove: (sessionId: string, directory: string) => {
+    tabMoves.push({ sessionId, directory })
+  },
 }))
 
 mock.module("@/stores/useGlobalSessionsStore", () => ({
@@ -532,11 +578,11 @@ mock.module("./sync-refs", () => ({
 
 import { AgentUnavailableError } from "@/lib/opencode/agent-unavailable-error"
 import { getRuntimeApiBaseUrl, getRuntimeKey, switchRuntimeEndpoint } from "@/lib/runtime-switch"
-import { agentUnavailableFrom } from "./form-request-error"
+import { agentUnavailableFrom, isFormRequestNotFoundError } from "./form-request-error"
 import { INITIAL_STATE } from "./types"
 import type { State } from "./types"
 import type { DirectoryStore } from "./child-store"
-import type { Message, Part, Session, SessionStatus } from "@/lib/opencode/model"
+import type { Message, Part, Session, SessionStatus, ToolPart } from "@/lib/opencode/model"
 import type { LinkedIssue } from "@/lib/linkedIssues"
 import { noteQuestionFormSnapshot, resetRecoverableQuestions, useRecoverableQuestionsStore, type RecoveredQuestion } from "./recoverable-questions"
 import { buildFormAnswer, type FormValues } from "../components/chat/formCardState"
@@ -596,6 +642,12 @@ describe("moveSessionToDirectory", () => {
     replyCalls.length = 0
     registeredSessionDirectories.length = 0
     movedSessionDirectories.length = 0
+    worktreeMetadataCalls.length = 0
+    queueMoves.length = 0
+    tabMoves.length = 0
+    folderMoves.length = 0
+    globalActiveSessions = []
+    availableWorktreesByProject = new Map()
     globalUpsertedSessions.length = 0
   })
 
@@ -683,6 +735,112 @@ describe("moveSessionToDirectory", () => {
     expect(destination.getState().sessionTotal).toBe(1)
     expect(destination.getState().message["session-a"]?.[0]?.id).toBe("message-a")
     expect((globalUpsertedSessions.at(-1) as Session).title).toBe("Renamed")
+  })
+
+  test("publishes nothing locally when the caller's server changed during the move", async () => {
+    const source = createStore({}, {
+      session: [{
+        id: "session-a",
+        projectID: "project",
+        title: "Move me",
+        directory: "/source",
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        time: { created: 1, updated: 1 },
+      }],
+      sessionTotal: 1,
+    })
+    const destination = createStore({})
+    const childStores = createChildStores([["/source", source], ["/destination", destination]])
+    const { moveSessionToDirectory, setActionRefs } = await import("./session-actions")
+    setActionRefs(childStores, () => "/source")
+
+    await moveSessionToDirectory(source.getState().session[0], "/source", "/destination", () => false)
+
+    expect(replyCalls.filter((call) => call.method === "session.move")).toHaveLength(1)
+    expect(source.getState().session[0]?.id).toBe("session-a")
+    expect(destination.getState().session).toHaveLength(0)
+    expect(globalUpsertedSessions).toHaveLength(0)
+  })
+
+  test("an event-applied move updates the global directory and the worktree attachment", async () => {
+    // SAFETY: test fixture; only the worktree path and branch are read.
+    const worktree = {
+      path: "/destination",
+      projectDirectory: "/repo",
+      branch: "feature",
+      label: "feature",
+    } as WorktreeMetadata
+    availableWorktreesByProject = new Map([["/repo", [worktree]]])
+    const source = createStore({}, {
+      // SAFETY: test fixture; the action reads id, title and directory.
+      session: [{ id: "session-a", title: "Renamed", directory: "/destination" } as Session],
+      sessionTotal: 1,
+    })
+    const destination = createStore({})
+    const childStores = createChildStores([["/source", source], ["/destination", destination]])
+    const { adoptSessionMove, setActionRefs } = await import("./session-actions")
+    setActionRefs(childStores, () => "/source")
+
+    adoptSessionMove("session-a", "/source", "/destination")
+
+    expect(globalUpsertedSessions.at(-1)).toMatchObject({
+      id: "session-a",
+      title: "Renamed",
+      directory: "/destination",
+    })
+    expect(worktreeMetadataCalls.at(-1)).toMatchObject({
+      sessionID: "session-a",
+      cwd: "/destination",
+    })
+    expect(worktreeMetadataCalls.at(-1)?.metadata?.path).toBe("/destination")
+    expect(queueMoves).toEqual([{ sessionId: "session-a", directory: "/destination" }])
+    expect(tabMoves).toEqual([{ sessionId: "session-a", directory: "/destination" }])
+    expect(folderMoves).toEqual([{ sessionId: "session-a", directory: "/destination", worktree: "/destination" }])
+  })
+
+  test("an event-applied move of a session no open folder lists still moves its attachment, folders and tabs", async () => {
+    // SAFETY: test fixture; only the worktree path and branch are read.
+    const worktree = { path: "/destination", projectDirectory: "/repo", branch: "feature", label: "feature" } as WorktreeMetadata
+    availableWorktreesByProject = new Map([["/repo", [worktree]]])
+    // SAFETY: test fixture; the action reads id, title and directory.
+    globalActiveSessions = [{ id: "session-a", title: "Elsewhere", directory: "/destination" } as Session]
+    const destination = createStore({})
+    const childStores = createChildStores([["/destination", destination]])
+    const { adoptSessionMove, setActionRefs } = await import("./session-actions")
+    setActionRefs(childStores, () => "/other")
+
+    adoptSessionMove("session-a", "/source", "/destination")
+
+    expect(destination.getState().session[0]?.id).toBe("session-a")
+    expect(registeredSessionDirectories).toEqual([{ sessionID: "session-a", directory: "/destination" }])
+    expect(worktreeMetadataCalls.at(-1)?.metadata?.path).toBe("/destination")
+    expect(folderMoves).toEqual([{ sessionId: "session-a", directory: "/destination", worktree: "/destination" }])
+    expect(tabMoves).toEqual([{ sessionId: "session-a", directory: "/destination" }])
+  })
+
+  test("an event-applied move out of a worktree clears the attachment", async () => {
+    const source = createStore({}, {
+      // SAFETY: test fixture; the action reads id, title and directory.
+      session: [{ id: "session-a", title: "Renamed", directory: "/elsewhere" } as Session],
+      sessionTotal: 1,
+    })
+    const destination = createStore({})
+    const childStores = createChildStores([["/source", source], ["/elsewhere", destination]])
+    const { adoptSessionMove, setActionRefs } = await import("./session-actions")
+    setActionRefs(childStores, () => "/source")
+
+    adoptSessionMove("session-a", "/source", "/elsewhere")
+
+    expect(globalUpsertedSessions.at(-1)).toMatchObject({
+      id: "session-a",
+      directory: "/elsewhere",
+    })
+    expect(worktreeMetadataCalls.at(-1)).toMatchObject({
+      sessionID: "session-a",
+      metadata: null,
+      cwd: "/elsewhere",
+    })
   })
 })
 
@@ -2236,6 +2394,17 @@ describe("optimisticSend target directory", () => {
 describe("respondToPermission passes directory", () => {
   beforeEach(() => {
     replyCalls.length = 0
+    permissionReplyError = null
+    sessionRecords.clear()
+    fetchedSessionRecords.clear()
+    globalActiveSessions = []
+    globalArchivedSessions.length = 0
+    directoryStateOverride = null
+    sessionRecords.set("session-a", sessionFixture("session-a"))
+  })
+  afterEach(() => {
+    sessionRecords.clear()
+    fetchedSessionRecords.clear()
   })
 
   test("passes directory from child store when permission is found", async () => {
@@ -2267,12 +2436,16 @@ describe("respondToPermission passes directory", () => {
     const { setActionRefs, respondToPermission } = await import("./session-actions")
     setActionRefs(childStores, () => "/test/project")
 
+    // The server's record names no directory, so the guess stands.
+    // SAFETY: the reply reads only the record's id and directory fields.
+    fetchedSessionRecords.set("session-b", { id: "session-b" } as Session)
     await respondToPermission("session-b", "perm-2", "always")
 
-    expect(replyCalls.length).toBe(1)
-    expect(replyCalls[0].params.requestID).toBe("perm-2")
-    expect(replyCalls[0].params.reply).toBe("always")
-    expect(replyCalls[0].params.directory).toBe("/other/project")
+    const replies = replyCalls.filter((call) => call.method === "permission.reply")
+    expect(replies).toHaveLength(1)
+    expect(replies[0].params.requestID).toBe("perm-2")
+    expect(replies[0].params.reply).toBe("always")
+    expect(replies[0].params.directory).toBe("/other/project")
   })
 
   test("passes directory from current directory as last resort", async () => {
@@ -2281,12 +2454,15 @@ describe("respondToPermission passes directory", () => {
     const { setActionRefs, respondToPermission } = await import("./session-actions")
     setActionRefs(childStores, () => "/fallback/dir")
 
+    // SAFETY: the reply reads only the record's id and directory fields.
+    fetchedSessionRecords.set("unknown-session", { id: "unknown-session" } as Session)
     await respondToPermission("unknown-session", "perm-3", "reject")
 
-    expect(replyCalls.length).toBe(1)
-    expect(replyCalls[0].params.requestID).toBe("perm-3")
-    expect(replyCalls[0].params.reply).toBe("reject")
-    expect(replyCalls[0].params.directory).toBe("/fallback/dir")
+    const replies = replyCalls.filter((call) => call.method === "permission.reply")
+    expect(replies).toHaveLength(1)
+    expect(replies[0].params.requestID).toBe("perm-3")
+    expect(replies[0].params.reply).toBe("reject")
+    expect(replies[0].params.directory).toBe("/fallback/dir")
   })
 
   test("uses an explicit event directory before incomplete local routing state", async () => {
@@ -2299,6 +2475,32 @@ describe("respondToPermission passes directory", () => {
 
     expect(replyCalls.filter((call) => call.method === "permission.reply").map((call) => call.params.directory)).toContain("/event/project")
     expect(replyCalls[0].params.directory).toBe("/event/project")
+  })
+
+  test("a worktree permission whose record no store holds is answered on the record's own directory (#6555)", async () => {
+    const permission = buildPermission("perm-wt", "session-wt")
+    const store = createStore({ "session-wt": [permission] })
+    fetchedSessionRecords.set("session-wt", { ...sessionFixture("session-wt"), directory: "/test/project/wt" })
+
+    const { setActionRefs, respondToPermission } = await import("./session-actions")
+    setActionRefs(createChildStores([["/test/project", store]]), () => "/test/project")
+
+    await respondToPermission("session-wt", "perm-wt", "once")
+
+    expect(replyCalls.filter((call) => call.method === "permission.reply").map((call) => call.params.directory)).toEqual(["/test/project/wt"])
+  })
+
+  test("a failed record read sends nothing and keeps the permission pending (#6555)", async () => {
+    const permission = buildPermission("perm-unread", "session-unread")
+    const store = createStore({ "session-unread": [permission] })
+
+    const { setActionRefs, respondToPermission } = await import("./session-actions")
+    setActionRefs(createChildStores([["/test/project", store]]), () => "/test/project")
+
+    await expect(respondToPermission("session-unread", "perm-unread", "once")).rejects.toThrow()
+
+    expect(replyCalls.filter((call) => call.method === "permission.reply")).toHaveLength(0)
+    expect(store.getState().permission["session-unread"]).toEqual([permission])
   })
 })
 
@@ -3264,12 +3466,33 @@ describe("dismissPermission passes directory", () => {
     expect(replyCalls[0].params.reply).toBe("reject")
     expect(replyCalls[0].params.directory).toBe("/test/project")
   })
+
+  test("a failed record read rejects nothing and keeps the permission pending (#6555)", async () => {
+    const permission = buildPermission("perm-unread", "session-unread")
+    const store = createStore({ "session-unread": [permission] })
+    fetchedSessionRecords.clear()
+
+    const { setActionRefs, dismissPermission } = await import("./session-actions")
+    setActionRefs(createChildStores([["/test/project", store]]), () => "/test/project")
+
+    await expect(dismissPermission("session-unread", "perm-unread")).rejects.toThrow()
+
+    expect(replyCalls.filter((call) => call.method === "permission.reply")).toHaveLength(0)
+    expect(store.getState().permission["session-unread"]).toEqual([permission])
+  })
 })
 
 describe("replyToForm passes directory", () => {
+  // Seeded here so each test stands alone: the reply needs the form session's record.
   beforeEach(() => {
     replyCalls.length = 0
     formReplyError = null
+    sessionRecords.clear()
+    fetchedSessionRecords.clear()
+    sessionRecords.set("session-a", sessionFixture("session-a"))
+  })
+  afterEach(() => {
+    sessionRecords.clear()
   })
 
   test("passes directory to form.reply", async () => {
@@ -3311,6 +3534,13 @@ describe("cancelForm passes directory", () => {
   beforeEach(() => {
     replyCalls.length = 0
     formReplyError = null
+    formCancelError = null
+    sessionRecords.clear()
+    fetchedSessionRecords.clear()
+  })
+  afterEach(() => {
+    sessionRecords.clear()
+    fetchedSessionRecords.clear()
   })
 
   test("passes directory to form.cancel", async () => {
@@ -3319,11 +3549,46 @@ describe("cancelForm passes directory", () => {
     const { setActionRefs, cancelForm } = await import("./session-actions")
     setActionRefs(childStores, () => "/test/project")
 
+    sessionRecords.set("session-a", sessionFixture("session-a"))
     await cancelForm("session-a", "q-2")
 
     expect(replyCalls.length).toBe(1)
     expect(replyCalls[0].params.formID).toBe("q-2")
     expect(replyCalls[0].params.directory).toBe("/test/project")
+  })
+
+  test("a worktree form whose record no store holds is cancelled on the record's own directory (#6555)", async () => {
+    const form = buildForm("q-wt", "session-wt")
+    const store = createStore({}, { form: { "session-wt": [form] } })
+    fetchedSessionRecords.set("session-wt", { ...sessionFixture("session-wt"), directory: "/test/project/wt" })
+
+    const { setActionRefs, cancelForm } = await import("./session-actions")
+    setActionRefs(createChildStores([["/test/project", store]]), () => "/test/project")
+
+    await cancelForm("session-wt", "q-wt")
+
+    expect(replyCalls.filter((call) => call.method === "form.cancel").map((call) => call.params.directory)).toEqual(["/test/project/wt"])
+    expect(store.getState().form["session-wt"]).toBe(undefined)
+  })
+
+  test("a failed record read cancels nothing and keeps the form pending (#6555)", async () => {
+    const form = buildForm("q-unread", "session-unread")
+    const store = createStore({}, { form: { "session-unread": [form] } })
+
+    const { setActionRefs, cancelForm } = await import("./session-actions")
+    setActionRefs(createChildStores([["/test/project", store]]), () => "/test/project")
+
+    let thrown: unknown
+    try {
+      await cancelForm("session-unread", "q-unread")
+    } catch (error) {
+      thrown = error
+    }
+
+    expect(thrown).toBeInstanceOf(Error)
+    expect(isFormRequestNotFoundError(thrown)).toBe(false)
+    expect(replyCalls.filter((call) => call.method === "form.cancel")).toHaveLength(0)
+    expect(store.getState().form["session-unread"]).toEqual([form])
   })
 })
 
@@ -3359,6 +3624,9 @@ describe("replyToForm applies the composer selection", () => {
     selectionPicks.switched = false
     selectionPicks.settled.length = 0
     sessionRecords.clear()
+    fetchedSessionRecords.clear()
+    globalActiveSessions = []
+    globalArchivedSessions.length = 0
   }
 
   beforeEach(reset)
@@ -3394,6 +3662,7 @@ describe("replyToForm applies the composer selection", () => {
 
   test("a failed switch leaves the answer unsent and the pick in place", async () => {
     mainSessionId = "session-a"
+    seedSession("session-a")
     configState = { currentProviderId: "openai", currentModelId: "gpt-6" }
     selectionApplyError = new Error("model switch failed")
 
@@ -3401,6 +3670,19 @@ describe("replyToForm applies the composer selection", () => {
 
     expect(replyMethods()).toEqual([])
     expect(selectionPicks.settled).toEqual([])
+  })
+
+  test("a failed session read still sends a model-only answer, with the picked model stated explicitly", async () => {
+    mainSessionId = "session-a"
+    seedSession("session-a")
+    // The server read fails; the cache alone already matches the pick.
+    sessionRecords.clear()
+    configState = { currentProviderId: "anthropic", currentModelId: "claude-3" }
+
+    await replyInMainChat()
+
+    expect(replyMethods()).toEqual(["selection.apply", "form.reply"])
+    expect(replyCalls.find((call) => call.method === "selection.apply")?.params.selection).toEqual({ model: SESSION_MODEL })
   })
 
   test("a changed agent the folder lacks leaves the form pending, and the error names it", async () => {
@@ -3440,6 +3722,7 @@ describe("replyToForm applies the composer selection", () => {
 
   test("a composer whose catalog has not loaded switches nothing", async () => {
     mainSessionId = "session-a"
+    seedSession("session-a")
 
     await replyInMainChat()
 
@@ -3504,6 +3787,192 @@ describe("replyToForm applies the composer selection", () => {
     expect(replyCalls.map((call) => call.method)).toEqual(["form.reply"])
   })
 
+  test("an open subagent answers on its own record, never the composer's (#6555)", async () => {
+    // The subagent's chat can be opened straight from a notification, before
+    // the composer's config has followed its record, so the app-wide config
+    // still holds the previous chat's selection. Answering must not switch
+    // the subagent off the agent and model it runs on.
+    mainSessionId = "session-a"
+    configState = { currentProviderId: "google", currentModelId: "gemini", currentVariant: "max", currentAgentName: "review" }
+    seedSession("session-a", { parentID: "session-parent", model: { ...SESSION_MODEL, variant: "high" }, agent: "plan" })
+
+    await replyInMainChat()
+
+    expect(replyMethods()).toEqual(["form.reply"])
+    expect(selectionPicks.settled).toEqual([])
+  })
+
+  test("an open subagent's own agent pick still applies, not the composer's (#6555)", async () => {
+    mainSessionId = "session-a"
+    configState = { currentProviderId: "google", currentModelId: "gemini", currentVariant: "max", currentAgentName: "review" }
+    seedSession("session-a", { parentID: "session-parent", model: SESSION_MODEL, agent: "plan" })
+    selectionPicks.agents.set("session-a", "build")
+
+    await replyInMainChat()
+
+    expect(replyMethods()).toEqual(["selection.apply", "form.reply"])
+    expect(replyCalls.find((call) => call.method === "selection.apply")?.params.selection).toEqual({ agent: "build" })
+    expect(selectionPicks.settled).toEqual([])
+  })
+
+  for (const placement of ["another directory's store", "the global cache"] as const) {
+    test(`a child whose record sits only in ${placement} still answers on its own record (#6555)`, async () => {
+      // The reply resolves a directory whose store exists but holds only
+      // other sessions (the project-holds-worktree split), so the lookup must
+      // widen instead of reading the miss as "this is the main chat".
+      mainSessionId = "session-a"
+      configState = { currentProviderId: "google", currentModelId: "gemini", currentVariant: "max" }
+      const child: Session = { ...sessionFixture("session-a"), parentID: "session-parent", model: SESSION_MODEL, agent: "plan" }
+      if (placement === "another directory's store") sessionRecords.set("session-a", child)
+      else globalActiveSessions = [child]
+      // SAFETY: the reply's directory store is read only for its session slice.
+      directoryStateOverride = () => ({ session: [sessionFixture("session-other")] }) as State
+
+      await replyInMainChat()
+
+      expect(replyMethods()).toEqual(["form.reply"])
+      expect(selectionPicks.settled).toEqual([])
+    })
+  }
+
+  test("an unknown child reads its record from the server and keeps it (#6555)", async () => {
+    mainSessionId = "session-a"
+    configState = { currentProviderId: "google", currentModelId: "gemini", currentVariant: "max", currentAgentName: "review" }
+    fetchedSessionRecords.set("session-a", {
+      ...sessionFixture("session-a"),
+      directory: "/owned/project",
+      parentID: "session-parent",
+      model: SESSION_MODEL,
+      agent: "plan",
+    })
+
+    await replyInMainChat()
+
+    expect(replyCalls.some((call) => call.method === "session.get")).toBe(true)
+    expect(replyMethods()).toEqual(["form.reply"])
+    expect(replyCalls.find((call) => call.method === "form.reply")?.params.directory).toBe("/owned/project")
+  })
+
+  test("a record an event inserts during the read wins over the older snapshot (#6555)", async () => {
+    mainSessionId = "session-a"
+    configState = { currentProviderId: "google", currentModelId: "gemini", currentAgentName: "review" }
+    const snapshot: Session = { ...sessionFixture("session-a"), directory: "/owned/older", parentID: "session-parent", agent: "plan" }
+    fetchedSessionRecords.set("session-a", snapshot)
+    const live: Session = { ...snapshot, directory: "/owned/newer", title: "Newer title" }
+    beforeSessionGetResolve = () => { globalActiveSessions = [live] }
+    try {
+      await replyInMainChat()
+    } finally {
+      beforeSessionGetResolve = null
+    }
+
+    expect(replyCalls.find((call) => call.method === "form.reply")?.params.directory).toBe("/owned/newer")
+  })
+
+  test("an unknown root reads its record from the server and answers with the composer (#6053)", async () => {
+    mainSessionId = "session-a"
+    configState = { currentProviderId: "openai", currentModelId: "gpt-6", currentAgentName: "build" }
+    fetchedSessionRecords.set("session-a", {
+      ...sessionFixture("session-a"),
+      directory: "/owned/root",
+      model: SESSION_MODEL,
+      agent: "plan",
+    })
+
+    await replyInMainChat()
+
+    expect(replyCalls.some((call) => call.method === "session.get")).toBe(true)
+    expect(replyMethods()).toEqual(["selection.apply", "form.reply"])
+    expect(replyCalls.find((call) => call.method === "selection.apply")?.params.selection).toEqual({
+      model: { providerID: "openai", id: "gpt-6" },
+      agent: "build",
+    })
+    expect(replyCalls.find((call) => call.method === "form.reply")?.params.directory).toBe("/owned/root")
+  })
+
+  test("an unknown review session reads its record from the server and gets composer semantics (#6555)", async () => {
+    mainSessionId = "session-a"
+    configState = { currentProviderId: "google", currentModelId: "gemini", currentVariant: "max", currentAgentName: "review" }
+    fetchedSessionRecords.set("session-a", {
+      ...sessionFixture("session-a"),
+      directory: "/owned/review",
+      parentID: "session-parent",
+      model: SESSION_MODEL,
+      agent: "plan",
+      metadata: { openchamber: { kind: "review", originalSessionID: "session-parent" } },
+    })
+
+    await replyInMainChat()
+
+    expect(replyCalls.some((call) => call.method === "session.get")).toBe(true)
+    expect(replyMethods()).toEqual(["selection.apply", "form.reply"])
+    expect(replyCalls.find((call) => call.method === "selection.apply")?.params.selection).toEqual({
+      model: { providerID: "google", id: "gemini", variant: "max" },
+      agent: "review",
+    })
+    expect(replyCalls.find((call) => call.method === "form.reply")?.params.directory).toBe("/owned/review")
+  })
+
+  test("a failed record read sends nothing and leaves the form pending (#6555)", async () => {
+    mainSessionId = "session-a"
+    configState = { currentProviderId: "openai", currentModelId: "gpt-6" }
+    const form = buildForm("q-1", "session-a")
+    const store = createStore({}, { form: { "session-a": [form] } })
+
+    const { setActionRefs, replyToForm } = await import("./session-actions")
+    setActionRefs(createChildStores([["/test/project", store]]), () => "/test/project")
+    const error = await replyToForm("session-a", "q-1", { choice: true }).then(() => null, (caught: Error) => caught)
+
+    // Every form caller gates on this helper: a record-read 404 classified as
+    // form-not-found dismisses the card while the form stays pending (#6555).
+    expect(error).toBeInstanceOf(Error)
+    expect(isFormRequestNotFoundError(error)).toBe(false)
+    expect(replyCalls.map((call) => call.method)).toEqual(["session.get"])
+    expect(store.getState().form["session-a"]).toEqual([form])
+  })
+
+  test("a runtime change during the record read sends nothing and leaves the form pending (#6555)", async () => {
+    const original = { apiBaseUrl: getRuntimeApiBaseUrl(), runtimeKey: getRuntimeKey() }
+    switchRuntimeEndpoint({ apiBaseUrl: "http://form-fetch.test", runtimeKey: "form-fetch" })
+    mainSessionId = "session-a"
+    configState = { currentProviderId: "openai", currentModelId: "gpt-6" }
+    fetchedSessionRecords.set("session-a", sessionFixture("session-a"))
+    const form = buildForm("q-1", "session-a")
+    const store = createStore({}, { form: { "session-a": [form] } })
+    beforeSessionGetResolve = () => switchRuntimeEndpoint({ apiBaseUrl: "http://form-other.test", runtimeKey: "form-other" })
+
+    try {
+      const { setActionRefs, replyToForm } = await import("./session-actions")
+      setActionRefs(createChildStores([["/test/project", store]]), () => "/test/project")
+      await expect(replyToForm("session-a", "q-1", { choice: true })).rejects.toThrow("runtime changed")
+
+      expect(replyCalls.map((call) => call.method)).toEqual(["session.get"])
+      expect(store.getState().form["session-a"]).toEqual([form])
+    } finally {
+      beforeSessionGetResolve = null
+      switchRuntimeEndpoint(original)
+    }
+  })
+
+  test("an open review session answers with the composer's selection despite parentID (#6555)", async () => {
+    mainSessionId = "session-a"
+    configState = { currentProviderId: "google", currentModelId: "gemini", currentVariant: "max", currentAgentName: "review" }
+    seedSession("session-a", {
+      parentID: "session-parent",
+      model: SESSION_MODEL,
+      agent: "plan",
+      metadata: { openchamber: { kind: "review", originalSessionID: "session-parent" } },
+    })
+
+    await replyInMainChat()
+
+    expect(replyMethods()).toEqual(["selection.apply", "form.reply"])
+    expect(replyCalls.find((call) => call.method === "selection.apply")?.params.selection).toEqual({
+      model: { providerID: "google", id: "gemini", variant: "max" },
+      agent: "review",
+    })
+  })
+
   test("an effort saved before a switch made elsewhere does not undo that switch", async () => {
     mainSessionId = "session-parent"
     seedSession("session-a", { model: { ...SESSION_MODEL, variant: "low" } })
@@ -3535,6 +4004,7 @@ describe("replyToForm applies the composer selection", () => {
       const home = { apiBaseUrl: "http://form-home.test", runtimeKey: "form-home" }
       switchRuntimeEndpoint(home)
       mainSessionId = "session-a"
+      seedSession("session-a")
       configState = { currentProviderId: "openai", currentModelId: "gpt-6" }
       const form = buildForm("q-1", "session-a")
       const store = createStore({}, { form: { "session-a": [form] } })
@@ -3569,6 +4039,7 @@ describe("replyToForm applies the composer selection", () => {
   test("a not-found answer from an old runtime cleans nothing up", async () => {
     const original = { apiBaseUrl: getRuntimeApiBaseUrl(), runtimeKey: getRuntimeKey() }
     switchRuntimeEndpoint({ apiBaseUrl: "http://form-home.test", runtimeKey: "form-home" })
+    seedSession("session-a")
     const form = buildForm("q-1", "session-a")
     const store = createStore({}, { form: { "session-a": [form] } })
     formReplyError = Object.assign(new Error("FormNotFoundError"), { status: 404 })
@@ -3616,6 +4087,7 @@ describe("form dismissal clears pending state without the SSE echo (issues #2911
       session: [sessionFixture("session-a")],
       form: { "session-a": [form] },
     })
+    sessionRecords.set("session-a", sessionFixture("session-a"))
     const childStores = createChildStores([["/test/project", store]])
 
     const { setActionRefs, cancelForm } = await import("./session-actions")
@@ -3636,6 +4108,7 @@ describe("form dismissal clears pending state without the SSE echo (issues #2911
       session: [sessionFixture("session-a")],
       form: { "session-a": [form] },
     })
+    sessionRecords.set("session-a", sessionFixture("session-a"))
     const childStores = createChildStores([["/test/project", store]])
 
     const { setActionRefs, replyToForm } = await import("./session-actions")
@@ -3672,6 +4145,7 @@ describe("form dismissal clears pending state without the SSE echo (issues #2911
       session: [sessionFixture("session-a")],
       form: {},
     })
+    sessionRecords.set("session-a", sessionFixture("session-a"))
 
     const { setActionRefs, cancelForm, replyToForm } = await import("./session-actions")
     setActionRefs(createChildStores([["/test/project", store]]), () => "/test/project")
@@ -3712,6 +4186,8 @@ describe("blocking request reply routing and stale recovery (issue OPE-236)", ()
       session: [{ id: "session-wt", directory: "/test/project/wt" } as Session],
       form: { "session-wt": [form] },
     })
+    // SAFETY: mirrors the session slice this store already holds.
+    sessionRecords.set("session-wt", { id: "session-wt", directory: "/test/project/wt" } as Session)
     const childStores = createChildStores([["/test/project", store]])
 
     const { setActionRefs, replyToForm } = await import("./session-actions")
@@ -3750,6 +4226,8 @@ describe("blocking request reply routing and stale recovery (issue OPE-236)", ()
       session: [{ id: "session-a" } as Session],
       form: { "session-a": [form] },
     })
+    // SAFETY: mirrors the session slice this store already holds.
+    sessionRecords.set("session-a", { id: "session-a" } as Session)
     const childStores = createChildStores([["/test/project", store]])
 
     const { setActionRefs, replyToForm } = await import("./session-actions")
@@ -3780,6 +4258,8 @@ describe("blocking request reply routing and stale recovery (issue OPE-236)", ()
         } as Part],
       },
     })
+    // SAFETY: mirrors the session slice this store already holds.
+    sessionRecords.set("session-a", { id: "session-a" } as Session)
     const childStores = createChildStores([["/test/project", store]])
     formReplyError = Object.assign(new Error("form.reply failed (404): FormNotFoundError"), { status: 404 })
 
@@ -3865,11 +4345,33 @@ function buildPermission(id: string, sessionId: string): PermissionRequest {
   }
 }
 
+// A form linked to the tool call that posted it, as a deferred-question plugin and the question tool stamp it.
+function buildLinkedForm(id: string, sessionId: string, messageID = "msg-tool"): FormRequest {
+  return { ...buildForm(id, sessionId), metadata: { kind: "question", tool: { messageID, id: `call-${id}` } } }
+}
+
+function buildToolPart(formId: string, sessionId: string, status: ToolPart["state"]["status"], messageID = "msg-tool"): ToolPart {
+  const part = (state: ToolPart["state"]): ToolPart => ({ id: `call-${formId}`, sessionID: sessionId, messageID, callID: `call-${formId}`, tool: "deferred_question", type: "tool", state })
+  switch (status) {
+    case "pending": return part({ status, input: {}, raw: "" })
+    case "running": return part({ status, input: {}, time: { start: 1 } })
+    case "completed": return part({ status, input: {}, output: "", time: { start: 1, end: 2 } })
+    case "error": return part({ status, input: {}, error: "failed", time: { start: 1, end: 2 } })
+  }
+}
+
+function messageWithParts(sessionId: string, messageID: string, parts: Part[]) {
+  // SAFETY: the send path reads only the parts of this message.
+  return { info: { id: messageID, sessionID: sessionId, role: "assistant" } as Message, parts }
+}
+
 describe("dismissOpenFormsForSession", () => {
   beforeEach(() => {
     replyCalls.length = 0
     formReplyError = null
     formCancelError = null
+    sessionMessageRead = null
+    resetRecoverableQuestions()
   })
 
   test("returns false and rejects nothing when no forms are pending", async () => {
@@ -3885,7 +4387,7 @@ describe("dismissOpenFormsForSession", () => {
     expect(replyCalls.filter((call) => call.method === "form.cancel")).toHaveLength(0)
   })
 
-  test("rejects every pending form in the session subtree (root + subagent child)", async () => {
+  test("cancels pending forms without a tool link in the whole session subtree (root + subagent child)", async () => {
     const rootForm = buildForm("q-root", "session-a")
     const childForm = buildForm("q-child", "session-child")
     const store = createStore({}, {
@@ -3900,6 +4402,8 @@ describe("dismissOpenFormsForSession", () => {
     })
     const childStores = createChildStores([["/test/project", store]])
 
+    // The sync index holds every store's records; this mock reads it from sessionRecords.
+    for (const session of store.getState().session) sessionRecords.set(session.id, session)
     const { setActionRefs, dismissOpenFormsForSession } = await import("./session-actions")
     setActionRefs(childStores, () => "/test/project")
 
@@ -3964,6 +4468,359 @@ describe("dismissOpenFormsForSession", () => {
     expect(store.getState().form["session-child"]).toBe(undefined)
     expect(worktreeStore.getState().form["session-child"]).toEqual([childForm])
     expect(worktreeStore.getState().form["session-a"]).toBe(undefined)
+  })
+
+  // #5391: a form whose tool call has ended does not hold the turn, so a send leaves it open.
+  test("leaves a form open when its linked tool call completed or failed", async () => {
+    for (const status of ["completed", "error"] as const) {
+      replyCalls.length = 0
+      const form = buildLinkedForm("q-done", "session-a")
+      const store = createStore({}, {
+        session: [sessionFixture("session-a")],
+        form: { "session-a": [form] },
+        part: { "msg-tool": [buildToolPart("q-done", "session-a", status)] },
+      })
+      const { setActionRefs, dismissOpenFormsForSession } = await import("./session-actions")
+      setActionRefs(createChildStores([["/test/project", store]]), () => "/test/project")
+
+      expect(await dismissOpenFormsForSession("session-a")).toBe(false)
+      expect(store.getState().form["session-a"]).toEqual([form])
+      expect(replyCalls.filter((call) => call.method === "form.cancel" || call.method === "session.message")).toHaveLength(0)
+    }
+  })
+
+  test("cancels a form whose linked tool call is still pending or running", async () => {
+    for (const status of ["pending", "running"] as const) {
+      replyCalls.length = 0
+      const form = buildLinkedForm("q-wait", "session-a")
+      const store = createStore({}, {
+        session: [sessionFixture("session-a")],
+        form: { "session-a": [form] },
+        part: { "msg-tool": [buildToolPart("q-wait", "session-a", status)] },
+      })
+      sessionRecords.set("session-a", sessionFixture("session-a"))
+      const { setActionRefs, dismissOpenFormsForSession } = await import("./session-actions")
+      setActionRefs(createChildStores([["/test/project", store]]), () => "/test/project")
+
+      expect(await dismissOpenFormsForSession("session-a")).toBe(true)
+      expect(replyCalls.filter((call) => call.method === "form.cancel").map((call) => call.params.formID)).toEqual(["q-wait"])
+      expect(store.getState().form["session-a"]).toBe(undefined)
+    }
+  })
+
+  test("in a mixed session, cancels only the form that holds the turn", async () => {
+    const released = buildLinkedForm("q-done", "session-a")
+    const holding = buildLinkedForm("q-wait", "session-a")
+    const store = createStore({}, {
+      session: [sessionFixture("session-a")],
+      form: { "session-a": [released, holding] },
+      part: { "msg-tool": [buildToolPart("q-done", "session-a", "completed"), buildToolPart("q-wait", "session-a", "running")] },
+    })
+    sessionRecords.set("session-a", sessionFixture("session-a"))
+    const { setActionRefs, dismissOpenFormsForSession } = await import("./session-actions")
+    setActionRefs(createChildStores([["/test/project", store]]), () => "/test/project")
+
+    expect(await dismissOpenFormsForSession("session-a")).toBe(true)
+    expect(replyCalls.filter((call) => call.method === "form.cancel").map((call) => call.params.formID)).toEqual(["q-wait"])
+    expect(store.getState().form["session-a"]).toEqual([released])
+  })
+
+  test("cancels a form with a malformed tool link as before", async () => {
+    const form: FormRequest = { ...buildForm("q-bad", "session-a"), metadata: { tool: { messageID: "msg-tool" } } }
+    const store = createStore({}, {
+      session: [sessionFixture("session-a")],
+      form: { "session-a": [form] },
+      part: { "msg-tool": [buildToolPart("q-bad", "session-a", "completed")] },
+    })
+    sessionRecords.set("session-a", sessionFixture("session-a"))
+    const { setActionRefs, dismissOpenFormsForSession } = await import("./session-actions")
+    setActionRefs(createChildStores([["/test/project", store]]), () => "/test/project")
+
+    expect(await dismissOpenFormsForSession("session-a")).toBe(true)
+    expect(replyCalls.filter((call) => call.method === "form.cancel").map((call) => call.params.formID)).toEqual(["q-bad"])
+    expect(replyCalls.filter((call) => call.method === "session.message")).toHaveLength(0)
+  })
+
+  test("leaves a subagent's form open when its tool call has ended", async () => {
+    const childForm = buildLinkedForm("q-child", "session-child", "msg-child")
+    const store = createStore({}, {
+      session: [sessionFixture("session-a"), { ...sessionFixture("session-child"), parentID: "session-a" }],
+      form: { "session-child": [childForm] },
+      part: { "msg-child": [buildToolPart("q-child", "session-child", "completed", "msg-child")] },
+    })
+    const { setActionRefs, dismissOpenFormsForSession } = await import("./session-actions")
+    setActionRefs(createChildStores([["/test/project", store]]), () => "/test/project")
+
+    expect(await dismissOpenFormsForSession("session-a")).toBe(false)
+    expect(store.getState().form["session-child"]).toEqual([childForm])
+    expect(replyCalls.filter((call) => call.method === "form.cancel")).toHaveLength(0)
+  })
+
+  test("reads an unloaded tool call once, and a completed one leaves the form open for the composer too", async () => {
+    const form = buildLinkedForm("q-old", "session-a")
+    // The question's message lies before the loaded window: no parts for it.
+    const store = createStore({}, { session: [sessionFixture("session-a")], form: { "session-a": [form] } })
+    sessionRecords.set("session-a", sessionFixture("session-a"))
+    sessionMessageRead = (sessionID, messageID) => messageWithParts(sessionID, messageID, [buildToolPart("q-old", sessionID, "completed")])
+    const { setActionRefs, dismissOpenFormsForSession } = await import("./session-actions")
+    setActionRefs(createChildStores([["/test/project", store]]), () => "/test/project")
+    const { formTurnHold } = await import("./recoverable-questions")
+    expect(formTurnHold(form, store.getState().part, useRecoverableQuestionsStore.getState().releasedForms)).toBe("unknown")
+
+    expect(await dismissOpenFormsForSession("session-a")).toBe(false)
+    expect(replyCalls.filter((call) => call.method === "session.message")).toEqual([
+      { method: "session.message", params: { sessionID: "session-a", messageID: "msg-tool", directory: "/test/project" } },
+    ])
+    expect(replyCalls.filter((call) => call.method === "form.cancel")).toHaveLength(0)
+    expect(store.getState().form["session-a"]).toEqual([form])
+    // The part is still not in the store, yet the composer's phase reads the read's answer.
+    expect(formTurnHold(form, store.getState().part, useRecoverableQuestionsStore.getState().releasedForms)).toBe("released")
+
+    // A second send needs no second read.
+    replyCalls.length = 0
+    expect(await dismissOpenFormsForSession("session-a")).toBe(false)
+    expect(replyCalls).toHaveLength(0)
+  })
+
+  test("cancels an unloaded form when the read shows it running, misses the part, or fails", async () => {
+    const reads: Array<[string, typeof sessionMessageRead]> = [
+      ["running", (sessionID, messageID) => messageWithParts(sessionID, messageID, [buildToolPart("q-old", sessionID, "running")])],
+      ["missing part", (sessionID, messageID) => messageWithParts(sessionID, messageID, [])],
+      ["failed read", null],
+    ]
+    for (const [, read] of reads) {
+      replyCalls.length = 0
+      resetRecoverableQuestions()
+      sessionMessageRead = read
+      const form = buildLinkedForm("q-old", "session-a")
+      const store = createStore({}, { session: [sessionFixture("session-a")], form: { "session-a": [form] } })
+      sessionRecords.set("session-a", sessionFixture("session-a"))
+      const { setActionRefs, dismissOpenFormsForSession } = await import("./session-actions")
+      setActionRefs(createChildStores([["/test/project", store]]), () => "/test/project")
+
+      expect(await dismissOpenFormsForSession("session-a")).toBe(true)
+      expect(replyCalls.filter((call) => call.method === "form.cancel").map((call) => call.params.formID)).toEqual(["q-old"])
+      expect(store.getState().form["session-a"]).toBe(undefined)
+      expect(useRecoverableQuestionsStore.getState().releasedForms.size).toBe(0)
+    }
+  })
+
+  // One verdict per form across every store holding a copy (#5391 review).
+  test("a stale running copy in another store does not cancel a form whose tool call completed", async () => {
+    const form = buildLinkedForm("q-dup", "session-a")
+    const fresh = createStore({}, {
+      session: [sessionFixture("session-a")], form: { "session-a": [form] },
+      part: { "msg-tool": [buildToolPart("q-dup", "session-a", "completed")] },
+    })
+    const stale = createStore({}, {
+      session: [sessionFixture("session-a")], form: { "session-a": [form] },
+      part: { "msg-tool": [buildToolPart("q-dup", "session-a", "running")] },
+    })
+    sessionRecords.set("session-a", sessionFixture("session-a"))
+    const { setActionRefs, dismissOpenFormsForSession } = await import("./session-actions")
+    setActionRefs(createChildStores([["/test/project", stale], ["/test/project/wt", fresh]]), () => "/test/project")
+
+    expect(await dismissOpenFormsForSession("session-a")).toBe(false)
+    expect(replyCalls.filter((call) => call.method === "form.cancel" || call.method === "session.message")).toHaveLength(0)
+    expect(fresh.getState().form["session-a"]).toEqual([form])
+    expect(stale.getState().form["session-a"]).toEqual([form])
+  })
+
+  test("duplicate unloaded copies share one read, so a second, failing read cannot cancel a released form", async () => {
+    const form = buildLinkedForm("q-dup", "session-a")
+    const first = createStore({}, { session: [sessionFixture("session-a")], form: { "session-a": [form] } })
+    const second = createStore({}, { session: [sessionFixture("session-a")], form: { "session-a": [form] } })
+    sessionRecords.set("session-a", sessionFixture("session-a"))
+    let reads = 0
+    sessionMessageRead = (sessionID, messageID) => {
+      if (++reads > 1) throw new Error("simulated transport failure")
+      return messageWithParts(sessionID, messageID, [buildToolPart("q-dup", sessionID, "completed")])
+    }
+    const { setActionRefs, dismissOpenFormsForSession } = await import("./session-actions")
+    setActionRefs(createChildStores([["/test/project", first], ["/test/project/wt", second]]), () => "/test/project")
+
+    expect(await dismissOpenFormsForSession("session-a")).toBe(false)
+    expect(reads).toBe(1)
+    expect(replyCalls.filter((call) => call.method === "form.cancel")).toHaveLength(0)
+    expect(first.getState().form["session-a"]).toEqual([form])
+    expect(second.getState().form["session-a"]).toEqual([form])
+  })
+
+  test("two racing sends share the read: a later failing read cannot cancel what the first read released", async () => {
+    const form = buildLinkedForm("q-race", "session-a")
+    const store = createStore({}, { session: [sessionFixture("session-a")], form: { "session-a": [form] } })
+    sessionRecords.set("session-a", sessionFixture("session-a"))
+    let answer: (value: { info: Message; parts: Part[] }) => void = () => {}
+    let reads = 0
+    sessionMessageRead = () => {
+      if (++reads > 1) return Promise.reject(new Error("simulated transport failure"))
+      return new Promise((resolve) => { answer = resolve })
+    }
+    const { setActionRefs, dismissOpenFormsForSession } = await import("./session-actions")
+    setActionRefs(createChildStores([["/test/project", store]]), () => "/test/project")
+
+    const sendA = dismissOpenFormsForSession("session-a")
+    const sendB = dismissOpenFormsForSession("session-a")
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    answer(messageWithParts("session-a", "msg-tool", [buildToolPart("q-race", "session-a", "completed")]))
+    expect(await sendA).toBe(false)
+    expect(await sendB).toBe(false)
+    expect(reads).toBe(1)
+    expect(replyCalls.filter((call) => call.method === "form.cancel")).toHaveLength(0)
+    expect(store.getState().form["session-a"]).toEqual([form])
+  })
+
+  test("a failed read does not cancel a form another copy showed completed meanwhile", async () => {
+    const form = buildLinkedForm("q-late", "session-a")
+    const unloaded = createStore({}, { session: [sessionFixture("session-a")], form: { "session-a": [form] } })
+    const other = createStore({}, { session: [sessionFixture("session-a")], form: { "session-a": [form] } })
+    sessionRecords.set("session-a", sessionFixture("session-a"))
+    sessionMessageRead = () => {
+      // The tool call's completion reaches the other store while the read is out.
+      other.setState((state) => ({ part: { ...state.part, "msg-tool": [buildToolPart("q-late", "session-a", "completed")] } }))
+      throw new Error("simulated transport failure")
+    }
+    const { setActionRefs, dismissOpenFormsForSession } = await import("./session-actions")
+    setActionRefs(createChildStores([["/test/project", unloaded], ["/test/project/wt", other]]), () => "/test/project")
+
+    expect(await dismissOpenFormsForSession("session-a")).toBe(false)
+    expect(replyCalls.filter((call) => call.method === "form.cancel")).toHaveLength(0)
+    expect(unloaded.getState().form["session-a"]).toEqual([form])
+  })
+
+  test("a runtime switch during a read stops the dismissal: nothing is removed or cancelled, on either runtime", async () => {
+    const { switchRuntimeEndpoint } = await import("../lib/runtime-switch")
+    for (const outcome of ["failed", "completed"] as const) {
+      replyCalls.length = 0
+      resetRecoverableQuestions()
+      switchRuntimeEndpoint({ apiBaseUrl: "http://forms-old.test", runtimeKey: `forms-old-${outcome}` })
+      const unloaded = buildLinkedForm("q-old", "session-a")
+      // A form that holds its turn and needs no read is spared as well.
+      const holding = buildLinkedForm("q-wait", "session-a")
+      const forms = () => ({ "session-a": [unloaded, holding] })
+      const parts = () => ({ "msg-tool": [buildToolPart("q-wait", "session-a", "running")] })
+      const oldStore = createStore({}, { session: [sessionFixture("session-a")], form: forms(), part: parts() })
+      const newStore = createStore({}, { session: [sessionFixture("session-a")], form: forms(), part: parts() })
+      sessionRecords.set("session-a", sessionFixture("session-a"))
+      const { setActionRefs, dismissOpenFormsForSession } = await import("./session-actions")
+      setActionRefs(createChildStores([["/test/project", oldStore]]), () => "/test/project")
+      sessionMessageRead = (sessionID, messageID) => {
+        switchRuntimeEndpoint({ apiBaseUrl: "http://forms-new.test", runtimeKey: `forms-new-${outcome}` })
+        setActionRefs(createChildStores([["/test/project", newStore]]), () => "/test/project")
+        if (outcome === "failed") throw new Error("simulated transport failure")
+        return messageWithParts(sessionID, messageID, [buildToolPart("q-old", sessionID, "completed")])
+      }
+
+      expect(await dismissOpenFormsForSession("session-a")).toBe(false)
+      expect(replyCalls.filter((call) => call.method === "form.cancel")).toHaveLength(0)
+      expect(oldStore.getState().form["session-a"]).toEqual([unloaded, holding])
+      expect(newStore.getState().form["session-a"]).toEqual([unloaded, holding])
+      expect(useRecoverableQuestionsStore.getState().releasedForms.size).toBe(0)
+    }
+  })
+
+  test("a read from before a switch away and back is not shared: the send reads again on its own runtime", async () => {
+    const { switchRuntimeEndpoint } = await import("../lib/runtime-switch")
+    switchRuntimeEndpoint({ apiBaseUrl: "http://forms-a.test", runtimeKey: "forms-aba-a" })
+    const form = buildLinkedForm("q-aba", "session-a")
+    const oldStore = createStore({}, { session: [sessionFixture("session-a")], form: { "session-a": [form] } })
+    const reloadedStore = createStore({}, { session: [sessionFixture("session-a")], form: { "session-a": [form] } })
+    sessionRecords.set("session-a", sessionFixture("session-a"))
+    const answers: Array<(value: { info: Message; parts: Part[] }) => void> = []
+    sessionMessageRead = () => new Promise((resolve) => { answers.push(resolve) })
+    const { setActionRefs, dismissOpenFormsForSession, readUnloadedFormToolLinks } = await import("./session-actions")
+    setActionRefs(createChildStores([["/test/project", oldStore]]), () => "/test/project")
+
+    readUnloadedFormToolLinks("session-a")
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    switchRuntimeEndpoint({ apiBaseUrl: "http://forms-b.test", runtimeKey: "forms-aba-b" })
+    resetRecoverableQuestions()
+    switchRuntimeEndpoint({ apiBaseUrl: "http://forms-a.test", runtimeKey: "forms-aba-a" })
+    resetRecoverableQuestions()
+    setActionRefs(createChildStores([["/test/project", reloadedStore]]), () => "/test/project")
+    const send = dismissOpenFormsForSession("session-a")
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    // Both reads find the call completed; only the send's own read may count.
+    const completed = messageWithParts("session-a", "msg-tool", [buildToolPart("q-aba", "session-a", "completed")])
+    for (const answer of answers) answer(completed)
+    expect(await send).toBe(false)
+    expect(answers).toHaveLength(2)
+    expect(replyCalls.filter((call) => call.method === "form.cancel")).toHaveLength(0)
+    expect(reloadedStore.getState().form["session-a"]).toEqual([form])
+  })
+
+  test("a read that finishes after its form closed records nothing", async () => {
+    const form = buildLinkedForm("q-closed", "session-a")
+    const store = createStore({}, { session: [sessionFixture("session-a")], form: { "session-a": [form] } })
+    sessionRecords.set("session-a", sessionFixture("session-a"))
+    let answer: (value: { info: Message; parts: Part[] }) => void = () => {}
+    sessionMessageRead = () => new Promise((resolve) => { answer = resolve })
+    const { setActionRefs, readUnloadedFormToolLinks } = await import("./session-actions")
+    const { applyRecoverableQuestionEvents } = await import("./recoverable-questions")
+    setActionRefs(createChildStores([["/test/project", store]]), () => "/test/project")
+
+    readUnloadedFormToolLinks("session-a")
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    store.setState({ form: { "session-a": [] } })
+    applyRecoverableQuestionEvents("/test/project", [{ type: "form.settled", properties: { sessionID: "session-a", formID: "q-closed", disposition: "replied" } }])
+    answer(messageWithParts("session-a", "msg-tool", [buildToolPart("q-closed", "session-a", "completed")]))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(useRecoverableQuestionsStore.getState().releasedForms.size).toBe(0)
+  })
+
+  for (const childStatus of ["running", "completed"] as const) {
+    test(`a child form with the parent's form id is its own form (child ${childStatus})`, async () => {
+      const parent = sessionFixture("session-parent")
+      const child = { ...sessionFixture("session-child"), parentID: parent.id }
+      const parentForm = buildLinkedForm("q-shared", parent.id, "msg-parent")
+      const childForm = buildLinkedForm("q-shared", child.id, "msg-child")
+      const parentStore = createStore({}, {
+        session: [parent], form: { [parent.id]: [parentForm] },
+        part: { "msg-parent": [buildToolPart("q-shared", parent.id, "running", "msg-parent")] },
+      })
+      const childStore = createStore({}, {
+        session: [child], form: { [child.id]: [childForm] },
+        part: { "msg-child": [buildToolPart("q-shared", child.id, childStatus, "msg-child")] },
+      })
+      sessionRecords.set(parent.id, parent)
+      sessionRecords.set(child.id, child)
+      const { setActionRefs, dismissOpenFormsForSession } = await import("./session-actions")
+      setActionRefs(createChildStores([["/test/project", parentStore], ["/test/project/child", childStore]]), () => "/test/project")
+
+      expect(await dismissOpenFormsForSession(parent.id)).toBe(true)
+      const cancelled = replyCalls.filter((call) => call.method === "form.cancel").map((call) => call.params.sessionID)
+      expect(parentStore.getState().form[parent.id]).toBeUndefined()
+      if (childStatus === "running") {
+        expect(cancelled.sort()).toEqual([child.id, parent.id].sort())
+        expect(childStore.getState().form[child.id]).toBeUndefined()
+      } else {
+        // The parent's cancel and its store cleanup leave the child's open question alone.
+        expect(cancelled).toEqual([parent.id])
+        expect(childStore.getState().form[child.id]).toEqual([childForm])
+      }
+    })
+  }
+
+  test("the composer's read of an unloaded call settles the first send: no second read, nothing cancelled", async () => {
+    const form = buildLinkedForm("q-first", "session-a")
+    const store = createStore({}, { session: [sessionFixture("session-a")], form: { "session-a": [form] } })
+    sessionRecords.set("session-a", sessionFixture("session-a"))
+    let answer: (value: { info: Message; parts: Part[] }) => void = () => {}
+    sessionMessageRead = () => new Promise((resolve) => { answer = resolve })
+    const { setActionRefs, dismissOpenFormsForSession, readUnloadedFormToolLinks } = await import("./session-actions")
+    setActionRefs(createChildStores([["/test/project", store]]), () => "/test/project")
+
+    // useSessionActivity starts the read when it sees the form, before any send.
+    readUnloadedFormToolLinks("session-a")
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    // A send while that read is out waits for it instead of reading again.
+    const send = dismissOpenFormsForSession("session-a")
+    answer(messageWithParts("session-a", "msg-tool", [buildToolPart("q-first", "session-a", "completed")]))
+    expect(await send).toBe(false)
+    expect(replyCalls.filter((call) => call.method === "session.message")).toHaveLength(1)
+    expect(replyCalls.filter((call) => call.method === "form.cancel")).toHaveLength(0)
+    const { formTurnHold } = await import("./recoverable-questions")
+    expect(formTurnHold(form, store.getState().part, useRecoverableQuestionsStore.getState().releasedForms)).toBe("released")
   })
 })
 
@@ -4062,6 +4919,8 @@ describe("dismissOpenPermissionsForSession", () => {
     })
     const childStores = createChildStores([["/test/project", store]])
 
+    // The sync index holds every store's records; this mock reads it from sessionRecords.
+    for (const session of store.getState().session) sessionRecords.set(session.id, session)
     const { setActionRefs, dismissOpenPermissionsForSession } = await import("./session-actions")
     setActionRefs(childStores, () => "/test/project")
 

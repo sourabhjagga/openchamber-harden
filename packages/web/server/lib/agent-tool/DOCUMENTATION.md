@@ -57,7 +57,10 @@ the user can want independently:
   read paths assembled at runtime. The description gives the authoring pattern.
   It also names the temporary directory to save a screenshot in
   (`os.tmpdir()/opencode`) so it stays out of the project. How
-  to ask on a page is the `awaitAnswer` input's description.
+  to ask on a page is the `awaitAnswer` input's description; `answerLater`,
+  a boolean the plugin normalizes like `awaitAnswer`, returns at once and is
+  not a wait here (no call registration, no `timeout: false`), see
+  `../openchamber-control/DOCUMENTATION.md`.
   With `awaitAnswer` the call waits for the user's answer on the page. The
   plugin sends the call id (`context.id`) with the callback so the server can
   find the waiting call when the chat answers it, and copies the answer into
@@ -66,22 +69,71 @@ the user can want independently:
   since Bun's fetch otherwise ends a request with no response after about six
   minutes. While the call waits, OpenCode holds any chat message
   for that session until the call returns, so the plugin registers a
-  `session.prompt` hook: a prompt for the session, from any sender, aborts the
+  `session.prompt` hook: the user's prompt for the session aborts the
   waiting call, which returns `{ answered: false, reason: "chat" }`, and the
-  agent reads the message next. A message sent before the page appeared
-  fired the hook too early; the server finds it in the inbox instead
-  (`render-page.js`).
+  agent reads the message next. Two kinds of prompt leave the wait running.
+  The first is an agent's: its metadata names a sending session in the
+  `openchamber.promptedBy` record `session.send` writes (a non-empty
+  `sessionID`), or it is a run of OpenCode's own scheduler
+  (`experimental.schedules`), an ordinary steer prompt marked
+  `schedule: { id }` with a non-empty `id` (`isAgentPrompt` in `render-page.js`, embedded with
+  `toString()`). The second has `delivery: "queue"`, which OpenCode delivers
+  only after the turn. The user can still move an undelivered prompt between
+  queue and steer, also one sent as a steer before the page appeared, and
+  OpenCode does that without running the prompt hook again. So the plugin
+  remembers the inbox ids of all the user's prompts until they are delivered
+  and follows the inbox events (`ctx.event.subscribe`):
+  `session.inbox.delivery.changed` to `"steer"` for one of them ends the wait,
+  `session.inbox.delivered` or `session.inbox.cancelled` forgets it, and
+  `session.deleted` forgets all of that session's. Every other prompt, the TUI's and the
+  API's included, counts as the user's. OpenChamber's own background wakes
+  (extension waits, dispatch results, pull request watches, restart resumes)
+  arrive as synthetic messages, which never reach this hook. Known limits:
+  - An agent's `session.send` whose prompt is a slash command (`/review`) goes
+    to `client.session.command` (`dispatchPrompt` in
+    `../openchamber-sessions/routes.js`), which sends no sender metadata, and
+    OpenCode's command endpoint has no metadata field. The command's prompt
+    therefore counts as the user's and ends the wait.
+  - The user's undelivered prompts are remembered in the plugin's memory
+    only. When OpenCode reloads the plugin while a prompt is queued, moving
+    that prompt to steer later leaves the wait running until the user answers
+    the page.
+
+  A message sent before the page appeared fired the hook too early; the
+  server finds it in the inbox instead (`render-page.js`).
+  With `share` the page also goes to other people by link and PIN through the
+  relay, and their answers come back later as messages
+  (`../share-pages/DOCUMENTATION.md`). The `share` input and the description's
+  one sentence about it exist only while sharing is available
+  (`materializePlugin({ includeShare })`, decided in
+  `../opencode/managed-config-file.js` with `isSharingAvailable`): in
+  enterprise mode without a pinned relay the agent never hears of it, and the
+  managed config is rewritten when the policy changes.
 - `openchamber_image` — `image.generate`, images made or edited by the image
   model the user chose in Settings (`../openchamber-control/generate-image.js`).
   Off by default: enabled only while `agentImageToolEnabled` is `true`, and
   the control service refuses the action when it is not. Never behind Code
   Mode, like render: the chat draws the images in place of the call's row from
   its stored result, which an `execute` script would hide.
-- `openchamber_secret` — `secret.request`, a card in the chat where the user
-  types a secret the agent asked for (`label`, `reason`, optional
-  `placeholder`). Every call waits, with the same plugin machinery as a page
+- `openchamber_secret` — `secret.run`, `secret.request` and `secret.forget`.
+  `secret.run` asks OpenCode's shell permission for its command line in the
+  plugin, before the call reaches the server: `ctx.permission.assert` with
+  action `shell`, the line `secretRunCommandLine` draws as the resource and
+  `<program> *` as the pattern to save, so the session's shell rules apply as
+  to any command and a deny never shows a card. The plugin embeds the server's
+  `secretRunCommand` and `secretRunCommandLine` with `toString()`, so the line
+  the user approves is the one the card shows; a malformed call fails before
+  anything is asked. The refusal `assert` throws is rethrown, since a plain
+  rejection ends the agent's step. Only a call from this tool reaches the
+  server as `secretRunAuthorized`, and secret actions use the session OpenCode
+  reported, so no payload field can reach another session's remembered values.
+  `secret.request` is a
+  card where the user types one secret the agent asked for (`label`, `reason`,
+  optional `placeholder`). Both wait, with the same plugin machinery as a page
   with `awaitAnswer` (call id, `timeout: false`, the `session.prompt` hook
-  that ends the wait when the user writes in the chat, and the inbox check
+  that ends the wait when the user writes in the chat and leaves it running
+  for an agent's or a queued prompt, the inbox events for the user's prompt
+  moved to steer, and the inbox check
   for a message sent before the card appeared). The value never
   travels through the call: the chat posts it to the server, which writes it
   to a private file, and the call returns only `{ status, file }`
@@ -220,13 +272,16 @@ default and when to set it. Field names and JSON types carry the rest.
   `html`, is that input's description.
 - The tool exposes one shared parameter object rather than repeating parameters
   in a large per-action union.
-- The action schema carries `oneOf` and no `enum`. A node combining `enum` and
+- The action schema carries `enum` and no `oneOf`. A node combining `enum` and
   `oneOf` is valid JSON Schema, but some OpenAI-compatible gateways reject it
-  and answer with an empty completion instead of an error.
+  and answer with an empty completion instead of an error. Using `enum` alone
+  avoids the gateway collision while preventing OpenAPI 3.0 / Gemini schema
+  normalizers from collapsing `oneOf` to its first element. Action descriptions
+  are folded into the property description.
 - A tool with a single action (render, notify) declares `action` as a plain,
   optional string and always runs its one action. A weaker model put the whole
   render call into `action` as a JSON string, title included, with the html
-  beside it; the strict `oneOf` refused that before the tool ran, and every
+  beside it; the strict action list refused that before the tool ran, and every
   retry sent the whole page again. Such a string is revived, and its fields
   fill only what the call did not already carry.
 - Obvious fields rely on their names and JSON types. Parameter descriptions are
@@ -360,6 +415,12 @@ past the 2048-character cut.
   called from the event dispatch in `server/index.js` when the stream reports
   `session.idle` with `aborted: true`; the abort signal then reaches the
   shared service as before. A dropped HTTP request still aborts as well.
+- A call the user stops ends as a stopped call: when `context.signal` has
+  aborted, the generated `execute` rethrows instead of returning an `ok:false`
+  envelope. Since OpenCode 2.3.0 a tool that reads its signal stops
+  cooperatively and whatever it returns is recorded as the result, so an
+  envelope would store a completed call, and the chat drops a completed page
+  or secret card that is not `ok` (`renderedPage` in `lib/opencode/tools.ts`).
 
 ## Result contract
 

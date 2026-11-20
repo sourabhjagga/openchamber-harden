@@ -36,14 +36,16 @@ import { useMessageQueueStore } from '@/stores/messageQueueStore';
 import { useSessionDisplayStore } from '@/stores/useSessionDisplayStore';
 import { useUIStore, type FileEditorKeymap, type LargeTextPasteBehavior } from '@/stores/useUIStore';
 import { isSessionGoalMaxAutoTurns } from '@/lib/sessionGoalTurnLimit';
-import { hiddenSidebarSectionsSchema, sidebarPinListsSchema, sidebarSectionsSchema } from '@/lib/sidebarSections';
+import { hiddenSidebarSectionsSchema, SIDEBAR_SESSION_BATCH_MAX, SIDEBAR_SESSION_BATCH_MIN, sidebarPinListsSchema, sidebarSectionsSchema } from '@/lib/sidebarSections';
 import { z } from 'zod';
 import {
   fromSchema,
   mapParser,
   parseActivityRenderMode,
   parseBoolean,
+  parseChatWidth,
   parseCustomProviderIcons,
+  parseCustomProviderLogos,
   parseDesktopWindowControlsPosition,
   parseFiniteNumber,
   parseFollowUpBehavior,
@@ -309,6 +311,10 @@ export const SETTINGS_REGISTRY = {
   agentImageModel: field({ scope: 'instance', parse: parseNonEmptyString, ui: uiStore('agentImageModel', (v) => useUIStore.getState().setAgentImageModel(v)) }),
   agentSecretToolEnabled: field({ scope: 'instance', parse: parseBoolean, ui: uiStore('agentSecretToolEnabled', (v) => useUIStore.getState().setAgentSecretToolEnabled(v)) }),
   agentMemoryToolEnabled: field({ scope: 'instance', parse: parseBoolean, ui: uiStore('agentMemoryToolEnabled', (v) => useUIStore.getState().setAgentMemoryToolEnabled(v)) }),
+  agentMemoryDreamingEnabled: field({ scope: 'instance', parse: parseBoolean, ui: uiStore('agentMemoryDreamingEnabled', (v) => useUIStore.getState().setAgentMemoryDreamingEnabled(v)) }),
+  // `provider/model` dreaming runs on; empty means the default model, so empty is a value here.
+  agentMemoryDreamingModel: field({ scope: 'instance', parse: fromSchema(z.string()), ui: uiStore('agentMemoryDreamingModel', (v) => useUIStore.getState().setAgentMemoryDreamingModel(v)) }),
+  agentMemoryDreamingVariant: field({ scope: 'instance', parse: fromSchema(z.string()), ui: uiStore('agentMemoryDreamingVariant', (v) => useUIStore.getState().setAgentMemoryDreamingVariant(v)) }),
   agentKnowledgeToolEnabled: field({ scope: 'instance', parse: parseBoolean, ui: uiStore('agentKnowledgeToolEnabled', (v) => useUIStore.getState().setAgentKnowledgeToolEnabled(v)) }),
   agentWorkflowToolEnabled: field({ scope: 'instance', parse: parseBoolean, ui: uiStore('agentWorkflowToolEnabled', (v) => useUIStore.getState().setAgentWorkflowToolEnabled(v)) }),
   // The isolated-spaces switch. The server reads it once at start; a change takes effect at the
@@ -398,6 +404,9 @@ export const SETTINGS_REGISTRY = {
   sidebarListSessionGrouping: field({ scope: 'profile', perSurface: true, parse: parseOneOf(['project', 'time']), ui: sessionDisplayField('listSessionGrouping') }),
   sidebarGrouping: field({ scope: 'profile', perSurface: true, parse: parseOneOf(['project', 'time']), ui: sessionDisplayField('sidebarGrouping') }),
   sidebarKeepWorkInPlace: field({ scope: 'profile', perSurface: true, parse: parseBoolean, ui: sessionDisplayField('keepWorkInPlace') }),
+  sidebarKeepPinnedInPlace: field({ scope: 'profile', perSurface: true, parse: parseBoolean, ui: sessionDisplayField('keepPinnedInPlace') }),
+  // One number for every surface: the phone has no control for it and follows the desktop.
+  sidebarSessionBatchSize: field({ scope: 'profile', parse: parseIntegerInRange(SIDEBAR_SESSION_BATCH_MIN, SIDEBAR_SESSION_BATCH_MAX), ui: sessionDisplayField('sessionBatchSize') }),
   sidebarProjectSortOrder: field({ scope: 'profile', parse: parseOneOf(['manual', 'a-z', 'z-a', 'date-added', 'recent']), ui: sessionDisplayField('projectSortOrder') }),
   sidebarShowChatsSection: field({ scope: 'profile', perSurface: true, parse: parseBoolean, ui: sessionDisplayField('showChatsSection') }),
   sidebarShowWorkSection: field({ scope: 'profile', perSurface: true, parse: parseBoolean, ui: sessionDisplayField('showWorkSection') }),
@@ -470,7 +479,9 @@ export const SETTINGS_REGISTRY = {
   collapsibleUserMessages: field({ scope: 'profile', parse: parseBoolean, ui: uiStore('collapsibleUserMessages', (v) => useUIStore.getState().setCollapsibleUserMessages(v)) }),
   stickyUserHeader: field({ scope: 'profile', perSurface: true, parse: parseBoolean, ui: uiStore('stickyUserHeader', (v) => useUIStore.getState().setStickyUserHeader(v)) }),
   promptNavigatorEnabled: field({ scope: 'profile', perSurface: true, parse: parseBoolean, ui: uiStore('promptNavigatorEnabled', (v) => useUIStore.getState().setPromptNavigatorEnabled(v)) }),
-  wideChatLayoutEnabled: field({ scope: 'profile', perSurface: true, parse: parseBoolean, ui: uiStore('wideChatLayoutEnabled', (v) => useUIStore.getState().setWideChatLayoutEnabled(v)) }),
+  chatWidth: field({ scope: 'profile', perSurface: true, parse: parseChatWidth, ui: uiStore('chatWidth', (v) => useUIStore.getState().setChatWidth(v)) }),
+  /** Legacy boolean that `chatWidth` absorbs at parse time. */
+  wideChatLayoutEnabled: field({ scope: 'profile', perSurface: true, parse: parseBoolean }),
   showSplitAssistantMessageActions: field({ scope: 'profile', parse: parseBoolean, ui: uiStore('showSplitAssistantMessageActions', (v) => useUIStore.getState().setShowSplitAssistantMessageActions(v)) }),
   showToolFileIcons: field({ scope: 'profile', parse: parseBoolean, ui: uiStore('showToolFileIcons', (v) => useUIStore.getState().setShowToolFileIcons(v)) }),
   codeBlockLineWrap: field({ scope: 'profile', parse: parseBoolean, ui: uiStore('codeBlockLineWrap', (v) => useUIStore.getState().setCodeBlockLineWrap(v)) }),
@@ -507,8 +518,10 @@ export const SETTINGS_REGISTRY = {
   layoutAnimations: field({ scope: 'profile', surfaces: ['web', 'desktop'], parse: parseBoolean, ui: uiStore('layoutAnimations', (v) => useUIStore.getState().setLayoutAnimations(v)) }),
   openLinksInBrowserPanel: field({ scope: 'profile', surfaces: ['desktop'], parse: parseBoolean, ui: uiStore('openLinksInBrowserPanel', (v) => useUIStore.getState().setOpenLinksInBrowserPanel(v)) }),
   liveBrowserTabLimit: field({ scope: 'profile', surfaces: ['desktop'], parse: parseIntegerInRange(LIVE_BROWSER_TABS_MIN, LIVE_BROWSER_TABS_MAX), ui: uiStore('liveBrowserTabLimit', (v) => useUIStore.getState().setLiveBrowserTabLimit(v)) }),
+  agentBrowserSharesLogins: field({ scope: 'profile', surfaces: ['desktop'], parse: parseBoolean, ui: uiStore('agentBrowserSharesLogins', (v) => useUIStore.getState().setAgentBrowserSharesLogins(v)) }),
   openTrackerLinksOnBoard: field({ scope: 'profile', surfaces: ['web', 'desktop', 'mobile'], parse: parseBoolean, ui: uiStore('openTrackerLinksOnBoard', (v) => useUIStore.getState().setOpenTrackerLinksOnBoard(v)) }),
   terminalCloseOnExit: field({ scope: 'profile', surfaces: ['web', 'desktop', 'mobile'], parse: parseBoolean, ui: uiStore('terminalCloseOnExit', (v) => useUIStore.getState().setTerminalCloseOnExit(v)) }),
+  terminalOpenOnProjectAction: field({ scope: 'profile', surfaces: ['web', 'desktop'], parse: parseBoolean, ui: uiStore('terminalOpenOnProjectAction', (v) => useUIStore.getState().setTerminalOpenOnProjectAction(v)) }),
   autoCreateWorktree: field({ scope: 'profile', parse: parseBoolean }),
   sessionTabsEnabled: field({ scope: 'profile', surfaces: ['web', 'desktop', 'vscode'], parse: parseBoolean, ui: uiStore('sessionTabsEnabled', (v) => useUIStore.getState().setSessionTabsEnabled(v)) }),
   sessionTabsPerWorkspace: field({ scope: 'profile', surfaces: ['web', 'desktop'], parse: parseBoolean, ui: uiStore('sessionTabsPerWorkspace', (v) => useUIStore.getState().setSessionTabsPerWorkspace(v)) }),
@@ -593,6 +606,8 @@ export const SETTINGS_REGISTRY = {
   hiddenModels: field<ModelRef[]>({ scope: 'profile', parse: parseModelRefs(1024), ui: uiStore('hiddenModels', setUi('hiddenModels'), { autoSave: false }) }),
   collapsedModelProviders: field({ scope: 'profile', parse: parseStringSet, ui: uiStore('collapsedModelProviders', setUi('collapsedModelProviders'), { autoSave: false }) }),
   customProviderIcons: field({ scope: 'profile', parse: parseCustomProviderIcons, ui: uiStore('customProviderIcons', setUi('customProviderIcons'), { autoSave: false }) }),
+  // Written by the server's provider logo routes along with the image file.
+  customProviderLogos: field({ scope: 'profile', parse: parseCustomProviderLogos, ui: uiStore('customProviderLogos', setUi('customProviderLogos'), { autoSave: false }) }),
   recentModels: field<ModelRef[]>({ scope: 'profile', parse: parseModelRefs(16), ui: uiStore('recentModels', setUi('recentModels'), { autoSave: false }) }),
   lastSelectedModel: field({ scope: 'profile', parse: parseNonEmptyString, ui: uiStore('lastSelectedModel', setUi('lastSelectedModel')) }),
   recentAgents: field({ scope: 'profile', parse: parseStringSet, ui: uiStore('recentAgents', setUi('recentAgents'), { autoSave: false }) }),
@@ -735,6 +750,7 @@ export const LOCAL_DEVICE_KEYS = [
   'showTerminalQuickKeysOnDesktop',
   'dockBadgeEnabled',
   'alwaysShowScrollbars',
+  'questionsInChat',
   'agentMemoryViewedAt',
 ] as const;
 

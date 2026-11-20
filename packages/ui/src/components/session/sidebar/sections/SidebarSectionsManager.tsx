@@ -6,6 +6,7 @@ import { CSS } from '@dnd-kit/utilities';
 import { Icon } from '@/components/icon/Icon';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { NumberInput } from '@/components/ui/number-input';
 import { Switch } from '@/components/ui/switch';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import {
@@ -34,6 +35,9 @@ import {
   SIDEBAR_SECTION_TEXT_MAX,
   SIDEBAR_SECTION_STATES,
   SIDEBAR_SECTION_WORK_STATES,
+  SIDEBAR_SESSION_BATCH_DEFAULT,
+  SIDEBAR_SESSION_BATCH_MAX,
+  SIDEBAR_SESSION_BATCH_MIN,
   type BuiltinSidebarSectionId,
   type CustomSidebarSection,
   type SidebarSectionActivity,
@@ -65,6 +69,7 @@ import {
 } from './sectionActions';
 
 const BUILTIN_TITLE_KEY = {
+  pages: 'sessions.sidebar.activity.pagesTitle',
   chats: 'sessions.sidebar.activity.chatsTitle',
   pinned: 'sessions.sidebar.activity.pinnedTitle',
   work: 'sessions.sidebar.work.title',
@@ -72,6 +77,7 @@ const BUILTIN_TITLE_KEY = {
 } as const satisfies Record<BuiltinSidebarSectionId, I18nKey>;
 
 const TEMPLATE_KEY = {
+  recent: 'sessions.sidebar.sections.template.recent',
   waiting: 'sessions.sidebar.sections.template.waiting',
   running: 'sessions.sidebar.sections.template.running',
   prs: 'sessions.sidebar.sections.template.prs',
@@ -125,7 +131,13 @@ const toggleIn = <T extends string>(list: readonly T[], value: T): T[] => (
  * visibility on this surface, and the editor of one section. It opens beside
  * the sidebar, so the section being edited shows in the list as it stands.
  */
-export const SidebarSectionsManager: React.FC<{ anchor: React.RefObject<HTMLElement | null> }> = ({ anchor }) => {
+/** `pages`: this surface lists the app's pages (not on phones), so Pages is one of its sections. */
+/** `trigger`: the button that toggles the manager; a press or focus move onto it is not leaving the panel. */
+export const SidebarSectionsManager: React.FC<{
+  anchor: React.RefObject<HTMLElement | null>;
+  trigger: React.RefObject<HTMLElement | null>;
+  pages: boolean;
+}> = ({ anchor, trigger, pages }) => {
   const { t } = useI18n();
   const open = useSidebarSectionsUiStore((state) => state.managerOpen);
   const draft = useSidebarSectionsUiStore((state) => state.draft);
@@ -134,6 +146,14 @@ export const SidebarSectionsManager: React.FC<{ anchor: React.RefObject<HTMLElem
       open={open}
       onOpenChange={(next, details) => {
         if (next) return;
+        // A press on the trigger or focus moving onto it: closing here would
+        // let the trigger's click open the panel again. Escape still closes.
+        const target = details.reason === 'outside-press' ? details.event.target
+          : details.reason === 'focus-out' && details.event instanceof FocusEvent ? details.event.relatedTarget : null;
+        if (target instanceof Node && trigger.current?.contains(target)) {
+          details.cancel();
+          return;
+        }
         // Escape in one of the panel's menus (Add condition and its lists stay
         // open while values are picked) closes that menu, not the panel with
         // the section being edited.
@@ -154,7 +174,7 @@ export const SidebarSectionsManager: React.FC<{ anchor: React.RefObject<HTMLElem
             className={cn(SECTIONS_PANEL_CLASS, 'flex max-h-[min(40rem,calc(100vh-4rem))] w-[22rem] max-w-[calc(100vw-2rem)] flex-col overflow-hidden')}
             initialFocus={false}
           >
-            {draft ? <SectionEditor key={draft.id} draft={draft} /> : <SectionList />}
+            {draft ? <SectionEditor key={draft.id} draft={draft} /> : <SectionList pages={pages} />}
           </Popover.Popup>
         </Popover.Positioner>
       </Popover.Portal>
@@ -162,9 +182,9 @@ export const SidebarSectionsManager: React.FC<{ anchor: React.RefObject<HTMLElem
   );
 };
 
-const SECTION_PRESETS = ['waiting', 'running', 'prs', 'stalled', 'today'] as const satisfies readonly SidebarSectionTemplate[];
+const SECTION_PRESETS = ['recent', 'waiting', 'running', 'prs', 'stalled', 'today'] as const satisfies readonly SidebarSectionTemplate[];
 
-const SectionList: React.FC = () => {
+const SectionList: React.FC<{ pages: boolean }> = ({ pages }) => {
   const { t } = useI18n();
   const sections = useSessionDisplayStore((state) => state.sections);
   const pinLists = useSessionDisplayStore((state) => state.pinLists);
@@ -210,11 +230,12 @@ const SectionList: React.FC = () => {
       <DndContext sensors={sensors} collisionDetection={closestCenter} modifiers={SECTION_LIST_MODIFIERS} autoScroll={ROW_DRAG_AUTO_SCROLL} onDragEnd={onDragEnd}>
         <SortableContext items={sections.map((entry) => entry.id)} strategy={verticalListSortingStrategy}>
           <div className="flex flex-col gap-0.5">
-            {sections.map((entry) => <SectionRow key={entry.id} entry={entry} />)}
+            {sections.map((entry) => (entry.kind === 'builtin' && entry.id === 'pages' && !pages ? null : <SectionRow key={entry.id} entry={entry} />))}
           </div>
         </SortableContext>
       </DndContext>
       <p className="typography-micro text-muted-foreground">{t('sessions.sidebar.sections.orderHint')}</p>
+      <SessionBatchSizeRow />
       {pinLists.length > 0 ? (
         <div className="flex flex-col gap-0.5">
           <span className="typography-micro text-muted-foreground">{t('sessions.sidebar.sections.pinLists')}</span>
@@ -235,6 +256,35 @@ const SectionList: React.FC = () => {
 
 const SECTION_LIST_MODIFIERS = [keepRowInList];
 
+/**
+ * How many works projects, worktrees, Pinned and the user's sections show
+ * before Show more, and how many each Show more adds. Chats, In work and the
+ * list by time keep their own.
+ */
+const SessionBatchSizeRow: React.FC = () => {
+  const { t } = useI18n();
+  const size = useSessionDisplayStore((state) => state.sessionBatchSize) ?? SIDEBAR_SESSION_BATCH_DEFAULT;
+  const label = t('sessions.sidebar.sections.batchSize');
+  return (
+    <div className="flex items-center gap-2 ps-2 pe-1">
+      <span className="min-w-0 flex-1 truncate typography-ui-label text-foreground">{label}</span>
+      <NumberInput
+        aria-label={label}
+        value={size}
+        min={SIDEBAR_SESSION_BATCH_MIN}
+        max={SIDEBAR_SESSION_BATCH_MAX}
+        containerClassName="h-7 w-24"
+        // Typed digits commit on blur or Enter: "12" would otherwise pass through 1, clamped to 3.
+        deferExternalValueWhileFocused
+        onValueChange={(next) => {
+          useSessionDisplayStore.getState().setSessionBatchSize(next);
+          void updateDesktopSettings({ sidebarSessionBatchSize: useSessionDisplayStore.getState().sessionBatchSize ?? next });
+        }}
+      />
+    </div>
+  );
+};
+
 /** One section in the list: its name and what can be done with it here; the row drags anywhere but its controls. */
 const SectionRow: React.FC<{ entry: SidebarSectionEntry }> = ({ entry }) => {
   const { t } = useI18n();
@@ -244,11 +294,13 @@ const SectionRow: React.FC<{ entry: SidebarSectionEntry }> = ({ entry }) => {
   const showPinned = useSessionDisplayStore((state) => state.showPinnedSection);
   const showWork = useSessionDisplayStore((state) => state.showWorkSection);
   const keepWorkInPlace = useSessionDisplayStore((state) => state.keepWorkInPlace);
+  const keepPinnedInPlace = useSessionDisplayStore((state) => state.keepPinnedInPlace);
   const sessionWorkEnabled = useUIStore((state) => state.sessionWorkEnabled);
   const name = entry.kind === 'builtin' ? t(BUILTIN_TITLE_KEY[entry.id]) : entry.name;
-  // Built-in sections keep the show toggles they always had; Projects is always shown.
+  // Built-in sections keep the show toggles they always had; Projects is always
+  // shown. Pages, which came later, follows the hidden list as the user's do.
   let visibility: { shown: boolean; set: (shown: boolean) => void } | null = null;
-  if (entry.kind === 'custom') {
+  if (entry.kind === 'custom' || entry.id === 'pages') {
     visibility = { shown: !hiddenSections.includes(entry.id), set: (shown) => setSidebarSectionHidden(entry.id, !shown) };
   } else if (entry.id === 'chats') {
     visibility = { shown: showChats, set: (shown) => { useSessionDisplayStore.getState().setShowChatsSection(shown); void updateDesktopSettings({ sidebarShowChatsSection: shown }); } };
@@ -258,6 +310,13 @@ const SectionRow: React.FC<{ entry: SidebarSectionEntry }> = ({ entry }) => {
     visibility = { shown: showWork, set: (shown) => { useSessionDisplayStore.getState().setShowWorkSection(shown); void updateDesktopSettings({ sidebarShowWorkSection: shown }); } };
   }
   if (entry.kind === 'builtin' && entry.id === 'work' && !sessionWorkEnabled) return null;
+  // Pinned's and In work's one choice: whether their works also stay in their projects.
+  let inPlace: { keep: boolean; set: (keep: boolean) => void } | null = null;
+  if (entry.kind === 'builtin' && entry.id === 'work' && showWork) {
+    inPlace = { keep: keepWorkInPlace, set: (keep) => { useSessionDisplayStore.getState().setKeepWorkInPlace(keep); void updateDesktopSettings({ sidebarKeepWorkInPlace: keep }); } };
+  } else if (entry.kind === 'builtin' && entry.id === 'pinned' && showPinned) {
+    inPlace = { keep: keepPinnedInPlace, set: (keep) => { useSessionDisplayStore.getState().setKeepPinnedInPlace(keep); void updateDesktopSettings({ sidebarKeepPinnedInPlace: keep }); } };
+  }
   return (
     <div
       ref={setNodeRef}
@@ -277,23 +336,23 @@ const SectionRow: React.FC<{ entry: SidebarSectionEntry }> = ({ entry }) => {
             </Button>
           </>
         ) : null}
-        {/* In work's one choice stays on its row, as a chip that says it and
-            switches it: a line under the row pushed the sections below it
-            apart, and a menu behind an edit button hid it. */}
-        {entry.kind === 'builtin' && entry.id === 'work' && showWork ? (
+        {/* The choice stays on its row, as a chip that says it and switches
+            it: a line under the row pushed the sections below it apart, and a
+            menu behind an edit button hid it. */}
+        {inPlace ? (
           <Tooltip>
             <TooltipTrigger asChild>
               <button
                 type="button"
-                aria-pressed={keepWorkInPlace}
-                onClick={() => { const keep = !keepWorkInPlace; useSessionDisplayStore.getState().setKeepWorkInPlace(keep); void updateDesktopSettings({ sidebarKeepWorkInPlace: keep }); }}
+                aria-pressed={inPlace.keep}
+                onClick={() => inPlace.set(!inPlace.keep)}
                 className={cn(
                   'inline-flex h-5 shrink-0 items-center gap-1 rounded px-1.5 typography-micro focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50',
-                  keepWorkInPlace ? 'oc-tile-inset text-foreground' : 'oc-tile text-muted-foreground hover:text-foreground',
+                  inPlace.keep ? 'oc-tile-inset text-foreground' : 'oc-tile text-muted-foreground hover:text-foreground',
                 )}
               >
                 {/* The same width either way: a mark that turns from add to check. */}
-                <Icon name={keepWorkInPlace ? 'check' : 'add'} className="size-3" />
+                <Icon name={inPlace.keep ? 'check' : 'add'} className="size-3" />
                 {t('sessions.sidebar.sections.alsoInProjectsShort')}
               </button>
             </TooltipTrigger>

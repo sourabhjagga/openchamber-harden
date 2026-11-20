@@ -36,6 +36,7 @@ import type { ReviewTransferDirection } from '@/lib/reviewFlow';
 import { resolveTimelineIsAtEnd } from './lib/scroll/timelineScrollAnchoring';
 import { estimateTimelineRowSize, type RowSizeMetrics } from './lib/turns/rowSizeEstimate';
 import { onNavigationRelease } from './lib/scroll/timelineScrollIntent';
+import { useSelectionRowHold } from './lib/scroll/selectionRowHold';
 import { isReasoningRevealTarget } from './search/reasoningReveal';
 import {
     ANCHOR_HOLD_MAX_FRAMES,
@@ -152,6 +153,9 @@ export interface MessageListHandle {
     // estimate), `aligned` when it already sits there, `missing` when the
     // message is not in the loaded timeline.
     alignViewportAnchor: (anchor: MessageViewportAnchor) => ViewportAnchorAlignment;
+    // Whether the message has a row. A loaded reply has none while the prompt
+    // that opens its turn is still in unloaded history.
+    hasMessageRow: (messageId: string) => boolean;
     holdViewportAnchor: (anchor: { messageId: string; offsetTop: number }) => void;
     isHistoryVirtualized: () => boolean;
     scrollToBottom: () => void;
@@ -700,8 +704,8 @@ const renderTimelineItem = ({ item }: { item: RenderRow }) => <TimelineRow row={
 
 // Where message text wraps: the chat column's content box. Read from a
 // column in the list when there is one, else from the column's own rule
-// (`.chat-message-column` in typography.css: 48rem unless the layout is wide,
-// about 1 to 1.5rem of padding on each side).
+// (`.chat-message-column` in typography.css: 48rem, 64rem at the wider chat
+// width, the whole chat at full, about 1 to 1.5rem of padding on each side).
 const readColumnWidth = (scroller: HTMLElement | null): number => {
     const column = scroller?.querySelector<HTMLElement>('.chat-message-column');
     if (column && column.clientWidth > 0) {
@@ -709,8 +713,9 @@ const readColumnWidth = (scroller: HTMLElement | null): number => {
         return column.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
     }
     const width = scroller?.clientWidth || window.innerWidth;
-    const wide = Boolean(scroller?.closest('.wide-chat-layout'));
-    return Math.min(width, wide ? width : 768) - (width >= 1024 ? 48 : 32);
+    const chatWidth = scroller?.closest('[data-chat-width]')?.getAttribute('data-chat-width');
+    const cap = chatWidth === 'full' ? width : chatWidth === 'wider' ? 1024 : 768;
+    return Math.min(width, cap) - (width >= 1024 ? 48 : 32);
 };
 
 // A touch device: raised tap targets (mobile.css) and native scroll momentum.
@@ -854,6 +859,8 @@ const TimelineList = React.memo(({
     const header = React.useMemo(() => (listHeader ? <>{listHeader}</> : undefined), [listHeader]);
     const footer = React.useMemo(() => (listFooter ? <>{listFooter}</> : undefined), [listFooter]);
 
+    const alwaysRender = useSelectionRowHold(listRef);
+
     return (
         <TimelineRowContext.Provider value={rowContext}>
             <LegendList<RenderRow>
@@ -886,6 +893,8 @@ const TimelineList = React.memo(({
                 // waits until the scroll stops (the scroll documentation, "A
                 // row is placed at an estimate").
                 maintainVisibleContentPosition={{ data: true, size: endPinningReleased, deferSizeWhileScrolling: touchLayout }}
+                // The rows a selection spans stay mounted while it lasts.
+                alwaysRender={alwaysRender}
                 onScroll={handleScroll}
                 onMetricsChange={onListMetricsChange}
                 stickyHeaderIndices={stickyRowIndices}
@@ -1501,6 +1510,8 @@ const MessageList = React.forwardRef<MessageListHandle, MessageListProps>(({
             restoreViewportAnchor: (anchor) => alignViewportAnchor(anchor) !== 'missing',
 
             alignViewportAnchor,
+
+            hasMessageRow: (messageId) => messageIndexMap.has(messageId),
 
             scrollToBottom: () => {
                 const list = listRef.current;

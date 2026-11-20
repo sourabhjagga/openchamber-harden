@@ -33,8 +33,9 @@ Command modules implement user-facing commands and preserve output contracts acr
   - The server control service owns create/worktree/prompt orchestration, official OpenCode reads, Goal Mode, wait semantics, and partial failures.
 
 - `commands-schedule.js`
-  - Implements scheduled task status/list/create/run/delete/enable/disable.
+  - Implements scheduled task status/list/create/update/run/delete/enable/disable.
   - Maps options to control-service inputs and renders results; project resolution, validation, persistence, and execution remain server-owned.
+  - `update` sends only the flags given; `--goal` and `--disabled` go out only when present, as `true`. `--target-session` names an existing session on `create` and `update` only; on any other schedule action, or with a missing or empty inline value, it is a parse error. On `update`, a value flag given without a value (`--prompt`, `--name`, schedule selectors, `--model`, `--agent`, `--variant`, `--timezone`, `--goal-token-budget`) is a parse error rather than a dropped change.
 
 - `commands-models.js`
   - Prints OpenChamber default, favorite, and recent model settings.
@@ -142,6 +143,7 @@ These modules hold reusable, non-presentational logic for commands.
   - On Linux, `startup enable` restarts the unit after rewriting it. `enable --now` leaves a running service alone, so it kept the old unit and release while reporting `service active` (#5793). macOS already reloads the agent with `kickstart -k`.
   - The macOS LaunchAgent leaves `ProcessType` unset so launchd does not force the managed OpenCode child into background-tier scheduling. Re-running `startup enable` replaces an existing plist.
   - The environment snapshot drops the variables a running OpenChamber put into the enabling shell, read from the `OPENCHAMBER_INJECTED_ENV` record (`server/lib/injected-env.js`), so a service enabled from the desktop app's terminal or an agent's shell does not inherit that instance's runtime flags, UI password, or managed OpenCode password (#4604). The user's own exports, `OPENCODE_HOST` included, still carry over. `cli-args.js` applies the same record to the `OPENCHAMBER_UI_PASSWORD` default.
+  - The snapshot never holds `PATH`. The service starts with the platform default, and the server puts the login shell's `PATH` in front at start (`server/lib/opencode/env-runtime.js`), so a toolchain the user installed or removed after `startup enable` shows up in the terminal and agent commands. A saved `PATH` stayed in every child's `PATH` long after its folders were gone, and when the login-shell probe failed it was the whole `PATH`. A user who needs a fixed `PATH` entry for the service sets it as a user variable in Environment settings. The OpenCode check in `../cli.js` runs before the server, so when `opencode` is not on the default `PATH` (a saved `OPENCODE_BINARY` that moved, or none saved) it applies the login shell's environment and looks again.
 
 - `cli-tunnel-profiles.js`
   - Tunnel profile normalization, token resolution/redaction, profile storage, migration, file-permission warnings, and managed-remote pair persistence.
@@ -160,6 +162,16 @@ These modules hold reusable, non-presentational logic for commands.
 - Preserve the mode output contract when moving code (`clack-cli-patterns`, *Mode Contract*).
 - Prefer dependency injection from `cli.js` for cross-command behavior, especially when one command needs another command's implementation.
 - Do not import `cli.js` from modules in this directory. The dependency direction is `cli.js` -> command modules -> helper modules.
+
+## Decisions
+
+### Why `schedule update` omits unset boolean flags instead of sending `false`
+
+`parseArgs` defaults `goal` and `disabled` to `false`, and `schedule.update` treats any boolean as a change: `false` enables the task and turns Goal Mode off. Sending the defaults would do that on every update that did not name them, so `update` sends each only when its flag is present. `create` still sends both, because a new task has no state to keep.
+
+### Why a missing `--target-session` value is an error and not ignored
+
+Most value flags keep their old value when the value is missing. For `--target-session` that would let `create` make a task that opens a new session on every run, with no error. The parser reports it through `removedFlagErrors` rather than throwing, so it fails before any request and as a JSON payload under `--json`, which a throw from `parseArgs` cannot do because `main()` has not yet seen the options.
 
 ## Verification
 

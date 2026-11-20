@@ -81,6 +81,11 @@ in that user's sessions. On the fallback path the same rules are merged into
 - `packages/web/server/lib/opencode/model-discovery.js`: bounded custom-provider `/models` discovery and optional models.dev enrichment. It accepts only http(s), does not follow redirects, filters transport headers, never returns credentials, and treats models.dev failure as unenriched success. Edit requests may name the provider so the host can fall back to a stored credential when the form leaves the key blank — the key from OpenCode's credential store or, failing that, the provider's stored config entry (`settings.apiKey`, else the first `env` variable name that is set in the server environment) — but only while the form's base URL still matches the saved one, so a changed URL never receives the stored credential; an explicitly entered replacement key wins.
 - `packages/web/server/lib/opencode/pwa-manifest-routes.js`: PWA manifest route registration with recent-session shortcut resolution and short-lived caching.
 - `packages/web/server/lib/opencode/project-icon-routes.js`: project icon upload/read/discovery route registration and icon storage orchestration.
+- `packages/web/server/lib/opencode/provider-logo-routes.js`: a provider's uploaded logo, `GET/PUT/DELETE /api/provider/:providerId/logo`. PUT takes `{ dataUrl }` (PNG, JPEG, WebP or SVG, at most 1 MB decoded; anything else is 400) and writes `<data-dir>/provider-logos/provider-<sha1 of id>-<updatedAt>.<ext>`; the profile setting `customProviderLogos` holds only `{ mime, updatedAt }` per provider ID, written through `persistResolvedSettings`, and that pair names the file. The new file is written first, then the setting, then the provider's other files are removed. A settings write that fails, or resolves without the key because `preferences.json` is unreadable, removes the new file and answers 500, and the previous logo stays served: its file is never rewritten. DELETE drops the setting first, then the files, and answers 200 when nothing was stored. Uploads and removals for one provider run one at a time, so two clients saving at once cannot delete the file the other's setting names. GET serves the file the setting names with the same inert-image headers as project icons (`INERT_IMAGE_CSP`, `nosniff`, an immutable cache the client versions with `v=<updatedAt>`); for an SVG, `theme=light|dark` sets its CSS colour so `currentColor` reads on either background. The routes sit under `/api/provider`, which isolated spaces treat as host-only. Enterprise mode does not gate them: the bytes stay on this machine and no provider, key or endpoint is added.
+
+  ### Why the logo is kept by provider ID and not removed with the provider
+
+  The logo is keyed by provider ID like a chosen icon (`customProviderIcons`), and OpenChamber has no "remove provider" flow: a provider leaves when someone edits the OpenCode config, which OpenChamber does not watch for this. Deleting logos from a config diff would need a complete, authoritative provider list per directory; keeping them costs one small file, and a provider added again under the same ID gets its logo back. The logo goes when the user removes it, on the provider's page or with Remove in the custom-provider form before Save; an untouched form keeps it.
 - `packages/web/server/lib/opencode/skill-routes.js`: route registration for skill config CRUD, supporting files, and skills catalog scan/install flows.
 - `packages/web/server/lib/opencode/settings-runtime.js`: Settings persistence runtime (disk IO, migrations, normalization, project validation, and persisted update serialization). With no project stored, the legacy migration turns a stored `lastDirectory` into the first project, except a folder inside the chats roots (`chatRoots` dep, compared lexically and by realpath): with no project open the UI's last directory is usually a chat's, and a chat belongs to no project.
 - `packages/web/server/lib/opencode/settings-helpers.js`: Settings payload sanitization/format helpers runtime for response shaping and persisted merge prep. `lastDirectory: ''` is kept as written: the UI sends it when the last project is removed, and every reader (the warm-up, the legacy last-directory-to-project migration, request directory resolution) treats it as unset.
@@ -110,6 +115,11 @@ in that user's sessions. On the fallback path the same rules are merged into
   `theme-catalog.js` owns POST catalog search/package routes under
   `/api/config/themes/catalog/`. It fetches only Open VSX and its Eclipse CDN over
   HTTPS, validates redirects and checksums, and verifies packaged identity.
+  An empty search query returns the most downloaded color themes; the catalog
+  opens on them. The Themes category also holds icon themes, VS Code's built-ins
+  and tools that ship a theme on the side, so the popular list keeps entries
+  outside the `vscode` namespace whose name has no "icon" and whose name or
+  description speaks of a theme or colors.
   `theme-archive.js` reads selected JSON entries in memory with bounded decompression.
   JSON includes and token references stay inside the package. Each failed variant
   is reported separately so valid siblings remain available. No extension code runs.
@@ -236,7 +246,7 @@ Hard rules, verified against v2.0.8 (the completion stamp against v2.0.16)
 - `listProviderConfigs(workingDirectory)`: Every provider a config layer defines, projected into the canonical v2 `ProviderEntity` shape, with `legacy` marking entries still stored under the v1 `provider` key.
 - `upsertProviderConfig(providerId, config, workingDirectory, scope?, options?)`: Validates and writes a custom provider block into the user/project/custom config layer. The payload may use the v2 spelling (`package`, `settings.baseURL`, `headers`) or the v1 spelling (`npm`, `options.baseURL`); what lands on disk is always a v2 `providers` entry with `package: "aisdk:<npm>"` and `settings.baseURL`. The adapter may be OpenAI Chat Completions, OpenAI Responses, or Anthropic Messages. Existing provider, option, and retained-model fields not managed by the form are preserved, as far as the v2 projection (`toProviderEntity`) carries them; it carries a model's `type`, so a model marked `image` by hand stays an image model after a form save. A model `type` in the payload (the form's image generation checkbox sends `image` or `chat`, and a loaded type such as `decision` as it was) is written without checking its value: OpenCode's set of types is open-ended. Omitted models, headers, and env credentials remain explicit removals. A model's `variants` (reasoning levels) are replaced when the payload carries the array, cleared when it carries an empty one, and kept when the key is absent. Updating an entry still stored under the legacy `provider` key rewrites it under `providers` in the same file, dropping the fields v2 accepts but ignores; unrelated legacy siblings are untouched. Does not store API keys. Requires `config.env` or `options.hasStoredAuth`. OpenCode 2 keeps credentials in its own store, so `PUT /api/provider` sets `hasStoredAuth` from the request's `hasCredential` (the form is about to store a key, or the edited provider keeps its credential) as well as a credential OpenCode already stores for the provider. The key itself goes through `integration.connect.key` after this write, because OpenCode registers a custom provider's key method only once the provider is in config. Edit flows must pass the provider's effective existing layer (`custom` > `project` > `user`) so updates do not create a global user override.
 - `validateCustomProviderConfig(providerId, config, options?)`: Structural validation for custom provider payloads (id format, adapter allowlist `@ai-sdk/openai-compatible`/`@ai-sdk/openai`/`@ai-sdk/anthropic`, http(s) base URL, models, credentials via `env` or `hasStoredAuth`). Accepts both spellings and returns the normalized v2 value.
-- `mergeCustomProviderConfig(existingValue, normalizedConfig)`: The merge `upsertProviderConfig` writes: the stored entry, read through the v2 projection, under the validated form payload. Unmanaged provider and model fields stay; an empty `variants` list removes the levels; omitted headers and env are removals. The VS Code extension's `upsertProviderConfig` calls this function and `validateCustomProviderConfig` directly, so a change here changes what both runtimes write; run the extension's `opencodeConfig.providers.test.ts` too.
+- `mergeCustomProviderConfig(existingValue, normalizedConfig)`: The merge `upsertProviderConfig` writes: the stored entry, read through the v2 projection, under the validated form payload. Unmanaged provider and model fields stay; an empty `variants` list removes the levels; omitted headers and env are removals. `settings.tls` is the client certificate a gateway with mutual TLS asks for (OpenCode 2.3.0+): `cert` and `key` both or neither, usually `{file:path}` references that are stored, never read, here, and an optional `passphrase` kept byte for byte. `tls: null` removes it and an absent `tls` keeps it, because the edit form leaves it out while the stored entry is unknown (its read pending or failed), and a save then must not drop a certificate written by hand. The VS Code extension's `upsertProviderConfig` calls this function and `validateCustomProviderConfig` directly, so a change here changes what both runtimes write; run the extension's `opencodeConfig.providers.test.ts` too.
 - `removeProviderConfig(providerId, workingDirectory, scope?)`: Removes a provider block from the selected config layer.
 
 ## Public exports (shared.js)
@@ -254,7 +264,7 @@ Hard rules, verified against v2.0.8 (the completion stamp against v2.0.16)
 - `getProjectConfigCandidates(workingDirectory)`, `getLayerError(layers, filePath)`: The project folder's own config files, and the parse error `readConfigLayers` recorded for one file.
 - `getAncestors(startDir, stopDir)`, `findWorktreeRoot(startDir)`: Git worktree helpers.
 - `isPromptFileReference(value)`, `resolvePromptFilePath(reference)`, `writePromptFile(filePath, content)`: Prompt file reference handling.
-- `walkSkillMdFiles(rootDir)`: Async. Recursively finds all SKILL.md files at any depth, following links and skipping a link back to its own ancestor. Sibling directories are read in parallel, at most 8 file-system calls at once, and the result keeps depth-first readdir order: discovery lets a later file win a duplicate name, so the order is part of the contract.
+- `walkSkillMdFiles(rootDir)`: Async. Recursively finds SKILL.md files, following links and skipping a link back to its own ancestor. It applies these of OpenCode's discovery rules: hidden directories and `node_modules` are skipped, and a directory holding its own SKILL.md (a file, or a link that resolves to one) is one skill that is not searched further, so a dependency's bundled skills never list as ones the user installed (#6708). A dangling SKILL.md link is skipped and does not stop the search. Two OpenCode rules are not applied here: this walk has no six-directory depth limit, and it does not discover root-level `*.md` skills. Sibling directories are read in parallel, at most 8 file-system calls at once, and the result keeps depth-first readdir order: discovery lets a later file win a duplicate name, so the order is part of the contract.
 - `pathExists(target)`: Async existence probe shared by the skill walk and source lookup. Returns false when access fails.
 - `addSkillFromMdFile(skillsMap, skillMdPath, parsed, scope, source)`: Indexes an already parsed skill file; `parsed` null (unreadable file) adds nothing.
 - `resolveSkillSearchDirectories(workingDirectory)`: Returns skill search path order (config, project, home, custom).
@@ -273,7 +283,7 @@ Replacing an entire array discards comments inside untouched entries, so equal-l
   - `GET /api/opencode/upgrade-status` (returns version availability plus the authoritative `upgrade.supported`, `upgrade.manager`, and `upgrade.reason` capability)
   - `GET /api/provider/:providerId/source`
   - `PUT /api/provider` (create/update custom OpenAI-compatible provider config in OpenCode user/project/custom layers via `scope`; secrets stay in auth via the OpenCode auth API)
-  - `POST /api/provider/discover-models` (user-initiated custom-provider model discovery; fetches the configured `/models` path server-side and optionally enriches exact model matches from the shared models.dev cache)
+  - `POST /api/provider/discover-models` (user-initiated custom-provider model discovery; fetches the configured `/models` path server-side and optionally enriches exact model matches from the shared models.dev cache). A form with a client certificate (`tls`) presents it on an `https` endpoint as OpenCode would: `{file:...}` and `{env:...}` are resolved here, the request goes through `node:https` on a connection of its own (the global fetch takes no certificate in Node, and the shared agent pools sockets without the passphrase in its key), and redirects are not followed.
   - `DELETE /api/provider/:providerId/auth`
   - Enterprise mode (`../enterprise-mode.js`): `PUT /api/provider` and the OpenCode writes that would otherwise pass the generic proxy — every `POST` under `/api/integration/:id/connect` (key, OAuth start and complete, command), `POST /api/credential` (stores a key, OpenCode 2.0.20) and `POST /api/experimental/integration/wellknown`, matched by `isProviderConnectRequest` — answer 403 `enterprise_mode`. The matcher mirrors how OpenCode 2.0.18 to 2.0.20 route a path (any letter case, doubled slashes, `\` for `/`, percent escapes, anything after `;`), refuses a dot segment or a bad escape, and needs rechecking when OpenCode changes its router. Signing in to a remote MCP server (`POST /api/integration/mcp_<16 hex>/connect/oauth` and its `/:attempt/complete`) passes: it reaches a tool server from the OpenCode config, not a model provider. The VS Code extension host refuses the same requests with the same matcher. Removing, activating or renaming an existing credential still reaches OpenCode. This closes the way in through the app; OpenCode's `provider.use` policy is the real lock.
 - Owns lazy auth library loading for provider auth checks/removal.
@@ -364,7 +374,7 @@ Installer output is discarded, not forwarded to clients or logs.
 - `createSessionRuntime({ writeSseEvent, getNotificationClients, broadcastEvent?, readTurnStart?, buildOpenCodeUrl?, getOpenCodeAuthHeaders?, fetchImpl? })`: creates runtime-owned state machine and APIs for session status. `readTurnStart(sessionId)` resolves the running turn's start from history (`turn-start.js`), or null. OpenCode URL and auth dependencies enable restart recovery.
 - Returned API:
   - `processOpenCodeSsePayload(payload, { spaceId? }?)`: the watcher supplies the event's space identity so host restart recovery never posts a space's continuation to the host OpenCode.
-  - `adoptRunningSessions(sessionIds, readAt)`: sessions OpenCode lists as running when the event stream (re)connects, as read from `readAt` on. Marks them busy and reads back the starts of turns this server did not see begin. A session whose status changed after `readAt` is skipped: its turn may have ended while the list was read.
+  - `adoptRunningSessions(sessionIds, readAt)`: sessions OpenCode lists as running when the event stream (re)connects, as read from `readAt` on. Marks them busy and reads back the starts of turns this server did not see begin. A host session held busy that the list leaves out lost its idle in the stream gap and settles idle, announced like any status change, and its pending permission is dropped as the idle event would; clients seed rows from this map, so without it a missed idle showed the session running on every client started in the seed's 30-minute window. A session that reported any status after `readAt`, a repeat the 5 s dedupe swallows included (`lastEventAt`), is skipped either way, and sessions of isolated spaces are never settled, because the host's list does not name them.
   - `getRunningTurnStart(sessionId)`: the running turn's start, or null.
   - `getSessionActivitySnapshot()`
   - `getActiveSessionCount()`
@@ -531,7 +541,7 @@ ConPTY or Console Window Host behavior.
 - Persistent per-session permission modes are stored under `permissionAutoAccept`, and the mode for new sessions under `permissionDefaultMode`; execution ownership lives in `lib/permission-auto-accept/`.
 - Queued follow-up messages live in `<data-dir>/message-queue.json`, not in settings; execution ownership lives in `lib/message-queue/`.
 - Shared sidebar preferences are stored as validated top-level fields: `sidebarProjectDisplayMode`, `sidebarSessionGroupingMode`, `sidebarListSessionGrouping`, `sidebarProjectSortOrder`, `sidebarShowChatsSection`, `sidebarShowWorkSection`, `sidebarShowPinnedSection`, `sidebarDetailedZoneRows`, and `sidebarWorktreeNameByBranch`. Device-local picker selection and sticky-header state do not enter either settings file.
-- Two files (`settings-files.js`): `settings.json` holds instance facts and any legacy or unknown keys; `preferences.json` beside it holds every key the generated registry snapshot (`settings-registry.json`) marks `profile`, as `{ version: 1, fields: { key: { value, updatedAt, surfaces? } } }`. Keys the snapshot marks `perSurface` are stored per surface kind: `GET`/`PUT /api/config/settings` read the client's kind from the `surface` query parameter (`settingsSurfaceOf`; the legacy `x-openchamber-surface` header is still honoured, but a header forces a CORS preflight that cross-origin shells and older instances refuse, so clients must not send one) (`web`, `desktop`, `vscode`, `mobile`; anything else means base), `persistSettings(changes, { surface })` writes a changed per-surface key under `surfaces[surface]` and never touches its base, and `readSettingsFromDisk({ surface })` resolves that kind's value first, the base otherwise. Callers without a surface (migrations, the seed, server-side feature writers) read and write the base. `readSettingsFromDisk()` returns the merged document and seeds `preferences.json` once from an existing `settings.json` (which it leaves intact). An existing `preferences.json` that fails to parse is a failure, not an empty profile: it is never seeded or overwritten, the merged read serves the instance part, and `persistSettings` drops profile keys with a warning until the file is fixed or removed. `writeSettingsToDisk(document)` splits by scope and writes `settings.json` as the instance part plus a copy of the profile's base values (`legacySettingsDocumentOf`): a build from before the split reads only that file, so a rollback keeps the user's preferences, while current builds ignore the copy because `preferences.json` wins in the merge; device keys are dropped from writes. Modules that read one profile key off the disk on a hot path use `readMergedSettingsSync`.
+- Two files (`settings-files.js`): `settings.json` holds instance facts and any legacy or unknown keys; `preferences.json` beside it holds every key the generated registry snapshot (`settings-registry.json`) marks `profile`, as `{ version: 1, fields: { key: { value, updatedAt, surfaces? } } }`. Keys the snapshot marks `perSurface` are stored per surface kind: `GET`/`PUT /api/config/settings` read the client's kind from the `surface` query parameter (`settingsSurfaceOf`; the legacy `x-openchamber-surface` header is still honoured, but a header forces a CORS preflight that cross-origin shells and older instances refuse, so clients must not send one) (`web`, `desktop`, `vscode`, `mobile`; anything else means base), `persistSettings(changes, { surface })` writes a changed per-surface key under `surfaces[surface]` and never touches its base, and `readSettingsFromDisk({ surface })` resolves that kind's value first, the base otherwise. A write only clears a per-surface key its own view held: a key set from one kind alone has no base, so another kind's write or a base write never sees it and must keep it (`buildPreferencesFields`); dropping it there once wiped a fresh setting on every unrelated save. Callers without a surface (migrations, the seed, server-side feature writers) read and write the base. `readSettingsFromDisk()` returns the merged document and seeds `preferences.json` once from an existing `settings.json` (which it leaves intact). An existing `preferences.json` that fails to parse is a failure, not an empty profile: it is never seeded or overwritten, the merged read serves the instance part, and `persistSettings` drops profile keys with a warning until the file is fixed or removed. `writeSettingsToDisk(document)` splits by scope and writes `settings.json` as the instance part plus a copy of the profile's base values (`legacySettingsDocumentOf`): a build from before the split reads only that file, so a rollback keeps the user's preferences, while current builds ignore the copy because `preferences.json` wins in the merge; device keys are dropped from writes. Modules that read one profile key off the disk on a hot path use `readMergedSettingsSync`.
 
 ## Public exports (settings-files.js)
 - `parsePreferencesDocument(raw)`, `serializePreferencesDocument(fields)`, `flattenPreferences(fields)`, `buildPreferencesFields(previousFields, document, now)`, `instancePartOf(document)`, `seedPreferencesFrom(document, now)`, `readMergedSettingsSync({ fs, path, settingsFilePath })`, `getSettingsScope(key)`, `isProfileSettingsKey(key)`, `isDeviceSettingsKey(key)`, `preferencesFilePathFor(settingsFilePath, path)`.
@@ -563,7 +573,7 @@ ConPTY or Console Window Host behavior.
   - `sanitizeSkillCatalogs(input)`
   - `sanitizeProjects(input)`
 
-Persistence path normalization (`normalizePathForPersistence` / `normalizeSettingsPaths` / `sanitizeProjects`, reached via the `readSettingsFromDiskMigrated` migration and `persistSettings`) resolves symlinks with `realpathSync` and, on case-insensitive filesystems (`win32`, `darwin`), also recovers the on-disk casing of each path component via `readdirSync` (exact-name match preferred so case-sensitive volumes are never rewritten). `realpathSync` alone does not report on-disk casing on these volumes, so without the readdir step a project stored with the wrong case would never match the real-case `directory` opencode reports for its sessions (issue #1913). A corrected path is flagged `changed` and written back to `settings.json`. A path `realpathSync` cannot resolve (missing, no permission) is kept exactly as stored, so case recovery can never swap in a different existing sibling. On macOS only `/` separates components; a backslash is a legal name character.
+Persistence path normalization (`normalizePathForPersistence` / `normalizeSettingsPaths` / `sanitizeProjects`, reached via the `readSettingsFromDiskMigrated` migration and `persistSettings`) resolves symlinks with `realpathSync` and, on case-insensitive filesystems (`win32`, `darwin`), also recovers the on-disk casing of each path component via `readdirSync` (exact-name match preferred so case-sensitive volumes are never rewritten). `realpathSync` alone does not report on-disk casing on these volumes, so without the readdir step a project stored with the wrong case would never match the real-case `directory` opencode reports for its sessions (issue #1913). A corrected path is flagged `changed` and written back to `settings.json`. A path `realpathSync` cannot resolve (missing, no permission) is kept exactly as stored, so case recovery can never swap in a different existing sibling. On macOS only `/` separates components; a backslash is a legal name character. Every settings read runs `sanitizeProjects` three times, so one pass over the project list reads each directory at most once: projects share their ancestors, and reading `/`, `/Users` and the rest again per project made a 71-project settings read about 1,280 synchronous readdirs (#6084). The listings live only for that one synchronous pass, so a later read always sees the disk as it is; a longer-lived cache would need invalidation on a case rename and was not needed once a pass reads each folder once.
 
 ## Public exports (theme-runtime.js)
 - `createThemeRuntime(dependencies)`: creates custom theme runtime for on-disk theme discovery and JSON normalization/validation.
@@ -661,8 +671,9 @@ OpenCode's MCP client listens on `127.0.0.1` and, without configuration, registe
 a loopback redirect. That is correct when the browser runs on the OpenCode
 machine, and wrong when OpenChamber is opened from another one: the provider
 sends the browser to the viewer's own `127.0.0.1`, and nothing reaches the
-listener. A browser with a direct connection to OpenChamber, with an OpenCode
-on the same machine as OpenChamber, finishes on its own. Everywhere else the
+listener. A browser on loopback or with a direct https connection to
+OpenChamber, with an OpenCode on the same machine as OpenChamber, finishes on
+its own. Everywhere else the
 user pastes the address the browser landed on into the waiting sign-in, which
 OpenCode accepts since 2.2.6 (an attempt marked `paste`).
 
@@ -679,13 +690,21 @@ name from OpenCode's integration and then takes one of these paths:
 | Relay client, nothing configured | Started on OpenCode's own redirect, unbound, for the user to paste. |
 | Either of the two above, OpenCode without `paste` | The attempt is cancelled and the start answers 400 naming the problem, before consent. |
 | Browser on loopback, nothing generated | Forwarded untouched, so CIMD and the ephemeral listener stay. This includes an SSH-forwarded address. |
-| Browser on another machine | `oauth.redirect_uri` becomes `<origin>/api/mcp/oauth/<name>/callback` and `oauth.callback_port` a free loopback port. The attempt is then bound. |
+| Browser on another machine over plain http, nothing generated | Started on OpenCode's own redirect, unbound and with the config unchanged, for the user to paste. OpenCode without `paste` gets the generated redirect of the next row instead, which works with a provider that accepts http. |
+| Browser on another machine over https | `oauth.redirect_uri` becomes `<origin>/api/mcp/oauth/<name>/callback` and `oauth.callback_port` a free loopback port. The attempt is then bound. |
 | Generated redirect already in place, any browser | The attempt is bound, so a loopback or relay browser follows the address generated last. |
 
 Same-machine is decided from the address OpenChamber connects to: loopback or
 one of this machine's interface addresses. A hostname that resolves here counts
 as another machine, because the mistake then is a clear error and the other way
 round is a callback sent to the wrong listener.
+
+A plain-http origin on another machine gets no generated redirect. The MCP
+authorization spec allows http redirects only on loopback, and Linear rejects
+`http://192.168.x.x/...` at client registration, before consent. OpenCode's
+own redirect is loopback, which those providers accept, so the browser lands
+on a page that does not open and the user pastes its address. A redirect
+generated earlier for that entry stays bound, as for the relay.
 
 The relay is detected by `x-openchamber-relay-connection`, which the dispatcher
 sets on every request it forwards. Its requests arrive with a loopback `host`,
@@ -1032,6 +1051,12 @@ removes a field, an omitted field is left alone. `permission` (a v1 map) and
 `GET /api/config/commands/:name` — same `sources` envelope as agents.
 `GET /api/config/commands/:name/config` — `{ source, scope, path, legacy, config }`
 with a `CommandEntity`.
+`GET /api/config/command-configs?name=a&name=b` — `{ commands: [{ name, entry }] }`,
+each `entry` what the route above answers for that name. The client lists a
+folder's commands with it in one request: read one by one they cost a round
+trip each, which over the relay was a second for a dozen. Names pass the same
+path check as `:name`; one unsafe name refuses the request, and an entry that
+cannot be read is left out.
 `POST` / `PATCH` / `DELETE /api/config/commands/:name` mirror the agent routes;
 `subtask` is accepted as the v1 name for `subagent`.
 
@@ -1200,8 +1225,29 @@ within a ten-minute overall deadline.
       channel through `checkForUpdates`. The desktop app keeps its own
       `desktopUpdateChannel`. The Android app ships only as Canary until it
       has a store release: every Android build, an APK from an earlier release
-      included, is offered the newest APK of the `canary` GitHub pre-release. Other app types stay on releases.
+      included, is offered the newest APK of the `canary` GitHub pre-release, downloaded from the R2 mirror (`downloads.openchamber.dev/desktop/canary/`) once canary.yml put it there. Other app types stay on releases.
+  - `GET /api/openchamber/release-notes?version=&since=`
+    - Settings → About shows these. The answer is the releases of `version` as data, `{ releases: [{ version, date, title, intro, groups: [{ key, bullets }] }] }`,
+      read from the website API's `/v1/changelog/full`, which keeps the last
+      good copy through a GitHub outage, else from `changelog/index.json` on
+      `main`; a Canary version reads the Canary nights
+      (`lib/changelog/update-notes.js`). With an older `since`
+      it lists what an update brings, `(since, version]`; otherwise `version`
+      alone. An empty list means the changelog has no notes for it; 502 means
+      no source could be read, so the page never shows an outage as "no notes".
   - `POST /api/openchamber/update-install`
+    - A release that needs a newer OpenCode than this server runs answers 409
+      `OPENCODE_TOO_OLD` before any command runs, and the update check marks
+      it `installBlocked: 'opencode-version'` with `requiredOpenCodeVersion`
+      and `openCodeVersion`, ahead of the other blocks; clients keep the Update
+      button disabled with the reason under it. The new build would refuse to
+      start against that OpenCode, and an external one cannot be updated from
+      the app. The requirement is `engines.opencode` (`>=2.2.4`) in the
+      release's published `package.json`, which repeats
+      `MINIMUM_OPENCODE_VERSION` (a test keeps the two equal). A release
+      without the field, a registry that cannot be read, or an OpenCode
+      version that cannot be read blocks nothing. Desktop-managed hosts update
+      through `electron-updater`, whose feed carries no requirement.
     - A copy no package manager installed answers 409 before any command
       runs: a global install would add a second copy and leave the running
       one as it is. Detection reports such a copy as `unmanaged-install` when
@@ -1240,6 +1286,15 @@ within a ten-minute overall deadline.
       in use" and the update ended with no server.
   - `GET /api/openchamber/models-metadata`
   - `GET /api/zen/models`
+
+### Why the OpenCode requirement rides in `package.json` and not in the update check's answer
+
+The running build cannot know what a later release needs, so the release has to
+say it. The npm server installs that release from the registry, so
+`engines.opencode` in the published `package.json` reaches the check through
+`bun publish`, with no change to the website API, the R2 mirror or the release
+workflows. npm (even with `engine-strict`) and bun install a package whose
+`engines` names OpenCode.
 
 ## Public exports (pwa-manifest-routes.js)
 - `registerPwaManifestRoute(app, dependencies)`: registers PWA manifest endpoint with dynamic app-name resolution and recent-session shortcuts:

@@ -4,6 +4,7 @@
  */
 import { z } from 'zod';
 import {
+  JEV_LINGER_MS,
   JEV_TIMEOUT_MS,
   ROUTING_INSTRUCTIONS,
   SAFETY_CRITERIA,
@@ -53,6 +54,30 @@ export const buildProbeRequest = () => ({
   },
 });
 
+/**
+ * A System One request in the shape of Google's Decisions API
+ * (https://aistudio.google.com/docs/decisions-api, "Request and response
+ * reference"). `state` becomes `input` as JSON text, which is how Google says
+ * to pass structured data ("Structured data"): the model still reads the same
+ * fields under the same key paths the instructions name (`request`,
+ * `history`, `answer`). A yes/no question's `true`/`false` criteria become
+ * `true_description`/`false_description`; choice criteria keep their shape.
+ * Instructions given as a list become one string, a line per item, as
+ * `ROUTING_INSTRUCTIONS` already is: Google takes a string or text blocks,
+ * not a list of strings. The answers come back in System One's shape.
+ */
+export const toGeminiDecisionsRequest = ({ state, questions }) => ({
+  input: JSON.stringify(state),
+  questions: Object.fromEntries(Object.entries(questions).map(([id, question]) => {
+    const mapped = { ...question };
+    if (Array.isArray(question.instructions)) mapped.instructions = question.instructions.join('\n');
+    if (question.type === 'noul' && question.criteria) {
+      mapped.criteria = { true_description: question.criteria.true, false_description: question.criteria.false };
+    }
+    return [id, mapped];
+  })),
+});
+
 const choiceAnswerSchema = z.object({ choice: z.string(), confidence: z.number() });
 
 /** True when the probe came back as a choice answer, whichever choice it made. */
@@ -85,22 +110,41 @@ export const decidePermission = (answers, { threshold }) => {
 
 const responseSchema = z.object({ answers: z.record(z.string(), z.unknown()) });
 
-export const createJevClient = ({ fetchImpl = fetch, timeoutMs = JEV_TIMEOUT_MS } = {}) => ({
+// Endpoints with a timed-out request still running; shared by every client in
+// the process so routing, session work and goals together keep at most one.
+const lingeringEndpoints = new Set();
+
+export const createJevClient = ({
+  fetchImpl = fetch,
+  timeoutMs = JEV_TIMEOUT_MS,
+  lingerMs = JEV_LINGER_MS,
+  lingering = lingeringEndpoints,
+} = {}) => ({
   /**
    * `endpoint` comes from `classifierEndpoint`. Resolves to the parsed answers;
-   * throws with `status` on an HTTP error and `code: 'timeout'` on abort.
+   * throws with `status` on an HTTP error and `code: 'timeout'` after
+   * `timeoutMs`. The first request to time out on an endpoint is not aborted:
+   * it runs on, up to `lingerMs`, so a local model can finish loading, and its
+   * answer is dropped. Any other timed-out request is aborted.
    */
   ask: async (request, endpoint) => {
     const abort = new AbortController();
-    const timer = setTimeout(() => abort.abort(), timeoutMs);
     const started = Date.now();
-    try {
-      const response = await fetchImpl(endpoint.url, {
-        method: 'POST',
-        headers: { ...endpoint.headers, 'content-type': 'application/json' },
-        body: JSON.stringify({ ...request, model: endpoint.model }),
-        signal: abort.signal,
-      });
+    const call = (async () => {
+      let response;
+      try {
+        response = await fetchImpl(endpoint.url, {
+          method: 'POST',
+          headers: { ...endpoint.headers, 'content-type': 'application/json' },
+          body: JSON.stringify({ ...(endpoint.format === 'gemini' ? toGeminiDecisionsRequest(request) : request), model: endpoint.model }),
+          signal: abort.signal,
+        });
+      } catch (error) {
+        // Node names a bad header value, the key included, in the error, which
+        // then reaches Settings, broadcasts and logs.
+        if (endpoint.format === 'gemini') throw new Error('Could not reach Google Gemini');
+        throw error;
+      }
       const text = await response.text();
       if (!response.ok) {
         throw Object.assign(new Error(`Jev responded ${response.status}`), { status: response.status });
@@ -108,11 +152,28 @@ export const createJevClient = ({ fetchImpl = fetch, timeoutMs = JEV_TIMEOUT_MS 
       const body = responseSchema.safeParse(JSON.parse(text));
       if (!body.success) throw new Error('Jev response has no answers');
       return { answers: body.data.answers, ms: Date.now() - started };
-    } catch (error) {
-      if (error?.name === 'AbortError') throw Object.assign(new Error(`Jev timed out after ${timeoutMs}ms`), { code: 'timeout' });
-      throw error;
+    })();
+    let timer;
+    const timedOut = new Promise((resolve) => { timer = setTimeout(resolve, timeoutMs); });
+    try {
+      const result = await Promise.race([call, timedOut.then(() => null)]);
+      if (result) return result;
     } finally {
       clearTimeout(timer);
     }
+    call.catch(() => {});
+    const key = `${endpoint.url}\n${endpoint.model}`;
+    if (lingering.has(key)) {
+      abort.abort();
+    } else {
+      lingering.add(key);
+      const cap = setTimeout(() => abort.abort(), lingerMs - timeoutMs);
+      cap.unref?.();
+      call.finally(() => {
+        clearTimeout(cap);
+        lingering.delete(key);
+      }).catch(() => {});
+    }
+    throw Object.assign(new Error(`Jev timed out after ${timeoutMs}ms`), { code: 'timeout' });
   },
 });

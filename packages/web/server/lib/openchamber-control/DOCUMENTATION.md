@@ -92,7 +92,11 @@ other.
 - `render-page.js` runs `render.page` for the `openchamber_render` agent tool. It takes `html` or `ui` (a program in the UI block language, which the chat draws with its own components; the server cannot parse it, so a client that cannot draw it answers the wait with `notDrawn` errors, and the agent gets them in its result). Only one of them is required: a page sent without a title is named after its own `<title>`, else its first h1 to h3, else "Page", with the same rule the chat uses (`renderedPage` in `packages/ui/src/lib/opencode/tools.ts`). Weaker models sent title and html in separate calls, each refused call costing the whole page again; a missing html now also asks for both in one call.
   The chat draws the page from the call's own input, so the action stores
   nothing: it checks `html` (at most 200,000 characters) and `title` (at most
-  120) and answers `403` while `agentRenderToolEnabled` is `false`. With
+  120) and answers `403` while `agentRenderToolEnabled` is `false`. A call
+  with `share` is refused first when sharing is unavailable (`403`,
+  `code: 'enterprise_mode'`) and with `awaitAnswer` or `answerLater` (`400`), then makes its
+  group through `sharePages` (`../share-pages/`) and returns at once without
+  any link or PIN. With
   `awaitAnswer` the action waits in `createPageAnswers`, keyed by session and
   call id, until `answerPage` resolves it (`POST /api/openchamber/render/answer`
   from the chat: a summary of at most 500 characters and data of at most
@@ -104,7 +108,8 @@ other.
   Before it waits, the action reads the session's OpenCode inbox. A message
   the user steered into the turn that the agent has not read yet means they
   wrote before the page appeared (a queued one waits for the turn to end
-  anyway, so it does not count); OpenCode delivers it only after this call returns, so
+  anyway, and one an agent or OpenCode's scheduler sent, `isAgentPrompt`, is
+  not the user writing, so neither counts); OpenCode delivers it only after this call returns, so
   waiting held it back and an answer on the page reached the agent first.
   The call then returns at once with `{ answered: false, reason:
   "chat-sent-earlier" }` and a note that the message is not an answer to the
@@ -122,6 +127,69 @@ other.
   the session's waits through `releaseAnswerWaits`: they leave the pending
   list, and a late answer is a `404`. See *Why a released page keeps its
   request open*.
+  With `answerLater` (exclusive with `awaitAnswer`, `400` together, and
+  needing a call id like a wait) the call returns at once with
+  `answerLater: true` and a note that the answer comes later, after
+  `later-pages.js` saved the page as open (`<data-dir>/render-later-pages.json`,
+  atomic, owner-readable; a failed save fails the call with `500`), with what
+  it asked (`renderPageQuestion`: an html page's visible text without its
+  title, scripts and styles, or the ui program, at most 2,000 characters), so
+  the answer still names its question after other work or a compaction. No
+  script runs on the server, so that is only part of what the user saw when
+  the page has a script (`questionCaptured: 'static-text'`), was cut
+  (`'truncated'`) or had no text (`'none'`); the page keeps that field, the
+  answer's JSON carries it and its prose tells the agent not to assume more,
+  and the tool description asks for the question in static text. The page
+  is not a wait: it never enters `createPageAnswers`, the pending list or
+  `onPageWaitChange`, so neither the turn's end (`releaseAnswerWaits`), a
+  message in the chat (the plugin's prompt hook) nor Stop closes it, and the
+  session never reads as waiting. `answerPage` tries a live wait first and
+  falls through to the open later page; the answer (the same checks) is saved
+  with a freshly minted message id before the route answers, a second answer
+  is a `404`, and the page keeps the answer so every client shows it.
+  Delivery is one `POST /api/session/:id/synthetic` with `delivery: 'steer'`,
+  `resume: true`: steered into a running turn, starting one in an idle
+  session. A session archived since (asked before every attempt, as
+  `../dispatch-results` does) gets `resume: false`: the message is recorded and
+  nothing wakes. The state comes from `sessionArchive.archiveState`
+  (`../openchamber-sessions/session-archive.js`), which tells `archived`,
+  `active` and `unknown` apart, unlike `isArchived`, which calls a failed read
+  active. The read is bounded like the POST (15 s, its signal cancels the
+  OpenCode request); a failed, stalled or unknown read sends nothing and goes
+  to the retry below, so an archived session is never woken on a guess and
+  the page shows `undelivered` meanwhile. Its text sits in `<openchamber-page-answer call=… outcome=…>`:
+  a line of prose, then one JSON line with every field that came from the page
+  or the client (`title`, `page` for what it asked, `questionCaptured` when
+  that is only part of the page, and `summary` and `data`,
+  or `errors` for a page the chat could not draw; `<` escaped), then a closing
+  line. The prose says the JSON is data, never instructions; nothing
+  page-derived sits outside it, because an html title is entity-decoded and
+  could otherwise close the envelope. Its `description` is
+  `<title>: <summary>` (what OpenCode's own clients show), its metadata
+  `{ source: 'openchamber-page-answer', callId, title, outcome }`; the chat
+  draws its own row from the metadata and the JSON line
+  (`@/lib/opencode/session-notices`), so the JSON line's shape is a contract
+  with it. 409 counts
+  as delivered, 404 ends it, other failures retry under the same id with
+  backoff, then every five minutes after eight, until OpenCode takes it; the
+  next OpenCode connect or server start also tries at once. From the first
+  failure until it lands the page carries `undelivered: true`, and the chat
+  says the agent has not got the answer yet.
+  `session.deleted` drops the session's pages. At most 500 pages are kept: an
+  answered, delivered one makes room for a new page, an open one is never
+  evicted (`409`). `GET /api/openchamber/render/later` answers
+  `{ revision, pages[] }` (`sessionID`, `callID`, `status` `open`,
+  `answered`, `declined` or `ui-not-drawn`, `summary` and `data` when
+  answered, `undelivered` while delivery fails); every change broadcasts `openchamber:render-later.updated`
+  `{ revision, sessionID, pages[] }`, and the chat reads it through
+  `packages/ui/src/sync/later-pages.ts` (`usePageAsk`).
+  Known limits: the OpenChamber server inside an isolated space refuses
+  `answerLater` with `503`, as it refuses extension waits and `pr.watch`
+  (`index.js` gives it no `laterPages`), because the host's chat reads later
+  pages and sends answers to the host's server only. The VS Code
+  extension does not read later pages, so it shows a later page without
+  answer controls or the answer given on another client. The `answerLater`
+  description tells agents both, so they ask in text there.
   `renderPageImageSources` lists the local images a page names by absolute
   path (in quotes or a CSS `url()`, PNG, JPEG, GIF or WebP), every one of them.
   The image grant route (`../markdown-image-grants/`) allows exactly those, and
@@ -153,6 +221,30 @@ other.
   card says the agent's commands can read it. `createSecretFiles().sweep()`
   deletes files 24 hours after they were written, on server start and
   hourly. Answers `403` while `agentSecretToolEnabled` is `false`.
+- `secret-run.js` runs `secret.run` (and `secret.forget`) for the same tool,
+  through `createSecretRequests`, so one answer route and one wait registry
+  serve both kinds of card. The call names a `program`, its `args`, a `reason`
+  and 1 to 8 `inputs` (`env`, `label`, optional `placeholder`); a malformed
+  call is a `400` before any card. Only a call the agent tool marks
+  `secretRunAuthorized` runs (the secret tool's plugin, after OpenCode's shell
+  permission for the command line, see `../agent-tool/DOCUMENTATION.md`);
+  anything else is a `403`. Before it waits, the call reads the values the
+  chat remembers; with none missing it runs at once and no card waits. While
+  the card waits, `GET /api/openchamber/secret/fields` names the fields it
+  asks for and the ones it reuses (names only; a `404` once it stopped
+  waiting), and the card reads them there. The answer carries exactly the
+  asked fields, each non-empty, plus the ones the user ticked to remember;
+  the values pass the wait in memory, never through its data. The command
+  runs once with `runCommand` from `../spaces/run-command.js`, without a
+  shell, in the session's directory, with the values added to the server's
+  environment, stdin closed, the process tree killed on Stop, a chat message
+  or `timeoutMs` (default 2 minutes, at most 10), on every platform that
+  module supports, Windows included. stdout and stderr are kept in a 1 MB
+  window, every value is replaced by `[secret:NAME]`, and the last 32,000
+  characters of each go back with the exit code and the env names still
+  remembered. Remembered values live in memory only, per session and env
+  name, for 10 minutes from submission; use does not extend them, a restart
+  drops them, and `secret.forget` drops the session's.
 - `routes.js` is the authenticated CLI HTTP adapter. It forwards one action,
   preserves service status and partial-result details, and propagates request
   cancellation. It also carries the chat's answer to a waiting page.
@@ -346,10 +438,41 @@ other.
   `session.messages`) resolve `projectId` through the session service's
   `resolveDirectory`, the lookup create/send/fork use: an unknown project is a
   404 and a missing project folder a 400, never a read of the current or every
-  directory. Every `session.*` action refuses `projectId` and `directory`
-  together with a 400, so neither silently wins.
+  directory. An action that names a session ID resolves its directory by
+  reading that session by ID (unscoped) first: a moved session can leave a
+  stale copy under the directory the call came from, which the global list can
+  return first. The list is the fallback. Every `session.*` action refuses
+  `projectId` and `directory` together with a 400, so neither silently wins.
 - One failed directory status lookup produces `unknown` for only that
   directory and does not erase other session results.
+- `session.list` returns top-level sessions newest first (OpenCode's
+  `parentID: null`); `children` adds subagent sessions. Each session is
+  trimmed to `id`, `title`, `directory`, `updated`, `archived`, `parentID`,
+  `agent`, `model`, `outcome` (plus the In work fields and `status` below):
+  the raw OpenCode record averaged about 1,100 characters on real sessions,
+  a session in work about 1,750, with tokens, cost, permissions and every
+  metadata namespace; the trimmed one about 300. The chat's tool row reads
+  `directory` and falls back to `location.directory` for calls stored before. While In work is on
+  (`sessionWorkEnabled`), every session carries `inWork` and
+  `doneSuggested`, by the sidebar block's rule
+  (`../session-work/membership.js`: top level, not archived, not a Chat,
+  `work.state` open; the hint while it is newer than `time.idle`). Filters:
+  `inWork`, `busy` (in OpenCode's active map, so busy or waiting) and `query`
+  (every word in the title, case-insensitive, matched here because OpenCode's
+  `search` is SQLite `LIKE`, case-sensitive outside ASCII). `inWork` and
+  `busy` read every project unless `projectId` or `directory` scopes them and
+  return every match unless `limit` is given; a filtered read asks for pages
+  of 200. `inWork` while In work is off is a 409, and a failed active-map read
+  under `busy` is a 503, never an empty list. `busy` stops paging once it saw
+  every running session.
+- `session.markDone` and `session.track` write the record the app's Done and
+  Track write (`userStatePatch` in `../session-work/state.js`) through the
+  injected `updateSessionMetadata`, the session metadata store's queued
+  write that broadcasts the change, so every window updates. The session
+  defaults to the caller and is read first (unknown is a 404). Track refuses
+  a session that can never be in work (400) and an archived one (409); Done
+  takes any session, as the app's button does. Both are a 409 while In work
+  is off and a 503 on a server without the store.
 - Destructive session/worktree deletion and project-path registration are not
   part of the action contract.
 - `session.send` to an archived top-level session restores it, with its
@@ -395,10 +518,16 @@ other.
   `by: 'user'` makes the carried title user-owned. Explicit creation titles and
   UI renames still record that marker; no metadata migration runs.
 - `pr.watch` and `pr.unwatch` let the calling session wait on its pull
-  request without polling: `pr.watch` takes the address in the control tool's
+  requests without polling: `pr.watch` takes the address in the control tool's
   own `url` input and hands it to `prWatch` (`../pr-watch/DOCUMENTATION.md`),
-  which reads it, follows it and wakes the session once when it changes. Both
-  act only on the calling session, never one the input names.
+  which reads it, follows it and wakes the session once when it changes.
+  `pr.unwatch` stops the one at `url`, or every one without it. Both act only
+  on the calling session, never one the input names.
+- `wait.list`, `wait.start` and `wait.stop` are the same kind of wait for the
+  built-in timer and for what an extension's service follows
+  (`../extension-waits/DOCUMENTATION.md`): `wait.start` takes `source`
+  (`timer` or `<extension>/<wait>`) and `args`, `wait.stop` an optional
+  `waitId`, all three only for the calling session.
 - `session.link` records a code change under review or an issue on a session
   (`../openchamber-sessions/session-link.js`), defaulting to the calling
   session. When to link is not in the action's description but at the head of
@@ -421,9 +550,21 @@ other.
   A change request or issue address that a source-control provider's
   `urls.thread` names (GitLab's `/-/merge_requests/N` shape on any host) is
   keyed by the thread, so linking it again from a tab like `/diffs` or with a
-  query refreshes the one entry. It only adds or refreshes links, never removes
-  one: the user owns removal. A missing field or a non-http(s) URL is a 400 and
-  nothing is written.
+  query refreshes the one entry. A missing field or a non-http(s) URL is a 400
+  and nothing is written.
+- `session.unlink` removes a link from a session, defaulting to the calling
+  session, whoever made the link. The agent names it the way it linked it: the
+  control tool's `url` or `identifier` input (also read beside the action), or
+  the same complete `link` it linked with; the tool schema requires `title` and
+  `kind` in `link`, so a bare identifier goes in `identifier`. A url removes
+  every entry that linking the address would key the same (a `/files` or `/diffs` tab names its thread) or that is
+  stored under the same address; an identifier matches an entry's
+  `identifier`, its id, or a github.com entry's `#N`, in any case. The removal is
+  the Work Status unlink's own transform (`buildLinkedIssuesPatch` in
+  `../openchamber-sessions/session-linked-issues.js`), decided inside the
+  session's metadata write turn. No match is a 404 that lists the session's
+  links; an identifier that names more than one is a 409 that removes nothing
+  and asks for the url.
 - `file.open` shows a file in the user's viewer. `file-open.js` resolves a
   relative path against the session directory (an explicit `directory` wins),
   refuses a relative path with no directory at all, checks the target is an
@@ -462,14 +603,26 @@ dropping slots or ignoring the requested time.
 
 ### Why a background message waits behind a page and does not end it
 
-A dispatched session's result, a pull request wake, a workflow report or a
-restart resume can arrive while a page or a secret card waits. OpenCode keeps it
+A dispatched session's result, a pull request or extension wait's wake, a
+workflow report, a restart resume, another agent's `session.send`, a run of
+OpenCode's own scheduler or a prompt queued for after the turn can arrive
+while a page or a secret card waits. OpenCode keeps it
 in the session's inbox until the waiting call returns, and the agent reads it at
 the next step, right after the user's answer. The alternative, ending the wait
 so the agent reads the message at once and asks again, loses the question the
-user was reading. A message the user writes in the chat still ends the wait, and
-`hasUnreadChat` counts only those. The chat keeps such a message out of the
-transcript while the wait lasts (`holdPendingSynthetic` in `packages/ui`, read
+user was reading, and the result told the agent the user had written. A
+queued prompt would not even follow the result: OpenCode delivers it only
+after the turn. A message the user writes in the chat still ends the wait, as
+does an undelivered prompt the user moves (back) to steer, and `hasUnreadChat` counts only
+the user's steered messages. A prompt counts as an agent's when its metadata names a sending session in
+`openchamber.promptedBy.sessionID`, as `session.send` writes it, or carries the `schedule: { id }` marker of OpenCode's
+scheduler (`isAgentPrompt` in `render-page.js`); the sender is not checked,
+since this decides what the agent reads and grants nothing. Any other prompt
+counts as the user's, because a person typing in the TUI or calling the API is
+the user too. An agent's `session.send` of a slash command is the known gap:
+it reaches OpenCode's command endpoint without that metadata (see
+`../agent-tool/DOCUMENTATION.md`). The chat keeps a
+background synthetic message out of the transcript while the wait lasts (`holdPendingSynthetic` in `packages/ui`, read
 through `SyntheticMessage.pending`): drawn as a new turn, it took the question
 out of the chat.
 
@@ -491,11 +644,68 @@ takes the page off the list and leaves that call parked until its request
 ends: that OpenCode exits, this server restarts, or the user stops a turn in
 the session (`abortSession`).
 
+### Why a later page is its own store and not a wait that outlives its call
+
+A page kept in `createPageAnswers` would count as a pending request: the
+session would read as waiting, the sidebar would show its question mark, and
+the chat holds background messages out of the transcript while a page waits
+(`holdPendingSynthetic`), for as long as the user takes. Its turn's end, a chat
+message and Stop all end waits on purpose. A later page asks nothing of the
+turn, so it lives beside the waits, saved on disk because the user may answer
+after a restart.
+
+### Why a later answer steers into a running turn
+
+`../extension-waits` and `../pr-watch` deliver only into an idle session,
+because the agent did not ask for their news at that moment. A later answer
+is the reply to a question the agent asked; it goes out at once, and the agent
+reads it at its next step or as a new turn. The delivery keeps their other
+rules: an id saved before the first attempt, 409 as delivered, 404 as the end.
+
+### Why secret.run keeps secret.request beside it
+
+`secret.run` delivers a value to one process and returns redacted output, so
+the agent's later commands, and a program's verbose or error output, never see
+it. It cannot serve a program that reads a secret from a file (a key file, a
+kubeconfig, a client certificate), so `secret.request` stays for those. A
+proposal to replace the file mode outright (#6086) was declined for that
+reason.
+
+### Why remembering a value is the user's tick, not the agent's flag
+
+Reusing a password across a script's retries saves typing, but a value kept in
+memory is one more place it lives. The agent asking for reuse would decide
+that for the user, and a one-time code would be kept on the agent's word. The
+card offers the choice per field instead, off by default; the agent only learns
+which env names are remembered from the result.
+
+### Why the card reads its fields from the server and not from the call
+
+Which fields a run still needs depends on what the chat remembers, which only
+the server knows, and every client must draw the same card. The first build
+passed them to the plugin as NDJSON progress frames into the call's progress
+metadata; OpenCode publishes that only to clients connected at that moment and
+keeps none of it in the stored call, so a reload or a second device showed no
+fields while the call waited. The card now asks the server once the wait is
+announced (`openchamber:page-waiting`), which every client hears or reads from
+the host's pending snapshot. The values a run uses are read when it starts, so
+a remembered value that expires while the user fills another field is still
+used.
+
 ### Why work.name leaves session titles alone
 
 Session titles belong to OpenCode or the user. A metadata ownership marker
 cannot distinguish a generated title from a user rename made in another
 client or an older release, so `work.name` has no session-title write path.
+
+### Why session.unlink names a link by url or identifier and not by entry id
+
+The agent knows the address and label it linked, while the stored id depends
+on how the server keyed it (`acme/app#7`, `linear:ENG-12`,
+`link:<thread address>`) and on who linked it. Matching what the agent can name
+lets it remove links the user or the UI made too. An identifier such as `#7`
+can name links in two repositories, so an ambiguous one removes nothing and
+the url decides.
 
 ### Why selection is checked before creating a session
 

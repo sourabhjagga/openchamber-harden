@@ -19,6 +19,9 @@ export function createGlobalMessageStreamHub({
   replayLimit = MESSAGE_STREAM_GLOBAL_REPLAY_LIMIT,
   replayByteLimit = MESSAGE_STREAM_GLOBAL_REPLAY_BYTES,
   deltaCoalesceWindowMs = DELTA_COALESCE_WINDOW_MS,
+  // Events of sessions OpenChamber runs for itself (`../opencode/hidden-sessions.js`)
+  // stop here, before replay and before any subscriber or browser sees them.
+  isHiddenPayload = () => false,
 }) {
   if (!Number.isSafeInteger(replayLimit) || replayLimit < 0 || !Number.isSafeInteger(replayByteLimit) || replayByteLimit < 0) {
     throw new RangeError('Replay limits must be nonnegative safe integers');
@@ -30,6 +33,7 @@ export function createGlobalMessageStreamHub({
   const replay = [];
   let replayBytes = 0;
   let latestEventId;
+  let upstreamConnectedBefore = false;
   // OpenCode's event stream carries no SSE ids (verified on 1.18.30: not one
   // frame in a full response), and an event without an id never entered the
   // replay buffer, so a reconnecting browser had no cursor and every event in
@@ -39,6 +43,11 @@ export function createGlobalMessageStreamHub({
   // number, which reports `replayReset` and sends the client to repair.
   const replayIdPrefix = `oc-${randomUUID().slice(0, 8)}-`;
   let replaySequence = 0;
+  // The cursor of a client that connected before any event of the current
+  // suffix: replay from it is the whole suffix, while nothing was trimmed.
+  let replayEpoch = 0;
+  let replayStartId = `${replayIdPrefix}start-${replayEpoch}`;
+  let replayTrimmed = false;
 
   let controller = null;
   let reader = null;
@@ -110,11 +119,13 @@ export function createGlobalMessageStreamHub({
       // suffix after it, never replay an older prefix across the gap.
       replay.length = 0;
       replayBytes = 0;
+      replayTrimmed = true;
     } else {
       replay.push({ eventId: normalized.eventId, serializedFrame, bytes });
       replayBytes += bytes;
       while (replay.length > replayLimit || replayBytes > replayByteLimit) {
         replayBytes -= replay.shift().bytes;
+        replayTrimmed = true;
       }
     }
 
@@ -151,6 +162,17 @@ export function createGlobalMessageStreamHub({
         connected = true;
         const wasReady = everConnected;
         everConnected = true;
+        if (upstreamConnectedBefore) {
+          // Events OpenCode sent while no reader was attached, between two
+          // connections or across a stop, are in no suffix. A cursor from
+          // before that gap must miss, so the client repairs.
+          replay.length = 0;
+          replayBytes = 0;
+          latestEventId = undefined;
+          replayStartId = `${replayIdPrefix}start-${++replayEpoch}`;
+          replayTrimmed = false;
+        }
+        upstreamConnectedBefore = true;
         notifyStatus({ type: 'connect', wasReady });
       },
       onDisconnect({ reason }) {
@@ -158,6 +180,7 @@ export function createGlobalMessageStreamHub({
         notifyStatus({ type: 'disconnect', reason });
       },
       onEvent(event) {
+        if (isHiddenPayload(event?.payload)) return;
         coalescer.push(event);
       },
       onError(error) {
@@ -196,6 +219,8 @@ export function createGlobalMessageStreamHub({
     isConnected() {
       return connected;
     },
+    // The directory-scoped bridges read their own upstream and apply the same filter.
+    isHiddenPayload,
     hasConnected() {
       return everConnected;
     },
@@ -231,10 +256,15 @@ export function createGlobalMessageStreamHub({
     flushPending() {
       coalescer.flush();
     },
+    /** Where a client that holds no event yet resumes from. */
+    cursor() {
+      return latestEventId ?? replayStartId;
+    },
     replayAfter(eventId) {
       if (!eventId) {
         return [];
       }
+      if (eventId === replayStartId) return replayTrimmed ? null : replay.slice();
 
       const index = replay.findIndex((entry) => entry.eventId === eventId);
       if (eventId === latestEventId) return [];

@@ -4,6 +4,7 @@ import { MessageFreshnessDetector } from '@/lib/messageFreshness';
 import { createScrollSpy } from '@/components/chat/lib/scroll/scrollSpy';
 import { cancelWhenLayoutSettled, isLayoutAnimating, onLayoutAnimationStart, onWidthDragStart, runWhenLayoutSettled } from '@/lib/layoutAnimation';
 import { createKeyboardFollowGlide, type KeyboardFollowGlide } from '@/components/chat/lib/scroll/keyboardFollowGlide';
+import { createFollowGlide, type FollowGlide } from '@/components/chat/lib/scroll/followGlide';
 import { retireScrollContent } from '@/components/chat/lib/scroll/retireScrollContent';
 import {
     ANCHOR_HOLD_MAX_FRAMES,
@@ -15,6 +16,7 @@ import {
 import { readSessionScrollPosition, rememberOutgoingSessionScrollPosition } from '@/components/chat/lib/scroll/sessionScrollMemory';
 import {
     isWaitingPageRevealPending,
+    pendingWaitingPageID,
     releaseWaitingPageRevealOutside,
     subscribeRequestReveal,
     takeWaitingPageReveal,
@@ -39,7 +41,6 @@ import {
     type TimelineScrollMode,
 } from '@/components/chat/lib/scroll/timelineScrollAnchoring';
 import {
-    isFollowGlideUnderWay,
     resolveFollowGlideTarget,
     resolveFollowStop,
     resolvePageRevealTarget,
@@ -50,6 +51,7 @@ import {
     nestedScrollableConsumesWheelUp,
     onFrameScroll,
     dispatchPageWaiting,
+    findWaitingPage,
     onPageWaiting,
     onRowExpand,
     onTabStep,
@@ -218,6 +220,12 @@ const prefersReducedMotion = (): boolean => {
     return reducedMotionQuery?.matches === true;
 };
 const followScrollBehavior = (): ScrollBehavior => (prefersReducedMotion() ? 'auto' : 'smooth');
+// iOS and iPadOS WebKit (the only engines that know this property) move
+// scrollTop in whole pixels from the main thread, so the follow leaves its
+// glide to their own smooth scroll there (followGlide.ts).
+const drawsScrollInWholePixels = (): boolean => (
+    globalThis.CSS?.supports?.('-webkit-touch-callout', 'none') === true
+);
 
 const messageLinkOffsetTop = (node: HTMLElement): number => {
     const fade = Number.parseFloat(getComputedStyle(node).getPropertyValue('--scroll-shadow-size'));
@@ -414,10 +422,9 @@ export const useChatTimelineScroll = ({
     // yields while the glide holds the viewport.
     const followGlideRef = React.useRef<KeyboardFollowGlide | null>(null);
     const followGlideHeld = () => followGlideRef.current?.isHeld() === true;
-    // The live follow's smooth scroll in flight: where it is heading and
-    // where the viewport stood when last checked. A gesture interrupts it, so
-    // it is forgotten then.
-    const glideRef = React.useRef<{ from: number; target: number; lastTop: number; issuedAt: number; stateEnd: number } | null>(null);
+    // The live follow's glide (followGlide.ts), one per scroll node. A
+    // gesture stops it.
+    const liveGlideRef = React.useRef<FollowGlide | null>(null);
     // Collapsed activity stops the follow at the end of the reader's message.
     const activityRenderMode = useUIStore((state) => state.activityRenderMode);
     const stopAfterUserMessageRef = React.useRef(activityRenderMode === 'collapsed');
@@ -502,7 +509,7 @@ export const useChatTimelineScroll = ({
         userGenerationRef.current += 1;
         modeRef.current = 'free-scrolling';
         liveFollowGenerationRef.current = null;
-        glideRef.current = null;
+        liveGlideRef.current?.stop();
         setUserOwnsScroll(true);
         // The reader took the viewport: a link already shown is done with and
         // must not pull them back if the session is entered again.
@@ -597,8 +604,10 @@ export const useChatTimelineScroll = ({
     const jumpToEnd = React.useCallback((mode: 'instant' | 'smooth', passStops: boolean) => {
         resumeFollow(passStops);
         // A page still settling into view would pull the reader back from
-        // the end they asked for.
+        // the end they asked for, and a follow glide still heading for a
+        // stop would race the list's scroll.
         pageRevealRef.current = null;
+        liveGlideRef.current?.stop();
         void listRef.current?.scrollToEnd({ animated: mode === 'smooth' });
         // While a stream is growing the content, a single jump lands on the
         // end as of that moment and the list's own follow may not have
@@ -667,6 +676,9 @@ export const useChatTimelineScroll = ({
         clearGoToBottomReasserts();
         modeRef.current = 'free-scrolling';
         liveFollowGenerationRef.current = null;
+        // A live glide carries on from any scroll write, the alignment's
+        // included, and would take the reader back to the end.
+        liveGlideRef.current?.stop();
         isAtEndRef.current = false;
         userOwnsScrollRef.current = true;
         setIsPinned(false);
@@ -1075,16 +1087,16 @@ export const useChatTimelineScroll = ({
     // reader is never left staring at a gap several screens tall. Writes go
     // to the scroll node directly: routing each chunk through the list's
     // scrollToEnd bookkeeping roughly doubled frame production when measured.
-    // A user gesture interrupts the native smooth scroll on its own, and the
-    // gesture handler drops live follow so no later correction re-engages.
+    // The glide is our own spring (followGlide.ts): a new target keeps its
+    // speed. A user gesture stops it, and the gesture handler drops live
+    // follow so no later correction re-engages.
     //
     // Live glides are measured once per frame: growth is reported from inside
     // the list's layout pass, where the scroll node's height can transiently
     // be thousands of pixels off, and a jump computed from it landed as a
-    // visible snap. A glide still moving toward the current end is left to
-    // finish, because re-issuing it restarts the animation from rest; one
-    // that stopped short (another scroll write cancels it, such as a turn
-    // window holding its anchor) is issued again.
+    // visible snap. A glide still moving toward the end the list reports is
+    // left alone, so those frames read no layout; one that something else
+    // moved (the list holding a row in place) is aimed again.
     const followFrameRef = React.useRef<number | null>(null);
     // The follow reached the start of a turn or a reply and ends there, as if
     // the reader had scrolled away: nothing moves until they return to the
@@ -1104,6 +1116,7 @@ export const useChatTimelineScroll = ({
         if (!node) return;
         if (followGlideHeld()) return;
         if (!isLive()) {
+            liveGlideRef.current?.stop();
             pinEndAtRest(node);
             return;
         }
@@ -1117,13 +1130,12 @@ export const useChatTimelineScroll = ({
             // A glide under way toward an end the list has not moved is left
             // to finish, decided from the list's state so these frames read no
             // layout.
-            const state = listRef.current?.getState();
-            const glide = glideRef.current;
+            const list = listRef.current;
+            const glide = liveGlideRef.current;
+            if (!glide) return;
+            const state = list?.getState();
             const stateEnd = state ? Math.max(0, (state.contentLength ?? 0) - state.scrollLength) : null;
-            if (state && stateEnd !== null && isFollowGlideUnderWay(glide, state.scroll, stateEnd, performance.now())) {
-                if (glide) glide.lastTop = state.scroll;
-                return;
-            }
+            if (state && stateEnd !== null && glide.isHeadingTo(stateEnd, state.scroll)) return;
             // Anything else reads the true end from the scroll node. The list's
             // state lags it: a row is placed at its estimated height before it
             // is measured, and the footer (the tail spacer, which changes as
@@ -1134,7 +1146,7 @@ export const useChatTimelineScroll = ({
             const scroll = node.scrollTop;
             const glideTarget = resolveFollowGlideTarget(end, scroll);
             if (glideTarget === null) {
-                glideRef.current = null;
+                glide.stop();
                 return;
             }
             // A turn or a reply taller than what is left of the screen: the
@@ -1161,14 +1173,12 @@ export const useChatTimelineScroll = ({
                 eligibility.set(stop.element, false);
                 releaseFollowAtStop();
             }
-            if (Math.abs(target - scroll) <= 1) return;
-            let lastTop = scroll;
-            if (target - scroll > viewportLength) {
-                lastTop = target - viewportLength;
-                node.scrollTop = lastTop;
+            if (Math.abs(target - scroll) <= 1) {
+                glide.stop();
+                return;
             }
-            glideRef.current = { from: lastTop, target, lastTop, issuedAt: performance.now(), stateEnd: stateEnd ?? end };
-            node.scrollTo({ top: target, behavior: followScrollBehavior() });
+            if (target - scroll > viewportLength) node.scrollTop = target - viewportLength;
+            glide.aim(target, stateEnd ?? end, prefersReducedMotion());
         });
         followFrameRef.current = frame;
     }, [isLiveFollowActive, pinEndAtRest, releaseFollowAtStop]);
@@ -1211,7 +1221,7 @@ export const useChatTimelineScroll = ({
             } else if (modeRef.current === 'following-end') {
                 releaseFollowAtStop();
             }
-            glideRef.current = null;
+            liveGlideRef.current?.stop();
             if (Math.abs(target - scroll) > viewportLength) {
                 node.scrollTop = target + (target > scroll ? -viewportLength : viewportLength);
             }
@@ -1223,7 +1233,6 @@ export const useChatTimelineScroll = ({
     React.useEffect(() => () => {
         if (followFrameRef.current !== null) window.cancelAnimationFrame(followFrameRef.current);
         followFrameRef.current = null;
-        glideRef.current = null;
         if (pageRevealFrameRef.current !== null) window.cancelAnimationFrame(pageRevealFrameRef.current);
         pageRevealFrameRef.current = null;
         if (endArrivalFrameRef.current !== null) window.cancelAnimationFrame(endArrivalFrameRef.current);
@@ -1525,7 +1534,7 @@ export const useChatTimelineScroll = ({
         isAtEndRef.current = true;
         setUserOwnsScroll(false);
         setNearContentStart(true);
-        glideRef.current = null;
+        liveGlideRef.current?.stop();
         modeRef.current = 'following-end';
         liveFollowGenerationRef.current = userGenerationRef.current;
         // A stop in the session left behind does not count as one here: a
@@ -1603,11 +1612,22 @@ export const useChatTimelineScroll = ({
         if (pinned || !scrollNode || !currentSessionKey) return;
         const showRequested = () => {
             if (scrollRef.current !== scrollNode || handledEntryKeyRef.current !== currentSessionKey) return;
+            const pageId = pendingWaitingPageID();
             if (!takeWaitingPageReveal(currentSessionIdRef.current)) return;
             restoreRef.current?.cancel();
             jumpToEnd('instant', true);
             revealedPagesRef.current.clear();
-            dispatchPageWaiting(scrollNode.querySelector<HTMLElement>('[data-waiting-page]'));
+            const block = findWaitingPage(scrollNode, pageId);
+            if (pageId === null || !block) {
+                dispatchPageWaiting(block);
+                return;
+            }
+            // A question card named by the reader (the dock's line, its
+            // toast) is their own request, like Next on Tabs: it comes into
+            // view whatever auto-follow says.
+            revealedPagesRef.current.add(pageId);
+            pageRevealRef.current = { pageId, block, generation: userGenerationRef.current, until: performance.now() + PAGE_REVEAL_SETTLE_MS };
+            revealWaitingPageRef.current();
         };
         showRequested();
         return subscribeRequestReveal(showRequested);
@@ -1628,6 +1648,36 @@ export const useChatTimelineScroll = ({
         return () => {
             glide.dispose();
             if (followGlideRef.current === glide) followGlideRef.current = null;
+        };
+    }, [scrollNode]);
+
+    // ── live follow glide ───────────────────────────────────────────────────
+    // Where a follow glide that stopped on its target landed is checked by the
+    // pinned-end effect below.
+    const followLandedRef = React.useRef<() => void>(() => {});
+    const followYieldsRef = React.useRef(0);
+    React.useEffect(() => {
+        if (!scrollNode) return;
+        const glide = createFollowGlide({
+            node: scrollNode,
+            native: drawsScrollInWholePixels(),
+            shouldContinue: () => scrollRef.current === scrollNode && !followGlideHeld(),
+            onSettle: () => followLandedRef.current(),
+            // A glide stopped short by another writer (a wheel down, the list)
+            // checks where it is like a landing, so the reader is not left
+            // short of an end that grows no more. Twice at most between two
+            // growths: the list's hold on the end writes its own offset each
+            // frame, and answering every write fought it.
+            onYield: () => {
+                if (followYieldsRef.current >= 2) return;
+                followYieldsRef.current += 1;
+                followLandedRef.current();
+            },
+        });
+        liveGlideRef.current = glide;
+        return () => {
+            glide.dispose();
+            if (liveGlideRef.current === glide) liveGlideRef.current = null;
         };
     }, [scrollNode]);
 
@@ -1683,9 +1733,13 @@ export const useChatTimelineScroll = ({
         // painted, so the pin lands in the same frame as the growth. A
         // ResizeObserver would only see the container a rendering step later
         // and let one frame paint with the end out of view.
-        const mutations = new MutationObserver(pin);
+        const grew = () => {
+            followYieldsRef.current = 0;
+            pin();
+        };
+        const mutations = new MutationObserver(grew);
         mutations.observe(content, { childList: true, subtree: true, attributes: true, attributeFilter: ['style'] });
-        const resizes = globalThis.ResizeObserver ? new ResizeObserver(pin) : null;
+        const resizes = globalThis.ResizeObserver ? new ResizeObserver(grew) : null;
         resizes?.observe(content);
         // The viewport itself shrinking (window height, a panel docked below)
         // moves the end out of view just like content growth does.
@@ -1695,8 +1749,7 @@ export const useChatTimelineScroll = ({
         // with no growth signal (a footer measured late) closes with an
         // instant write of a few pixels; anything further goes through the
         // follow rules again.
-        const landed = () => {
-            if (!glideRef.current) return;
+        followLandedRef.current = () => {
             if (userOwnsScrollRef.current || !isAtEndRef.current || modeRef.current !== 'following-end') return;
             const remaining = scrollNode.scrollHeight - scrollNode.clientHeight - scrollNode.scrollTop;
             if (remaining <= 1) return;
@@ -1706,11 +1759,10 @@ export const useChatTimelineScroll = ({
             }
             pin();
         };
-        scrollNode.addEventListener('scrollend', landed);
         return () => {
             mutations.disconnect();
             resizes?.disconnect();
-            scrollNode.removeEventListener('scrollend', landed);
+            followLandedRef.current = () => {};
         };
     }, [followEnd, pinEndAtRest, scrollNode]);
 

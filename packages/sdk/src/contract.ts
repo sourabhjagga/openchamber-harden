@@ -1,6 +1,7 @@
 
 import { OPENCHAMBER_SDK_API_VERSION, OPENCHAMBER_SDK_CHANNEL } from './api-version.ts';
 import type { FileEditorChange, FileEditorDocument, FileSnapshotRequest, FileSnapshotResultPayload } from './file-editor.ts';
+import type { GuestMicrophoneEndReason, MicrophoneOpenRequest, MicrophoneOpenResult } from './microphone.ts';
 import type { GuestRunningShellsSnapshot, GuestShellOutputRequest, GuestShellOutputResult, GuestShellStopResult, GuestShellsSubscription } from './shells.ts';
 import type { GuestSessionWorktree, GuestStorageRequest, GuestStorageResult, GuestWorkspaceQuery, GuestWorkspaceSnapshot, GuestWorkspaceSubscription, GuestWorkspaceUpdate, GuestWorktree } from './workspace.ts';
 import type { GuestStatusControl, GuestStatusControlEvent } from './status-controls.ts';
@@ -40,6 +41,12 @@ export type HostThemeTokens = {
   error: string;
   info: string;
   font: string;
+  /**
+   * The app's body text size as a pixel length, `14px` at the default
+   * interface font size and larger when the user raises it. `applyHostTheme`
+   * makes it the frame's `1rem`. Hosts before this token leave it out.
+   */
+  fontSize?: string;
   /** Monospace stack for code and identifiers. */
   mono: string;
   radius: string;
@@ -212,7 +219,8 @@ export type HostResultPayload =
   | FileWriteResult
   | FileListResult
   | FileStatResult
-  | GenerateResult;
+  | GenerateResult
+  | MicrophoneOpenResult;
 
 export const isStartSessionResult = (
   value: HostResultPayload | undefined,
@@ -253,7 +261,28 @@ export type HostReadyContext = {
     popovers?: true;
     /** The host keeps `generate` answers that arrive after their frame is gone (`onLateGenerateResult`). */
     lateGenerateResults?: true;
+    /** The host captures the microphone for a frame with the `microphone` grant (`openMicrophone`). */
+    microphone?: true;
   };
+  /**
+   * The device the frame is drawn on, re-sent with `ready` when it changes
+   * (rotation, a keyboard opening). Hosts before this field leave it out.
+   */
+  device?: HostDevice;
+};
+
+export const DEVICE_FORM_FACTORS = ['phone', 'tablet', 'desktop'] as const;
+export const DEVICE_POINTERS = ['coarse', 'fine'] as const;
+
+export type HostDevice = {
+  /** `phone` and `tablet` are the app's touch layouts; `desktop` is everything else. */
+  formFactor: (typeof DEVICE_FORM_FACTORS)[number];
+  /** `coarse` for a finger: make hit targets at least 44px tall. */
+  pointer: (typeof DEVICE_POINTERS)[number];
+  /** Safe-area insets of the screen in CSS pixels: the notch, the home indicator, rounded corners. */
+  insets: { top: number; right: number; bottom: number; left: number };
+  /** Height in CSS pixels the on-screen keyboard covers at the bottom; 0 while it is closed. */
+  keyboard: number;
 };
 
 export type GuestItemRole = 'user' | 'assistant';
@@ -328,7 +357,23 @@ export type GuestDiffItem = {
   side?: 'additions' | 'deletions';
 };
 
-export type GuestItem = AttachIssueRequest | GuestMessageItem | GuestSessionItem | GuestSelectionItem | GuestFileItem | GuestDiffItem;
+/**
+ * The user clicked an identifier or a link in a chat message that the
+ * extension's `contributes.links` claims, with `action: "open"`. Built by the
+ * host from the match: `identifier` is what `{id}` or the key matched. `url`
+ * is the clicked link without its fragment and without query parameters
+ * other than the template's own; for an identifier in text, the link the first
+ * template without `{segment}` builds from it, absent when there is none or
+ * the identifier does not have `urls.identifier`'s shape (`PROJ-12` and
+ * `number`).
+ */
+export type GuestLinkItem = {
+  kind: 'link';
+  identifier: string;
+  url?: string;
+};
+
+export type GuestItem = AttachIssueRequest | GuestMessageItem | GuestSessionItem | GuestSelectionItem | GuestFileItem | GuestDiffItem | GuestLinkItem;
 
 /** The captured target of a background action. Delivered once through `onAction`, not `onItem`. */
 export type GuestActionItem = GuestMessageItem | GuestSessionItem | GuestSelectionItem | GuestFileItem | GuestDiffItem;
@@ -341,6 +386,10 @@ export const isGuestMessageItem = (item: GuestItem | null): item is GuestMessage
 
 export const isGuestSessionItem = (item: GuestItem | null): item is GuestSessionItem => (
   item !== null && item.kind === 'session'
+);
+
+export const isGuestLinkItem = (item: GuestItem | null): item is GuestLinkItem => (
+  item !== null && item.kind === 'link'
 );
 
 /** The composer chip: what the guest handed to `attach`, with `text` filled from the chip. */
@@ -699,9 +748,16 @@ export type HostResultMessage = Envelope & { type: 'result'; id: string } & (
 
 export type HostShellsMessage = Envelope & { type: 'shells'; payload: { subscriptionId: string; snapshot: GuestRunningShellsSnapshot } };
 
+/** Mono microphone samples at the rate the frame asked for, about 21 ms a push at 48 kHz. */
+export type HostMicrophoneAudioMessage = Envelope & { type: 'microphone-audio'; payload: { samples: Float32Array<ArrayBuffer> } };
+/** The host stopped capturing on its own; no audio follows until the frame opens the microphone again. */
+export type HostMicrophoneEndedMessage = Envelope & { type: 'microphone-ended'; payload: { reason: GuestMicrophoneEndReason } };
+
 export type HostMessage =
   | (Envelope & { type: 'workspace'; payload: GuestWorkspaceUpdate })
   | HostShellsMessage
+  | HostMicrophoneAudioMessage
+  | HostMicrophoneEndedMessage
   | HostReadyMessage
   | HostDirectoryMessage
   | HostSessionMessage
@@ -772,6 +828,8 @@ export type GuestShellsSubscribeMessage = GuestCall<'shells-subscribe', GuestShe
 export type GuestShellsUnsubscribeMessage = GuestCall<'shells-unsubscribe', { subscriptionId: string }>;
 export type GuestShellOutputMessage = GuestCall<'shell-output', GuestShellOutputRequest>;
 export type GuestShellStopMessage = GuestCall<'shell-stop', { shellId: string }>;
+export type GuestMicrophoneOpenMessage = GuestCall<'microphone-open', MicrophoneOpenRequest>;
+export type GuestMicrophoneCloseMessage = GuestCall<'microphone-close'>;
 
 export type GuestMessage =
   | GuestCall<'workspace-read', GuestWorkspaceQuery>
@@ -781,6 +839,8 @@ export type GuestMessage =
   | GuestShellsUnsubscribeMessage
   | GuestShellOutputMessage
   | GuestShellStopMessage
+  | GuestMicrophoneOpenMessage
+  | GuestMicrophoneCloseMessage
   | GuestCall<'storage', GuestStorageRequest>
   | GuestCall<'open-session', { sessionId: string }>
   | GuestHelloMessage
@@ -861,6 +921,7 @@ const HOST_PUSH_TYPES: ReadonlySet<string> = new Set([
   'status-control-event', 'popover-closed',
   'file-open', 'file-snapshot', 'file-saved',
   'generate-late',
+  'microphone-audio', 'microphone-ended',
 ]);
 
 /** What a postMessage payload may carry before it is read as a host message. */

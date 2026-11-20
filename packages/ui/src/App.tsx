@@ -29,6 +29,7 @@ import { useSourceControlProviderSync } from '@/hooks/useSourceControlProviderSy
 import { useTrackerProviderSync } from '@/hooks/useTrackerProviderSync';
 import { useQuotaProviderSync } from '@/hooks/useQuotaProviderSync';
 import { useGuestCatalogSync } from '@/hooks/useGuestCatalogSync';
+import { useGuestMarksSync } from '@/hooks/useGuestMarksSync';
 import { useLimitFailoverNotices } from '@/hooks/useLimitFailoverNotices';
 import { useEnterprisePolicySync } from '@/hooks/useEnterprisePolicySync';
 import { useRelayLimitToast } from '@/hooks/useRelayLimitToast';
@@ -64,6 +65,7 @@ import { ConfigUpdateOverlay } from '@/components/ui/ConfigUpdateOverlay';
 import { RuntimeAPIProvider } from '@/contexts/RuntimeAPIProvider';
 import { registerRuntimeAPIs } from '@/contexts/runtimeAPIRegistry';
 import { useUIStore } from '@/stores/useUIStore';
+import { useChatWidthAttribute } from '@/hooks/useChatWidthAttribute';
 import { useSourceControlAuthStore } from '@/stores/useSourceControlAuthStore';
 import { useSourceControlProviderRegistry } from '@/lib/source-control/providers/registry';
 import { refreshTrackers } from '@/stores/useTrackerAuthStore';
@@ -241,7 +243,6 @@ function App({ apis }: AppProps) {
   const [initRetryEpoch, setInitRetryEpoch] = React.useState(0);
   const [runtimeEndpointEpoch, setRuntimeEndpointEpoch] = React.useState(0);
   const [manualInitRetrying, setManualInitRetrying] = React.useState(false);
-  const wideChatLayoutEnabled = useUIStore((state) => state.wideChatLayoutEnabled);
   const mobileKeyboardMode = useUIStore((state) => state.mobileKeyboardMode);
   const isDesktopRuntime = React.useMemo(() => isDesktopShell(), []);
   const [bootInjectionStatus, setBootInjectionStatus] = React.useState<BootInjectionStatus>(() => {
@@ -312,12 +313,7 @@ function App({ apis }: AppProps) {
     });
   }, []);
 
-  React.useEffect(() => {
-    document.documentElement.classList.toggle('wide-chat-layout', wideChatLayoutEnabled);
-    return () => {
-      document.documentElement.classList.remove('wide-chat-layout');
-    };
-  }, [wideChatLayoutEnabled]);
+  useChatWidthAttribute();
 
   React.useEffect(() => {
     registerRuntimeAPIs(apis);
@@ -571,7 +567,7 @@ function App({ apis }: AppProps) {
   React.useLayoutEffect(() => {
     const restore = lastSessionRestoreRef.current;
     if (restore.attempt) return;
-    restore.attempt = beginLastSessionRestore({ selectNow: !parseRoute().sessionId });
+    restore.attempt = beginLastSessionRestore({ selectNow: !parseRoute().sessionId, refresh: false });
   }, []);
   React.useEffect(() => {
     const restore = lastSessionRestoreRef.current;
@@ -672,6 +668,7 @@ function App({ apis }: AppProps) {
   useTrackerProviderSync(apis.trackers);
   useQuotaProviderSync();
   useGuestCatalogSync();
+  useGuestMarksSync();
   useLimitFailoverNotices();
   useRoutingSync();
   useEnterprisePolicySync();
@@ -881,7 +878,9 @@ function App({ apis }: AppProps) {
                   <OpenCodeUpdateToast />
                   <ProjectConfigErrorToast />
                   <MainLayout />
-                  {isDesktopRuntime ? <AppStartupOverlay ready={bootOutcomeKnown && bootViewIsMain} /> : null}
+                  {/* Unmounted, not faded: the shell under it is ready, and a
+                      fade only delays the moment it is seen. */}
+                  {isDesktopRuntime && !(bootOutcomeKnown && bootViewIsMain) ? <AppStartupOverlay ready={false} /> : null}
                   <Toaster />
                   <AppLinkConfirmDialog />
                   <SnippetQuickCreateDialog />

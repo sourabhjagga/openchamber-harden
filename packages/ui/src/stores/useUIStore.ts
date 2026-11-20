@@ -8,6 +8,7 @@ import { SEMANTIC_TYPOGRAPHY, getTypographyVariable, type SemanticTypographyKey 
 import type { ShortcutCombo } from '@/lib/shortcuts';
 import type { DraftStarterRef } from '@/lib/draftStarters';
 import type { CustomProviderIcon } from '@/lib/customProviderIcons';
+import type { CustomProviderLogo } from '@/lib/customProviderLogos';
 import { DEFAULT_MONO_FONT, DEFAULT_UI_FONT, DEFAULT_UI_FONT_WEIGHT, type MonoFontOption, type UiFontOption, type UiFontWeight } from '@/lib/fontOptions';
 import { getStoredMobileKeyboardMode, type MobileKeyboardMode } from '@/lib/mobileKeyboardMode';
 import type { TerminalShell } from '@/lib/api/types';
@@ -18,8 +19,8 @@ import { rebaseMovedPath } from '@/lib/filePathMoves';
 import { isVSCodeRuntime } from '@/lib/desktop';
 import { noteBrowserTabOpenedWithAddress, requestBrowserTabLoad } from '@/lib/browser/devServerWait';
 import { clampLiveBrowserTabs, LIVE_BROWSER_TABS_DEFAULT } from '@/lib/browser/liveTabs';
-import { isContextPanelMode, type ContextPanelMode } from '@/lib/surfaces/modes';
-import { orderMobileWorkspaceTabs, shownMobileWorkspaceTabs, type MobileWorkspaceTab } from '@/lib/mobileWorkspaceTabs';
+import { isContextPanelMode, type ContextPanelMode, type PluginContextPanelMode } from '@/lib/surfaces/modes';
+import { shownMobileWorkspaceTabs, storedMobileWorkspaceTabOrder, type MobileWorkspaceTab } from '@/lib/mobileWorkspaceTabs';
 import {
   carrySurfaceToZone,
   getZoneView,
@@ -71,6 +72,8 @@ type DesktopWindowControlsPosition = 'left' | 'right';
 type DesktopWindowControlsStyle = 'classic' | 'traffic-lights';
 export type FileEditorKeymap = 'default' | 'vim';
 export type LargeTextPasteBehavior = 'ask' | 'attach' | 'inline' | 'inline-double-paste';
+/** Chat column width: a reading column, a wider capped column, or the whole chat for the transcript. */
+export type ChatWidth = 'default' | 'wider' | 'full';
 export type SessionGoalChecker = 'classifier' | 'small-model';
 
 const DEFAULT_LARGE_TEXT_PASTE_BEHAVIOR: LargeTextPasteBehavior = 'ask';
@@ -965,9 +968,7 @@ interface UIStore {
   isArchivePageOpen: boolean;
   /** The full-screen integrations catalog page, opened from the sidebar header. */
   isIntegrationsCatalogOpen: boolean;
-  /** The query the Archive page opened with; empty for a plain open. */
-  archivePageSearch: string;
-  /** Grows on every open, so a page already on screen restarts with the new query. */
+  /** Grows on every open, so a page already on screen starts fresh. */
   archivePageOpenCount: number;
   isUsageStatsPageOpen: boolean;
   /** The issues and pull requests board. */
@@ -1047,6 +1048,8 @@ interface UIStore {
   openLinksInBrowserPanel: boolean;
   /** How many of the user's browser tabs keep their page loaded, across projects (desktop only). */
   liveBrowserTabLimit: number;
+  /** Tabs the agent opens use the user's own browser profile, logins included, instead of the agent's (desktop only). */
+  agentBrowserSharesLogins: boolean;
   /** Plain clicks on issue, PR and tracker item links in chat open them on the issues and PRs board. */
   openTrackerLinksOnBoard: boolean;
   autoDeleteAfterDays: number;
@@ -1071,6 +1074,8 @@ interface UIStore {
   terminalLoginShells: TerminalShell[];
   /** A terminal or project action tab closes when its process exits; off keeps the exited output. */
   terminalCloseOnExit: boolean;
+  /** Starting a project action brings its terminal tab forward in the side panel. */
+  terminalOpenOnProjectAction: boolean;
   editorFontSize: number;
   uiFont: UiFontOption;
   monoFont: MonoFontOption;
@@ -1089,6 +1094,8 @@ interface UIStore {
   providerOrder: string[];
   collapsedModelProviders: string[];
   customProviderIcons: Record<string, CustomProviderIcon>;
+  /** Uploaded logos by provider ID; the server writes them with the image. */
+  customProviderLogos: Record<string, CustomProviderLogo>;
   recentModels: Array<{ providerID: string; modelID: string }>;
   /** `provider/model` last picked in a chat composer; a new session starts on it when nothing is configured. */
   lastSelectedModel: string | undefined;
@@ -1122,6 +1129,9 @@ interface UIStore {
   // Desktop dock badge showing the count of sessions with unseen activity (macOS).
   dockBadgeEnabled: boolean;
   alwaysShowScrollbars: boolean;
+  // An agent's question shows as a card at the end of the chat instead of
+  // the dock above the composer. This device only.
+  questionsInChat: boolean;
 
   // Event toggles (which events trigger notifications)
   notifyOnCompletion: boolean;
@@ -1165,6 +1175,11 @@ interface UIStore {
   agentImageToolEnabled: boolean;
   /** `provider/model` the image tool draws with; empty until the user picks one. */
   agentImageModel: string;
+  /** The agent memory tidies itself in the background (`agent-memory/dreaming.js`); off until turned on. */
+  agentMemoryDreamingEnabled: boolean;
+  /** `provider/model` dreaming runs on; empty runs it on the default model. */
+  agentMemoryDreamingModel: string;
+  agentMemoryDreamingVariant: string;
   agentRenderToolEnabled: boolean;
   agentSecretToolEnabled: boolean;
   agentWorkflowToolEnabled: boolean;
@@ -1206,7 +1221,7 @@ interface UIStore {
   enterToSend: boolean;
   enterToSendConfigured: boolean;
   mobileReturnKeySends: boolean;
-  wideChatLayoutEnabled: boolean;
+  chatWidth: ChatWidth;
   codeBlockLineWrap: boolean;
   tableCellWrap: boolean;
   copyMessagesAsPlainText: boolean;
@@ -1302,7 +1317,8 @@ interface UIStore {
   setContextRailSurfaceVisible: (surfaceId: string, visible: boolean) => void;
   setContextRailHiddenSurfaces: (surfaceIds: string[]) => void;
   setMobileWorkspaceTabOrder: (order: readonly string[]) => void;
-  setMobileWorkspaceTabVisible: (tab: MobileWorkspaceTab, visible: boolean) => void;
+  /** `extensions`: the extension tabs available now, so the last tab shown is counted right. */
+  setMobileWorkspaceTabVisible: (tab: MobileWorkspaceTab, visible: boolean, extensions?: readonly PluginContextPanelMode[]) => void;
   setMobileWorkStatusSectionVisible: (sectionId: string, visible: boolean) => void;
   setMobileWorkStatusHiddenSections: (sectionIds: string[]) => void;
   setSessionSwitcherOpen: (open: boolean) => void;
@@ -1325,7 +1341,7 @@ interface UIStore {
   setSessionCreateDialogOpen: (open: boolean) => void;
   setScheduledTasksDialogOpen: (open: boolean) => void;
   /** `search` fills the page's search field, for a sidebar search that found nothing. */
-  setArchivePageOpen: (open: boolean, search?: string) => void;
+  setArchivePageOpen: (open: boolean) => void;
   setIntegrationsCatalogOpen: (open: boolean) => void;
   setUsageStatsPageOpen: (open: boolean) => void;
   setSourceBoardOpen: (open: boolean) => void;
@@ -1347,6 +1363,8 @@ interface UIStore {
   setSettingsProvidersClassificationRequested: (requested: boolean) => void;
   setSettingsProvidersOpenRequested: (providerId: string | null) => void;
   requestSettingsJump: (page: string, itemId?: string | null) => void;
+  /** Opens Settings on `page` and reveals `itemId` there, from anywhere in the app. */
+  openSettingsAt: (page: string, itemId?: string | null) => void;
   clearSettingsJumpRequest: () => void;
   setSettingsRemoteInstancesSelectedId: (instanceId: string | null) => void;
   setEventStreamStatus: (status: EventStreamStatus, hint?: string | null) => void;
@@ -1374,6 +1392,7 @@ interface UIStore {
   setLayoutAnimations: (value: boolean) => void;
   setOpenLinksInBrowserPanel: (value: boolean) => void;
   setLiveBrowserTabLimit: (value: number) => void;
+  setAgentBrowserSharesLogins: (value: boolean) => void;
   setOpenTrackerLinksOnBoard: (value: boolean) => void;
   setFileTreeSide: (side: 'left' | 'right') => void;
   setAutoDeleteAfterDays: (days: number) => void;
@@ -1390,6 +1409,7 @@ interface UIStore {
   setTerminalShell: (shell: TerminalShell) => void;
   setTerminalLoginShells: (shells: TerminalShell[]) => void;
   setTerminalCloseOnExit: (value: boolean) => void;
+  setTerminalOpenOnProjectAction: (value: boolean) => void;
   setEditorFontSize: (size: number) => void;
   setUiFont: (font: UiFontOption) => void;
   setMonoFont: (font: MonoFontOption) => void;
@@ -1411,6 +1431,7 @@ interface UIStore {
   ) => void;
   setProviderOrder: (orderedProviderIDs: string[]) => void;
   setCustomProviderIcon: (providerID: string, icon: CustomProviderIcon | null) => void;
+  setCustomProviderLogo: (providerID: string, logo: CustomProviderLogo | null) => void;
   toggleHiddenModel: (providerID: string, modelID: string) => void;
   isHiddenModel: (providerID: string, modelID: string) => boolean;
   hideAllModels: (providerID: string, modelIDs: string[]) => void;
@@ -1448,6 +1469,7 @@ interface UIStore {
   setNotifyOnSubtasks: (value: boolean) => void;
   setDockBadgeEnabled: (value: boolean) => void;
   setAlwaysShowScrollbars: (value: boolean) => void;
+  setQuestionsInChat: (value: boolean) => void;
   setNotifyOnCompletion: (value: boolean) => void;
   setNotifyOnPullRequests: (value: boolean) => void;
   setNotifyOnError: (value: boolean) => void;
@@ -1472,6 +1494,9 @@ interface UIStore {
   setAgentUsageToolEnabled: (value: boolean) => void;
   setAgentImageToolEnabled: (value: boolean) => void;
   setAgentImageModel: (value: string) => void;
+  setAgentMemoryDreamingEnabled: (value: boolean) => void;
+  setAgentMemoryDreamingModel: (value: string) => void;
+  setAgentMemoryDreamingVariant: (value: string) => void;
   setAgentRenderToolEnabled: (value: boolean) => void;
   setAgentSecretToolEnabled: (value: boolean) => void;
   setAgentWorkflowToolEnabled: (value: boolean) => void;
@@ -1490,7 +1515,7 @@ interface UIStore {
   setEnterToSend: (value: boolean) => void;
   setMobileReturnKeySends: (value: boolean) => void;
   setEnterToSendConfigured: (value: boolean) => void;
-  setWideChatLayoutEnabled: (value: boolean) => void;
+  setChatWidth: (value: ChatWidth) => void;
   setCodeBlockLineWrap: (value: boolean) => void;
   setTableCellWrap: (value: boolean) => void;
   setCopyMessagesAsPlainText: (value: boolean) => void;
@@ -1540,6 +1565,9 @@ const openFileTab = (state: UIStore, directory: string, filePath: string, previe
 
 /** What the selection menu's thumb-up says when the user set no text of their own. */
 export const DEFAULT_SELECTION_APPROVAL_TEXT = 'Sounds good';
+export const DEFAULT_EDITOR_FONT_SIZE = 12;
+/** The Files tree beside the editor: narrow enough that the code beside it does not wrap. */
+export const DEFAULT_CONTEXT_EDITOR_TREE_WIDTH = 208;
 
 export const useUIStore = create<UIStore>()(
   devtools(
@@ -1562,7 +1590,7 @@ export const useUIStore = create<UIStore>()(
         contextEditorTreeVisible: true,
         fileTreeSide: 'right',
         contextEditorVisible: true,
-        contextEditorTreeWidth: 240,
+        contextEditorTreeWidth: DEFAULT_CONTEXT_EDITOR_TREE_WIDTH,
         contextZoneSizes: {},
         contextZoneExpandedChatSizes: {},
         workStatusExpandedSections: {},
@@ -1595,7 +1623,6 @@ export const useUIStore = create<UIStore>()(
         isScheduledTasksDialogOpen: false,
         isArchivePageOpen: false,
         isIntegrationsCatalogOpen: false,
-        archivePageSearch: '',
         archivePageOpenCount: 0,
         isUsageStatsPageOpen: false,
         isSourceBoardOpen: false,
@@ -1640,6 +1667,7 @@ export const useUIStore = create<UIStore>()(
         layoutAnimations: true,
         openLinksInBrowserPanel: false,
         liveBrowserTabLimit: LIVE_BROWSER_TABS_DEFAULT,
+        agentBrowserSharesLogins: false,
         openTrackerLinksOnBoard: true,
         autoDeleteAfterDays: 30,
         sessionRetentionAction: 'archive',
@@ -1656,7 +1684,8 @@ export const useUIStore = create<UIStore>()(
         terminalShell: 'auto',
         terminalLoginShells: [],
         terminalCloseOnExit: true,
-        editorFontSize: 13,
+        terminalOpenOnProjectAction: true,
+        editorFontSize: DEFAULT_EDITOR_FONT_SIZE,
         uiFont: DEFAULT_UI_FONT,
         monoFont: DEFAULT_MONO_FONT,
         customUiFont: '',
@@ -1671,6 +1700,7 @@ export const useUIStore = create<UIStore>()(
         providerOrder: [],
         collapsedModelProviders: [],
         customProviderIcons: {},
+        customProviderLogos: {},
         recentModels: [],
         lastSelectedModel: undefined,
         recentAgents: [],
@@ -1694,6 +1724,7 @@ export const useUIStore = create<UIStore>()(
         notifyOnSubtasks: true,
         dockBadgeEnabled: true,
         alwaysShowScrollbars: false,
+        questionsInChat: false,
 
         // Event toggles (which events trigger notifications)
         notifyOnCompletion: true,
@@ -1720,6 +1751,8 @@ export const useUIStore = create<UIStore>()(
         agentControlToolEnabled: true,
         agentScheduleToolEnabled: true,
         agentWebToolEnabled: true,
+        // Off until the server says otherwise: it resolves the default (on) and sends it with
+        // every settings response, and a runtime with no OpenChamber server has no message search.
         messageSearchEnabled: false,
         messageSearchReasoningEnabled: false,
         browserProvider: 'builtin',
@@ -1729,6 +1762,9 @@ export const useUIStore = create<UIStore>()(
         agentUsageToolEnabled: false,
         agentImageToolEnabled: false,
         agentImageModel: '',
+        agentMemoryDreamingEnabled: false,
+        agentMemoryDreamingModel: '',
+        agentMemoryDreamingVariant: '',
         agentRenderToolEnabled: true,
         agentSecretToolEnabled: true,
         agentWorkflowToolEnabled: false,
@@ -1746,7 +1782,7 @@ export const useUIStore = create<UIStore>()(
         enterToSend: false,
         enterToSendConfigured: false,
         mobileReturnKeySends: false,
-        wideChatLayoutEnabled: false,
+        chatWidth: 'default',
         codeBlockLineWrap: true,
         tableCellWrap: true,
         copyMessagesAsPlainText: true,
@@ -2461,10 +2497,10 @@ export const useUIStore = create<UIStore>()(
         },
 
         setMobileWorkspaceTabOrder: (order) => {
-          set({ mobileWorkspaceTabOrder: orderMobileWorkspaceTabs(order) });
+          set((state) => ({ mobileWorkspaceTabOrder: storedMobileWorkspaceTabOrder(order, state.mobileWorkspaceTabOrder) }));
         },
 
-        setMobileWorkspaceTabVisible: (tab, visible) => {
+        setMobileWorkspaceTabVisible: (tab, visible, extensions) => {
           set((state) => {
             const hidden = state.mobileWorkspaceHiddenTabs;
             if (visible) {
@@ -2472,7 +2508,7 @@ export const useUIStore = create<UIStore>()(
             }
             if (hidden.includes(tab)) return state;
             // The last tab the user keeps stays: the drawer would have nothing to show.
-            const shown = shownMobileWorkspaceTabs(state.mobileWorkspaceTabOrder, hidden);
+            const shown = shownMobileWorkspaceTabs(state.mobileWorkspaceTabOrder, hidden, extensions);
             if (shown.length <= 1) return state;
             return { mobileWorkspaceHiddenTabs: [...hidden, tab] };
           });
@@ -2571,9 +2607,9 @@ export const useUIStore = create<UIStore>()(
             : { isScheduledTasksDialogOpen: false });
         },
 
-        setArchivePageOpen: (open, search = '') => {
+        setArchivePageOpen: (open) => {
           set(open
-            ? { isArchivePageOpen: true, archivePageSearch: search, archivePageOpenCount: get().archivePageOpenCount + 1, isUsageStatsPageOpen: false, isIntegrationsCatalogOpen: false, isSourceBoardOpen: false, isOverviewOpen: false, isScheduledTasksDialogOpen: false, worktreesPageProjectId: null, spacesPageProjectId: null, runOverviewKey: null, openGuestPageId: null }
+            ? { isArchivePageOpen: true, archivePageOpenCount: get().archivePageOpenCount + 1, isUsageStatsPageOpen: false, isIntegrationsCatalogOpen: false, isSourceBoardOpen: false, isOverviewOpen: false, isScheduledTasksDialogOpen: false, worktreesPageProjectId: null, spacesPageProjectId: null, runOverviewKey: null, openGuestPageId: null }
             : { isArchivePageOpen: false });
         },
 
@@ -2675,6 +2711,10 @@ export const useUIStore = create<UIStore>()(
         },
         requestSettingsJump: (page, itemId = null) => {
           set({ settingsJumpRequest: { page, itemId } });
+        },
+        openSettingsAt: (page, itemId = null) => {
+          get().requestSettingsJump(page, itemId);
+          get().setSettingsDialogOpen(true);
         },
         clearSettingsJumpRequest: () => {
           set({ settingsJumpRequest: null });
@@ -2800,6 +2840,10 @@ export const useUIStore = create<UIStore>()(
           set({ liveBrowserTabLimit: clampLiveBrowserTabs(value) });
         },
 
+        setAgentBrowserSharesLogins: (value) => {
+          set({ agentBrowserSharesLogins: value });
+        },
+
         setOpenTrackerLinksOnBoard: (value) => {
           set({ openTrackerLinksOnBoard: value });
         },
@@ -2872,6 +2916,10 @@ export const useUIStore = create<UIStore>()(
 
         setTerminalCloseOnExit: (value) => {
           set({ terminalCloseOnExit: value });
+        },
+
+        setTerminalOpenOnProjectAction: (value) => {
+          set({ terminalOpenOnProjectAction: value });
         },
 
         setEditorFontSize: (size) => {
@@ -3084,6 +3132,17 @@ export const useUIStore = create<UIStore>()(
             if (icon) next[normalizedProviderID] = icon;
             else delete next[normalizedProviderID];
             return { customProviderIcons: next };
+          });
+        },
+
+        setCustomProviderLogo: (providerID, logo) => {
+          const normalizedProviderID = providerID.trim();
+          if (!normalizedProviderID) return;
+          set((state) => {
+            const next = { ...state.customProviderLogos };
+            if (logo) next[normalizedProviderID] = logo;
+            else delete next[normalizedProviderID];
+            return { customProviderLogos: next };
           });
         },
 
@@ -3349,6 +3408,9 @@ export const useUIStore = create<UIStore>()(
         setAlwaysShowScrollbars: (value) => {
           set({ alwaysShowScrollbars: value });
         },
+        setQuestionsInChat: (value) => {
+          set({ questionsInChat: value });
+        },
 
         setNotifyOnCompletion: (value) => { set({ notifyOnCompletion: value }); },
         setNotifyOnPullRequests: (value) => { set({ notifyOnPullRequests: value }); },
@@ -3409,6 +3471,15 @@ export const useUIStore = create<UIStore>()(
         },
         setAgentImageModel: (value) => {
           set({ agentImageModel: value });
+        },
+        setAgentMemoryDreamingEnabled: (value) => {
+          set({ agentMemoryDreamingEnabled: value });
+        },
+        setAgentMemoryDreamingModel: (value) => {
+          set({ agentMemoryDreamingModel: value });
+        },
+        setAgentMemoryDreamingVariant: (value) => {
+          set({ agentMemoryDreamingVariant: value });
         },
         setAgentRenderToolEnabled: (value) => {
           set({ agentRenderToolEnabled: value });
@@ -3472,8 +3543,8 @@ export const useUIStore = create<UIStore>()(
         setMobileReturnKeySends: (value) => {
           set({ mobileReturnKeySends: value });
         },
-        setWideChatLayoutEnabled: (value) => {
-          set({ wideChatLayoutEnabled: value });
+        setChatWidth: (value) => {
+          set({ chatWidth: value });
         },
         setCodeBlockLineWrap: (value) => {
           set({ codeBlockLineWrap: value });
@@ -3581,7 +3652,7 @@ export const useUIStore = create<UIStore>()(
       {
         name: 'ui-store',
         storage: createDeferredSafeJSONStorage(),
-        version: 27,
+        version: 30,
         migrate: (persistedState, version) => {
           if (!persistedState || typeof persistedState !== 'object') {
             return persistedState;
@@ -3599,6 +3670,26 @@ export const useUIStore = create<UIStore>()(
           // the user arranged stays.
           if (version < 27 && Array.isArray(state.workStatusSectionOrder)) {
             state.workStatusSectionOrder = sanitizeWorkStatusSectionOrder(state.workStatusSectionOrder, false);
+          }
+
+          // v27 -> v28: the Editor font size default went from 13 to 12. The
+          // local copy holds 13 for everyone who never changed it; a 13 the
+          // user chose is restored from the synced settings after hydration.
+          if (version < 28 && state.editorFontSize === 13) {
+            state.editorFontSize = DEFAULT_EDITOR_FONT_SIZE;
+          }
+
+          // v28 -> v29: the Files tree's default width went from 240 to 208.
+          // The local copy holds 240 for everyone who never dragged it; a
+          // width the user set (any other) stays.
+          if (version < 29 && state.contextEditorTreeWidth === 240) {
+            state.contextEditorTreeWidth = DEFAULT_CONTEXT_EDITOR_TREE_WIDTH;
+          }
+
+          // v29 -> v30: the Wide chat layout switch became the Full chat width.
+          if (version < 30) {
+            state.chatWidth = state.wideChatLayoutEnabled === true ? 'full' : 'default';
+            delete state.wideChatLayoutEnabled;
           }
 
           // v20 -> v21: enable telemetry by default; preserve explicit choices.
@@ -3912,6 +4003,7 @@ export const useUIStore = create<UIStore>()(
           layoutAnimations: state.layoutAnimations,
           openLinksInBrowserPanel: state.openLinksInBrowserPanel,
           liveBrowserTabLimit: state.liveBrowserTabLimit,
+          agentBrowserSharesLogins: state.agentBrowserSharesLogins,
           openTrackerLinksOnBoard: state.openTrackerLinksOnBoard,
           autoDeleteAfterDays: state.autoDeleteAfterDays,
           sessionRetentionAction: state.sessionRetentionAction,
@@ -3928,6 +4020,7 @@ export const useUIStore = create<UIStore>()(
           terminalShell: state.terminalShell,
           terminalLoginShells: state.terminalLoginShells,
           terminalCloseOnExit: state.terminalCloseOnExit,
+          terminalOpenOnProjectAction: state.terminalOpenOnProjectAction,
           editorFontSize: state.editorFontSize,
           uiFont: state.uiFont,
           monoFont: state.monoFont,
@@ -3941,6 +4034,7 @@ export const useUIStore = create<UIStore>()(
           providerOrder: state.providerOrder,
           collapsedModelProviders: state.collapsedModelProviders,
           customProviderIcons: state.customProviderIcons,
+          customProviderLogos: state.customProviderLogos,
           recentModels: state.recentModels,
           lastSelectedModel: state.lastSelectedModel,
           recentAgents: state.recentAgents,
@@ -3963,6 +4057,7 @@ export const useUIStore = create<UIStore>()(
           notifyOnSubtasks: state.notifyOnSubtasks,
           dockBadgeEnabled: state.dockBadgeEnabled,
           alwaysShowScrollbars: state.alwaysShowScrollbars,
+          questionsInChat: state.questionsInChat,
           notifyOnCompletion: state.notifyOnCompletion,
           notifyOnPullRequests: state.notifyOnPullRequests,
           notifyOnError: state.notifyOnError,
@@ -3985,6 +4080,9 @@ export const useUIStore = create<UIStore>()(
           agentUsageToolEnabled: state.agentUsageToolEnabled,
           agentImageToolEnabled: state.agentImageToolEnabled,
           agentImageModel: state.agentImageModel,
+          agentMemoryDreamingEnabled: state.agentMemoryDreamingEnabled,
+          agentMemoryDreamingModel: state.agentMemoryDreamingModel,
+          agentMemoryDreamingVariant: state.agentMemoryDreamingVariant,
           agentRenderToolEnabled: state.agentRenderToolEnabled,
           agentSecretToolEnabled: state.agentSecretToolEnabled,
           agentWorkflowToolEnabled: state.agentWorkflowToolEnabled,
@@ -3996,7 +4094,7 @@ export const useUIStore = create<UIStore>()(
           enterToSend: state.enterToSend,
           enterToSendConfigured: state.enterToSendConfigured,
           mobileReturnKeySends: state.mobileReturnKeySends,
-          wideChatLayoutEnabled: state.wideChatLayoutEnabled,
+          chatWidth: state.chatWidth,
           codeBlockLineWrap: state.codeBlockLineWrap,
           tableCellWrap: state.tableCellWrap,
           copyMessagesAsPlainText: state.copyMessagesAsPlainText,

@@ -72,6 +72,12 @@ const responseFor = (input: RequestInfo | URL) => {
     data: liveSessions.map((record) => ({ ...record, location: { directory: record.directory } })),
     cursor: {},
   });
+  // A send reads the composer's session from the server before it switches the model.
+  const composerSession = /^\/api\/session\/(ses_composer_\d+)$/.exec(path)?.[1];
+  if (composerSession) return Response.json({
+    location,
+    data: { ...session(composerSession, 'Composer session'), model: { providerID: 'provider', id: 'model' }, location: { directory: DIRECTORY } },
+  });
   if (path === '/api/config') return Response.json([]);
   if (path === '/api/project') return Response.json([]);
   if (path.endsWith('/vcs')) return Response.json({ data: { branch: { current: 'main', default: 'main' } } });
@@ -84,7 +90,6 @@ spyOn(globalThis, 'fetch').mockImplementation(async (input) => responseFor(input
 plugin({
   name: 'composer-mentions-vite-modules',
   setup(build) {
-    build.onLoad({ filter: /markdown-shiki\.worker\.ts\?worker&url$/ }, () => ({ contents: 'export default "";', loader: 'js' }));
     build.onLoad({ filter: /useProviderLogo\.ts$/ }, ({ path }) => {
       const directory = resolve(dirname(path), '../assets/provider-logos');
       const logos = Object.fromEntries(readdirSync(directory).filter((name) => name.endsWith('.svg')).map((name) => [
