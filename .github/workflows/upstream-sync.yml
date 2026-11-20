@@ -15,32 +15,7 @@ permissions:
   contents: write
 
 jobs:
-  # The schedule fires only on the 2nd and 4th Friday (19:30 UTC = 01:00 IST
-  # Saturday). This job re-checks the date in IST, so a run that starts late, or a
-  # manual dispatch on the wrong day, still cannot merge an upstream release.
-  window:
-    runs-on: ubuntu-latest
-    outputs:
-      ok: ${{ steps.check.outputs.ok }}
-    steps:
-      - name: Check the run window
-        id: check
-        run: |
-          set -euo pipefail
-          DOW=$(TZ=Asia/Kolkata date +%u)      # 6 = Saturday
-          DOM=$(TZ=Asia/Kolkata date +%-d)
-          NTH=$(( (DOM - 1) / 7 + 1 ))
-          if [ "$DOW" = "6" ] && { [ "$NTH" = "2" ] || [ "$NTH" = "4" ]; }; then
-            echo "run window ok: Saturday #$NTH of the month ($DOM)"
-            echo "ok=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "outside the run window: weekday=$DOW day=$DOM (want the 2nd or 4th Saturday)"
-            echo "ok=false" >> "$GITHUB_OUTPUT"
-          fi
-
   sync-upstream:
-    needs: [window]
-    if: needs.window.outputs.ok == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout fork repository
