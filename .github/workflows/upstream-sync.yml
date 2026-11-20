@@ -42,7 +42,7 @@ jobs:
           # in favour of the previous one, so a failed/half-baked latest tag
           # never blocks the fork. If every tag is still inside the window we
           # take the newest anyway so the fork can never get stuck.
-          SOAK_HOURS="${SOAK_HOURS:-48}"
+          SOAK_HOURS="${SOAK_HOURS:-0}"
           NOW="$(date +%s)"
           LATEST_TAG=""
           while read -r T; do
