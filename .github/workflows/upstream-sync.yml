@@ -93,20 +93,19 @@ jobs:
           TAG="${{ steps.check_release.outputs.latest_tag }}"
           echo "Merging release $TAG..."
 
-          # Extract the OpenCode CLI version pinned in the upstream release Dockerfile
-          UPSTREAM_CLI_VER="$(git show "$TAG:Dockerfile" 2>/dev/null | grep -oE "@opencode/cli@[0-9.]+" | cut -d@ -f3 || true)"
-
           if ! git merge --no-edit "$TAG" -m "sync: absorb upstream release $TAG"; then
             echo "Handling upstream workflow conflicts..."
             sh .fork/sync-upstream-workflows.sh
 
-            # If Dockerfile conflicted on the CLI version or packaging lines, resolve it cleanly
+            # The fork owns the Dockerfile as a whole: it carries the Node
+            # install block and its build guard, which Debian's apt nodejs
+            # cannot provide. Keeping ours is intentional - taking upstream's
+            # Dockerfile would drop that block. The Node *version* is not
+            # hardcoded here; it is re-derived from engines.node below, so an
+            # upstream requirement bump still reaches the image.
             if git status --porcelain | grep -q "^UU Dockerfile\|^AA Dockerfile"; then
-              echo "Resolving Dockerfile merge conflict..."
+              echo "Resolving Dockerfile merge conflict: keeping the fork Dockerfile (Node block + guard)"
               git checkout HEAD -- Dockerfile
-              if [ -n "$UPSTREAM_CLI_VER" ]; then
-                sed -i "s|OPENCODE_CLI_VERSION=[0-9.]*|OPENCODE_CLI_VERSION=${UPSTREAM_CLI_VER}|g" Dockerfile
-              fi
               git add Dockerfile
             fi
 
@@ -126,6 +125,18 @@ jobs:
               git commit -m "chore(ci): reconcile upstream workflows"
             fi
           fi
+
+          # Keep the Dockerfile default aligned with the merged tree's
+          # engines.node (the image itself always gets the derived version from
+          # CircleCI). Then prove the merge did not drop the Node block or its
+          # guard: a sync that would ship a stale Node fails here, before the
+          # push that triggers the image build and the deployment.
+          sh .fork/reconcile-node-version.sh
+          if ! git diff --quiet Dockerfile; then
+            git add Dockerfile
+            git commit -m "chore(docker): track Node requirement from engines.node"
+          fi
+          sh .fork/check-dockerfile.sh
 
           # Update the image tag in docker-compose.yaml to match the newly absorbed release
           if [ -f docker-compose.yaml ]; then

@@ -9,9 +9,9 @@ Read this whole file before touching the working tree.
 
 - Fork: `sourabhjagga/openchamber-harden` (`origin`)
 - Upstream: `openchamber/openchamber` (`upstream`)
-- Last synced upstream tag: **v2.5.1** (`3e9ef4db1`)
-- Fork commits ahead of that base: **24** (listed in Appendix A), plus the
-  merge commit that brought v2.5.1 in
+- Last synced upstream tag: **v2.7.3** (`cf18602c`)
+- Fork commits ahead of that base: **104** (Appendix A predates the
+  v2.6/v2.7 syncs and is stale)
 
 ---
 
@@ -75,69 +75,39 @@ Details for the two groups that need real thought (1–2 and 6) follow.
 ### 2.1 Image build (`Dockerfile`)
 
 Upstream's Dockerfile is a 3-stage build (`base` → `deps` → `builder` →
-`runtime`). The fork adds a fourth stage and a lot of runtime extras.
+`runtime`). As of v2.7.3 the fork's only Dockerfile difference is the Node
+block; the extras this document used to describe (a `prod-deps` prune stage, a
+Chromium flavour switch, uv/Engram, a vendored MCP tree) are **no longer in the
+tree**. Do not re-add them from memory - read the file.
 
-Stage order (names are stable, line numbers drift):
+**Node invariant (must survive every merge).** Debian's `nodejs` package is
+several majors behind `engines.node` (trixie ships v20, the app declares
+`>= 24.14`), so the runtime copies Node from the official image instead:
 
-```
-base → deps → builder          upstream
-            ↘ prod-deps        fork: production-only install
-runtime                        upstream + fork blocks
-```
+1. `ARG NODE_VERSION=<major>` before the first `FROM`, then
+   `FROM node:${NODE_VERSION}-bookworm-slim AS node-dist` (a bookworm binary
+   runs on the trixie runtime; the reverse would not).
+2. The runtime apt list must **not** contain `nodejs` or `npm`; it installs
+   `libstdc++6` for the official binary instead.
+3. `COPY --from=node-dist /usr/local/bin/node` and the npm tree, plus the
+   `npm`/`npx` symlinks.
+4. `COPY --from=builder /app/.fork/check-node-version.mjs` + `RUN node …`
+   compares the image's Node with every `engines.node` in the tree and fails
+   the build when it is older.
 
-Fork blocks, in the order they appear in `runtime`:
+The version is never edited by hand for a release: CircleCI runs
+`.fork/resolve-node-version.sh` (reads `engines.node` and `.nvmrc`), passes
+`--build-arg NODE_VERSION=<major>`, then re-checks the image it just built.
+`.fork/check-dockerfile.sh` asserts the four markers above; it runs in CI and in
+the upstream sync job, so a merge that drops the block fails instead of shipping
+a stale Node. The sync job additionally runs
+`.fork/reconcile-node-version.sh` so the `ARG` default follows an upstream
+requirement bump.
 
-1. `apt-get` baseline (`bash bzip2 ca-certificates curl git less
-   openssh-client python3 python3-pip`) — upstream may have its own list;
-   union them, do not drop one.
-2. `uv` via `astral.sh/uv/install.sh` into `/usr/local/bin` (`UV_INSTALL_DIR`).
-3. `ARG CHROMIUM_FLAVOR=debian` + `CHROME_HEADLESS_SHELL_VERSION` +
-   `CHROME_HEADLESS_SHELL_SHA256`, then the conditional apt list and the
-   `cft-shell` download path. **Default must stay `debian`.** The `debian`
-   branch also asserts `test -u /usr/lib/chromium/chrome-sandbox` — keep it.
-4. The `/usr/local/bin/chromium` wrapper heredoc. Behaviour:
-   `unshare -U true` probe → run with the browser's own sandbox; if the
-   process is gone after 2 s → relaunch with `--no-sandbox`. It must **not**
-   `exec` on the first attempt (that is what allows the fallback).
-5. `ARG ENGRAM_VERSION` / `ENGRAM_SHA256` + verified `curl | tar` into
-   `/usr/local/bin`.
-6. `ARG NODE_VERSION=24` + NodeSource install.
-7. `userdel bun` → `groupadd/useradd -g 1000 openchamber`; volume ownership
-   depends on uid 1000.
-8. `NPM_CONFIG_PREFIX=/home/openchamber/.npm-global` and
-   `npm install -g @opencode/cli@<version>` as the runtime user.
-9. Vendor block: `ARG ANALYTICS_MCP_VERSION`, `MARKITDOWN_MCP_VERSION`,
-   `SUPERGATEWAY_VERSION`; venvs built **at their final absolute path**
-   (`/home/openchamber/.config/opencode/vendor/<name>`) because a venv bakes
-   its own path into every shebang; tarred into
-   `/home/openchamber/.mcp-vendor/`; then the source dirs are deleted. Every
-   version uses `${VAR:?unset}` so an unset ARG fails the build loudly.
-10. `cloudflared` copied by digest from `cloudflare/cloudflared@sha256:…`.
-11. Runtime `COPY --from=prod-deps` for `/app/node_modules` and
-    `/app/packages/web/node_modules`; everything else copies from `builder`.
-12. The `chmod -R a+rX …/built-in-extensions` fix. Upstream can ship that
-    directory as `0700`, which crashes the server for uid 1000. **Keep it**,
-    it is a one-line guard against an upstream regression.
-
-`prod-deps` stage:
-
-```dockerfile
-FROM deps AS prod-deps
-ARG PRUNE_DEV_DEPS=true
-RUN if [ "$PRUNE_DEV_DEPS" = "true" ]; then \
-      rm -rf node_modules packages/*/node_modules \
-      && bun install --frozen-lockfile --ignore-scripts --production \
-      && cd packages/web && bun -e '… import.meta.resolve(…) …' …
-```
-
-The prune is a **fresh production install**, not a deletion from the
-installed tree: Bun hardlinks the store, so deleting the top level leaves
-dangling symlinks. `PRUNE_DEV_DEPS=false` restores the full tree without
-reverting the commit — that is the escape hatch if an upstream release starts
-importing a dev dependency at runtime.
-
-Measured effect of this stage alone: `node_modules` 1400 MB → 654 MB, image
-1646.9 MB → 1446.9 MB compressed.
+A Dockerfile conflict during a merge keeps the fork's file (the sync job does
+`git checkout HEAD -- Dockerfile`), which is deliberate: taking upstream's file
+would drop the Node block. The Node *version* still follows upstream because it
+is derived from the merged `engines.node`, not from the file.
 
 ### 2.2 Orphan reaping (server code)
 
@@ -538,16 +508,20 @@ commit that lands upstream v2.5.1 sits on top of these and is not counted.
 - [ ] `git status` clean before starting; prod healthy before starting
 - [ ] merged the upstream **tag**, not a random `main` commit
 - [ ] `sh .fork/sync-upstream-workflows.sh` run after the merge
-- [ ] `renovate.json` re-checked for the fork's `schedule` / Node ARG manager
-- [ ] `Dockerfile`: all 12 fork blocks present, ARG defaults unchanged
+- [ ] `renovate.json` re-checked for the fork's `schedule` (the file only
+      exists if a previous sync restored upstream's; it is not required)
+- [ ] `sh .fork/check-dockerfile.sh` passes (official-Node block + build guard
+      still present)
+- [ ] `sh .fork/reconcile-node-version.sh` ran; `ARG NODE_VERSION` equals the
+      major from `engines.node`
+- [ ] CircleCI "Verify the image ships Node >= engines.node" step is green
 - [ ] `Dockerfile` CLI version == `package.json` `@opencode/client`
-- [ ] `prod-deps` still referenced by the runtime `COPY`s
 - [ ] reaping wiring re-derived, not blindly resolved
 - [ ] `bun.lock` regenerated, not hand-merged
 - [ ] `package.json` version == `docker-compose.yaml` tag
 - [ ] tests: cleanup module test, type-check, lint
 - [ ] CI green, deploy step green
 - [ ] `sh scripts/smoke-test.sh` → 12/12
-- [ ] bridge pid alive with ppid 1, `/opt/browser/chrome --version` sane
+- [ ] orphan sweeper still present in `scripts/docker-entrypoint.sh`
 - [ ] one project chat answers; Server Browser loads a page
 - [ ] rollback target noted (previous image tag)
