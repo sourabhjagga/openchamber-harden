@@ -56,10 +56,13 @@ fi
 section "tooling"
 if command -v node >/dev/null 2>&1; then
   node_ver="$(node --version 2>&1)"
-  case "$node_ver" in
-    v24.*) ok "node version is $node_ver (Node 24)" ;;
-    *) bad "expected Node 24, got $node_ver" ;;
-  esac
+  node_got="${node_ver#v}"
+  node_req="$(sed -n 's/.*"node"[[:space:]]*:[[:space:]]*">=[[:space:]]*\([0-9][0-9.]*\)".*/\1/p' "${HOME_DIR}/package.json" 2>/dev/null | head -n 1)"
+  if [ -n "$node_req" ] && [ "$(printf '%s\n%s\n' "$node_req" "$node_got" | sort -V | head -n 1)" = "$node_req" ]; then
+    ok "node version is $node_ver (engines.node >= $node_req)"
+  else
+    bad "expected node >= ${node_req:-unknown}, got $node_ver"
+  fi
 else
   bad "node is missing"
 fi

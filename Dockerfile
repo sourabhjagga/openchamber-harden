@@ -1,4 +1,13 @@
 # syntax=docker/dockerfile:1
+
+# Node comes from the official image, not from Debian's apt archive: Debian
+# ships Node 20 while the app declares `engines.node` >= 24.14, and an apt
+# install silently produced an image below the requirement. CircleCI derives
+# the major from engines.node (.fork/resolve-node-version.sh) and passes it as
+# --build-arg; the build then verifies it with .fork/check-node-version.mjs.
+ARG NODE_VERSION=24
+FROM node:${NODE_VERSION}-bookworm-slim AS node-dist
+
 FROM oven/bun:1.4.4 AS base
 WORKDIR /app
 
@@ -32,11 +41,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   ca-certificates \
   git \
   less \
-  nodejs \
-  npm \
+  libstdc++6 \
   openssh-client \
   python3 \
   && rm -rf /var/lib/apt/lists/*
+
+# Node + npm from the official Node image (the bookworm build runs on this
+# trixie base: an older glibc binary works on a newer glibc).
+COPY --from=node-dist /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-dist /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+RUN ln -sf ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+  && ln -sf ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+  && node --version \
+  && npm --version
 
 # Replace the base image's 'bun' user (UID 1000) with 'openchamber'
 # so mounted volumes with 1000:1000 ownership work correctly.
@@ -73,6 +90,12 @@ COPY --from=builder /app/packages/sdk/package.json ./packages/sdk/package.json
 COPY --from=builder /app/packages/sdk/dist ./packages/sdk/dist
 COPY --from=builder /app/packages/web/build ./packages/web/build
 COPY --from=builder /app/packages/web/dist ./packages/web/dist
+
+# Never publish an image whose Node is older than engines.node. This is the
+# safety net for a forgotten --build-arg, a stale image tag, or a future
+# upstream merge that changes how Node is installed.
+COPY --from=builder /app/.fork/check-node-version.mjs /tmp/check-node-version.mjs
+RUN node /tmp/check-node-version.mjs
 
 EXPOSE 3000
 

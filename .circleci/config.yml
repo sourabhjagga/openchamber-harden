@@ -6,16 +6,52 @@ jobs:
     resource_class: arm.medium
     steps:
       - checkout
+      # The Node requirement lives in the repository (engines.node + .nvmrc).
+      # Resolve it here, and refuse to build if the Dockerfile lost the Node
+      # install block or its build-time guard.
+      - run:
+          name: Resolve the Node version required by engines.node
+          command: |
+            sh .fork/check-dockerfile.sh
+            NODE_MAJOR=$(sh .fork/resolve-node-version.sh)
+            echo "export NODE_MAJOR=$NODE_MAJOR" >> "$BASH_ENV"
+            echo "Building with NODE_VERSION=$NODE_MAJOR (from engines.node)"
       - run: docker login -u "$DOCKER_LOGIN" -p "$DOCKER_PASSWORD"
-      - run: |
-          VERSION_TAG=$(echo "$CIRCLE_SHA1" | cut -c1-7)
-          APP_VERSION=$(grep -m1 '"version"' package.json | sed 's/[^0-9.]//g')
-          set -o pipefail
-          docker build -t sourabhjagga/openchamber-harden:latest -t sourabhjagga/openchamber-harden:main -t sourabhjagga/openchamber-harden:${VERSION_TAG} -t sourabhjagga/openchamber-harden:v${APP_VERSION} . 2>&1 | tee /tmp/oc-build.log
-          docker push sourabhjagga/openchamber-harden:latest
-          docker push sourabhjagga/openchamber-harden:main
-          docker push sourabhjagga/openchamber-harden:${VERSION_TAG}
-          docker push sourabhjagga/openchamber-harden:v${APP_VERSION}
+      - run:
+          name: Build the image
+          command: |
+            VERSION_TAG=$(echo "$CIRCLE_SHA1" | cut -c1-7)
+            APP_VERSION=$(grep -m1 '"version"' package.json | sed 's/[^0-9.]//g')
+            echo "export VERSION_TAG=$VERSION_TAG" >> "$BASH_ENV"
+            echo "export APP_VERSION=$APP_VERSION" >> "$BASH_ENV"
+            set -o pipefail
+            docker build \
+              --build-arg NODE_VERSION="$NODE_MAJOR" \
+              -t sourabhjagga/openchamber-harden:latest \
+              -t sourabhjagga/openchamber-harden:main \
+              -t sourabhjagga/openchamber-harden:${VERSION_TAG} \
+              -t sourabhjagga/openchamber-harden:v${APP_VERSION} \
+              . 2>&1 | tee /tmp/oc-build.log
+      # Verify the image that was actually produced, not just the Dockerfile:
+      # if `node` in the image is below engines.node, this fails and nothing is
+      # pushed or deployed. The same check runs inside `docker build`, so this
+      # is the second net (PATH resolution, a stale layer, a wrong base image).
+      - run:
+          name: Verify the image ships Node >= engines.node
+          command: |
+            IMAGE="sourabhjagga/openchamber-harden:${VERSION_TAG}"
+            docker run --rm --entrypoint node "$IMAGE" --version
+            docker run --rm --entrypoint npm "$IMAGE" --version
+            docker run --rm --entrypoint node \
+              -v "$PWD/.fork:/node-check:ro" \
+              "$IMAGE" /node-check/check-node-version.mjs
+      - run:
+          name: Push the image
+          command: |
+            docker push sourabhjagga/openchamber-harden:latest
+            docker push sourabhjagga/openchamber-harden:main
+            docker push sourabhjagga/openchamber-harden:${VERSION_TAG}
+            docker push sourabhjagga/openchamber-harden:v${APP_VERSION}
       # Publish the build log even when the build failed, so the failure can
       # be read without opening CircleCI.
       - run:

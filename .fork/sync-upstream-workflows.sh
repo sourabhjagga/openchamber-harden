@@ -68,6 +68,13 @@ oc-review.yml
 UPSTREAM_RUNNER="blacksmith-4vcpu-ubuntu-2404"
 FORK_RUNNER="ubuntu-latest"
 
+# Upstream tests that read a workflow this fork deletes. They throw on import
+# because the YAML file is gone, so `bun test` fails for every pull request.
+# Removed with the workflow, restored by --restore.
+ORPHAN_WORKFLOW_TESTS="
+scripts/release-workflow.test.mjs
+"
+
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
 
@@ -78,6 +85,12 @@ restore() {
       echo "restored .github/workflows/$wf"
     else
       echo "skip $wf (not present upstream)"
+    fi
+  done
+  for t in $ORPHAN_WORKFLOW_TESTS; do
+    if git cat-file -e "upstream/main:$t" 2>/dev/null; then
+      git checkout upstream/main -- "$t"
+      echo "restored $t"
     fi
   done
 }
@@ -104,6 +117,13 @@ apply() {
         echo "disabled $name"
         ;;
     esac
+  done
+
+  for t in $ORPHAN_WORKFLOW_TESTS; do
+    if [ -f "$t" ]; then
+      git rm -f --quiet "$t" 2>/dev/null || rm -f "$t"
+      echo "removed $t (asserts a workflow this fork deletes)"
+    fi
   done
 }
 
