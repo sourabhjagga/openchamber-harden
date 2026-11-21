@@ -93,6 +93,17 @@ jobs:
           TAG="${{ steps.check_release.outputs.latest_tag }}"
           echo "Merging release $TAG..."
 
+          # Did upstream touch the Dockerfile in this release? If the merge
+          # then keeps the fork file, upstream's changes were dropped and a
+          # human has to port them - warn loudly instead of forgetting it.
+          MERGE_BASE="$(git merge-base HEAD "$TAG" 2>/dev/null || true)"
+          UPSTREAM_DOCKERFILE_CHANGED=false
+          if [ -n "$MERGE_BASE" ] && ! git diff --quiet "$MERGE_BASE" "$TAG" -- Dockerfile; then
+            UPSTREAM_DOCKERFILE_CHANGED=true
+            echo "Upstream changed the Dockerfile in $TAG:"
+            git diff --stat "$MERGE_BASE" "$TAG" -- Dockerfile || true
+          fi
+
           if ! git merge --no-edit "$TAG" -m "sync: absorb upstream release $TAG"; then
             echo "Handling upstream workflow conflicts..."
             sh .fork/sync-upstream-workflows.sh
@@ -107,6 +118,9 @@ jobs:
               echo "Resolving Dockerfile merge conflict: keeping the fork Dockerfile (Node block + guard)"
               git checkout HEAD -- Dockerfile
               git add Dockerfile
+              if [ "$UPSTREAM_DOCKERFILE_CHANGED" = "true" ]; then
+                echo "::warning file=Dockerfile::Upstream changed the Dockerfile in $TAG, but the fork file was kept. Port upstream's changes by hand (see .fork/UPSTREAM-SYNC.md); only ARG NODE_VERSION, the oven/bun tag and the @opencode/cli pin are aligned automatically."
+              fi
             fi
 
             # Fail only if there are real code conflicts outside .github/workflows
@@ -126,15 +140,16 @@ jobs:
             fi
           fi
 
-          # Keep the Dockerfile default aligned with the merged tree's
-          # engines.node (the image itself always gets the derived version from
-          # CircleCI). Then prove the merge did not drop the Node block or its
-          # guard: a sync that would ship a stale Node fails here, before the
-          # push that triggers the image build and the deployment.
-          sh .fork/reconcile-node-version.sh
+          # Align the pinned versions in the Dockerfile with what the merged
+          # tree declares: engines.node/.fork/node-major (Node), packageManager
+          # (oven/bun tag) and @opencode/client (the CLI pin). Then prove the
+          # merge did not drop a block or leave a version skewed: a sync that
+          # would ship a drifted toolchain fails here, before the push that
+          # triggers the image build and the deployment.
+          sh .fork/reconcile-tool-versions.sh
           if ! git diff --quiet Dockerfile; then
             git add Dockerfile
-            git commit -m "chore(docker): track Node requirement from engines.node"
+            git commit -m "chore(docker): track declared tool versions"
           fi
           sh .fork/check-dockerfile.sh
 

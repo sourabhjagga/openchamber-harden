@@ -7,7 +7,7 @@
 # --build-arg; the build then verifies it with .fork/check-node-version.mjs.
 # The major comes from .fork/node-major (kept in step with the Node line the
 # upstream CI uses) unless engines.node demands a newer one; see
-# .fork/resolve-node-version.sh and .fork/reconcile-node-version.sh.
+# .fork/resolve-node-version.sh, .fork/reconcile-tool-versions.sh and .fork/check-dockerfile.sh.
 ARG NODE_VERSION=26
 # uv/uvx run the Python MCP servers the integrations catalog declares
 # (`uvx markitdown-mcp`, `uvx mcp-grafana`). Pinned; bump like any other ARG.

@@ -58,7 +58,7 @@ ARG_NODE=$(sed -n 's/^ARG NODE_VERSION=\([0-9][0-9]*\).*/\1/p' "$DOCKERFILE" | h
 if [ -z "$ARG_NODE" ]; then
   fail 'ARG NODE_VERSION has no numeric default'
 elif [ "$ARG_NODE" != "$EXPECTED_NODE" ]; then
-  fail "ARG NODE_VERSION=$ARG_NODE but the resolver says $EXPECTED_NODE (run .fork/reconcile-node-version.sh)"
+  fail "ARG NODE_VERSION=$ARG_NODE but the resolver says $EXPECTED_NODE (run .fork/reconcile-tool-versions.sh)"
 fi
 
 # Debian's nodejs package is the original bug: it is always behind the app's

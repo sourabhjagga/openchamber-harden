@@ -125,7 +125,7 @@ for (const { file, range } of requirements) {
 if (failed) {
   console.error(
     `[node-check] Node ${label} does not satisfy the declared engines.node range(s).\n` +
-      '[node-check] Fix: run `.fork/reconcile-node-version.sh`, or bump ARG NODE_VERSION in the Dockerfile.',
+      '[node-check] Fix: run `.fork/reconcile-tool-versions.sh`, or bump ARG NODE_VERSION in the Dockerfile.',
   );
   process.exit(1);
 }

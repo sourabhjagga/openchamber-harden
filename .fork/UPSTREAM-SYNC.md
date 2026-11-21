@@ -66,7 +66,7 @@ different rule; the rule column is what actually matters.
 
 | # | Area | Files | Why | Merge rule |
 |---|---|---|---|---|
-| 1 | Runtime tooling versions | `Dockerfile` (`ARG NODE_VERSION`, `node-dist` stage, build guard, `ARG UV_VERSION`, Chromium wrapper), `.fork/node-major`, `.fork/resolve-node-version.sh`, `.fork/check-node-version.mjs`, `.fork/check-dockerfile.sh`, `.fork/reconcile-node-version.sh` | Debian's apt `nodejs` is v20 while the app declares `engines.node >= 24.14`; uv/uvx run Python MCP servers and Chromium runs the Server Browser | **Keep ours**; versions are derived from `engines.node`/`.fork/node-major`/`packageManager`, and the sync job fails if the blocks or guards are gone |
+| 1 | Runtime tooling versions | `Dockerfile` (`ARG NODE_VERSION`, `node-dist` stage, build guard, `ARG UV_VERSION`, Chromium wrapper), `.fork/node-major`, `.fork/resolve-node-version.sh`, `.fork/check-node-version.mjs`, `.fork/check-dockerfile.sh`, `.fork/reconcile-tool-versions.sh` | Debian's apt `nodejs` is v20 while the app declares `engines.node >= 24.14`; uv/uvx run Python MCP servers and Chromium runs the Server Browser | **Keep ours**; versions are derived from `engines.node`/`.fork/node-major`/`packageManager`, and the sync job fails if the blocks or guards are gone |
 | 2 | Orphan process sweeper | `scripts/docker-entrypoint.sh` (background sweep) | Detached MCP children reparented to init hold memory | **Keep ours**, re-verify against upstream's entrypoint |
 | 3 | CI/CD | `.circleci/config.yml`, `.fork/*.sh`, `docker-compose.yaml` | This fork ships an image, not npm/desktop/mobile artifacts | **Keep ours** |
 | 4 | Upstream workflows | `.github/workflows/*`, plus tests that import a deleted workflow (`scripts/release-workflow.test.mjs`) | Upstream workflows need upstream's GitHub App and Blacksmith runners, and publish artifacts nobody here consumes | **Take upstream, then run `.fork/sync-upstream-workflows.sh`** (it also removes those tests, which otherwise fail `bun test` on import) |
@@ -110,8 +110,10 @@ tools: `oven/bun:<version>` against `packageManager`, the `@opencode/cli` pin
 against `@opencode/client`, and the uv/uvx and Chromium blocks below. It runs in CI and in
 the upstream sync job, so a merge that drops the block fails instead of shipping
 a stale Node. The sync job additionally runs
-`.fork/reconcile-node-version.sh` so the `ARG` default follows an upstream
-requirement bump.
+`.fork/reconcile-tool-versions.sh` so the `ARG` default follows an upstream
+requirement bump, and the `oven/bun` tag plus the `@opencode/cli` pin are
+rewritten from `packageManager` and `@opencode/client`, so a Bun or CLI bump
+does not leave the Dockerfile behind.
 
 **Runtime tooling the app expects (also checked).** The runtime stage installs:
 
@@ -236,7 +238,7 @@ entrypoint took the merge cleanly. Expect a similar shape.
 |---|---|
 | `.github/workflows/{nix-eval,nix-hashes,pr-intake,pr-review,stale}.yml` and the other 17 disabled ones | `git checkout --ours .github/workflows` (or `git rm`) then `sh .fork/sync-upstream-workflows.sh`. Never hand-edit these. |
 | `.github/workflows/oc-review.yml` | Take **upstream's**, then let the script repoint `blacksmith-4vcpu-ubuntu-2404` → `ubuntu-latest`. |
-| `renovate.json` | The fork currently ships **no** `renovate.json`. If upstream's is restored, keep only what the fork needs; the Node ARG is maintained by `.fork/reconcile-node-version.sh`, not by Renovate. |
+| `renovate.json` | The fork currently ships **no** `renovate.json`. If upstream's is restored, keep only what the fork needs; the pinned versions are maintained by `.fork/reconcile-tool-versions.sh`, not by Renovate. |
 | `docker-compose.yaml` | Take **ours**. It is fork-only in practice (upstream ships a different compose). Check the image tag, `security_opt: seccomp=unconfined`, `shm_size: 1gb`, the volume list, and the `OPENCHAMBER_UI_PASSWORD` guard. |
 | `.circleci/config.yml`, `.fork/*` | Take **ours**, wholesale. Upstream has no such pipeline. |
 | `Dockerfile` | Take **ours**: it carries the Node block and its guard. Port upstream's real changes into it by hand (see below). Never resolve with upstream's file. |
@@ -259,7 +261,7 @@ entrypoint took the merge cleanly. Expect a similar shape.
    to the same version - they are a pair.
 5. `ENTRYPOINT` must stay
    `["sh", "/home/openchamber/openchamber-entrypoint.sh"]`.
-6. Run `sh .fork/reconcile-node-version.sh && sh .fork/check-dockerfile.sh`
+6. Run `sh .fork/reconcile-tool-versions.sh && sh .fork/check-dockerfile.sh`
    before committing.
 
 ---
@@ -275,7 +277,7 @@ bun run lint
 
 # the Node invariant: block present, ARG in step, guard present
 sh .fork/check-dockerfile.sh
-sh .fork/reconcile-node-version.sh
+sh .fork/reconcile-tool-versions.sh
 sh .fork/resolve-node-version.sh          # prints the major CI will pass
 ```
 
@@ -491,7 +493,7 @@ commit that lands upstream v2.5.1 sits on top of these and is not counted.
 | `.circleci/*` | fork | upstream uses GitHub Actions |
 | `docker-compose.yaml` | fork | upstream ships a different one |
 | `.github/workflows/*` | upstream | re-run the sync script after every merge |
-| `renovate.json` | fork | currently not shipped; the Node ARG is maintained by `.fork/reconcile-node-version.sh` |
+| `renovate.json` | fork | currently not shipped; the Node ARG is maintained by `.fork/reconcile-tool-versions.sh` |
 | `package.json` / `bun.lock` | upstream | except `@opencode/client`, which must match the CLI pin |
 | `AGENTS.md`, `CLAUDE.md`, `README.md` | upstream | do not put fork notes here, it conflicts every sync |
 
@@ -506,7 +508,7 @@ commit that lands upstream v2.5.1 sits on top of these and is not counted.
       exists if a previous sync restored upstream's; it is not required)
 - [ ] `sh .fork/check-dockerfile.sh` passes (official-Node block + build guard
       still present)
-- [ ] `sh .fork/reconcile-node-version.sh` ran; `ARG NODE_VERSION` equals the
+- [ ] `sh .fork/reconcile-tool-versions.sh` ran; `ARG NODE_VERSION` equals the
       major from `engines.node`
 - [ ] CircleCI "Verify the image ships Node >= engines.node" step is green
 - [ ] `Dockerfile` CLI version == `package.json` `@opencode/client` (also
