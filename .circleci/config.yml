@@ -17,6 +17,18 @@ jobs:
             echo "export NODE_MAJOR=$NODE_MAJOR" >> "$BASH_ENV"
             echo "Building with NODE_VERSION=$NODE_MAJOR (from engines.node)"
       - run: docker login -u "$DOCKER_LOGIN" -p "$DOCKER_PASSWORD"
+      # The web bundling step peaks above the arm.medium runner's RAM: without
+      # swap, `bun run build:web` is OOM-killed (exit 137) at the "rendering
+      # chunks" phase, intermittently, on identical commits. Swap keeps the
+      # build alive instead of turning it into a coin flip.
+      - run:
+          name: Add swap for the web build
+          command: |
+            sudo fallocate -l 8G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192
+            sudo chmod 600 /swapfile
+            sudo mkswap /swapfile
+            sudo swapon /swapfile
+            free -h || true
       - run:
           name: Build the image
           command: |
