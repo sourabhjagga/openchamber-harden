@@ -69,7 +69,7 @@ different rule; the rule column is what actually matters.
 | 1 | Node runtime | `Dockerfile` (`ARG NODE_VERSION`, `node-dist` stage, build guard), `.fork/resolve-node-version.sh`, `.fork/check-node-version.mjs`, `.fork/check-dockerfile.sh`, `.fork/reconcile-node-version.sh` | Debian's apt `nodejs` is v20, the app declares `engines.node >= 24.14` | **Keep ours**; the version is derived from `engines.node`, and the sync job fails if the block or guard is gone |
 | 2 | Orphan process sweeper | `scripts/docker-entrypoint.sh` (background sweep) | Detached MCP children reparented to init hold memory | **Keep ours**, re-verify against upstream's entrypoint |
 | 3 | CI/CD | `.circleci/config.yml`, `.fork/*.sh`, `docker-compose.yaml` | This fork ships an image, not npm/desktop/mobile artifacts | **Keep ours** |
-| 4 | Upstream workflows | `.github/workflows/*` | Upstream workflows need upstream's GitHub App and Blacksmith runners, and publish artifacts nobody here consumes | **Take upstream, then run `.fork/sync-upstream-workflows.sh`** |
+| 4 | Upstream workflows | `.github/workflows/*`, plus tests that import a deleted workflow (`scripts/release-workflow.test.mjs`) | Upstream workflows need upstream's GitHub App and Blacksmith runners, and publish artifacts nobody here consumes | **Take upstream, then run `.fork/sync-upstream-workflows.sh`** (it also removes those tests, which otherwise fail `bun test` on import) |
 | 5 | Smoke test | `scripts/smoke-test.sh` | Post-deploy checks no upstream job runs | **Keep ours** |
 
 Details for the groups that need real thought (1–2) follow.

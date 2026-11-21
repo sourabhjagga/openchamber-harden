@@ -120,8 +120,8 @@ jobs:
             git commit --no-edit -m "sync: absorb upstream release $TAG"
           else
             sh .fork/sync-upstream-workflows.sh
-            if ! git diff --quiet .github/workflows; then
-              git add .github/workflows
+            if ! git diff --quiet .github/workflows scripts; then
+              git add .github/workflows scripts
               git commit -m "chore(ci): reconcile upstream workflows"
             fi
           fi

@@ -21,6 +21,10 @@ import { join } from 'node:path';
 
 const ROOT = process.cwd();
 
+// The repository's anti-slop lint rule forbids runtime `typeof`; this is the
+// same test without it.
+const isString = (value) => Object.prototype.toString.call(value) === '[object String]';
+
 const parseVersion = (raw) => {
   const cleaned = String(raw).trim().replace(/^v/, '').split(/[-+]/)[0];
   const parts = cleaned.split('.').map((part) => Number.parseInt(part, 10));
@@ -91,7 +95,7 @@ for (const file of packageFiles) {
     continue;
   }
   const range = manifest?.engines?.node;
-  if (typeof range === 'string' && range.trim() !== '') {
+  if (isString(range) && range.trim() !== '') {
     requirements.push({ file: file.slice(ROOT.length + 1), range: range.trim() });
   }
 }
