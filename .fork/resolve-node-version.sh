@@ -3,6 +3,10 @@
 #
 # The requirement lives in the repository, not in the CI config:
 #   - `engines.node` in the root package.json and in every packages/*/package.json
+#   - `.fork/node-major`: the major this fork wants to run (kept equal to the
+#     Node line the upstream CI uses, currently 26). It only wins while it
+#     still satisfies engines.node, so an upstream requirement bump is never
+#     silently undercut.
 #   - `.nvmrc` (a hint; `lts/<codename>` is mapped below)
 #
 # CircleCI runs this before `docker build` and passes the result as
@@ -50,8 +54,18 @@ if [ -f .nvmrc ]; then
   esac
 fi
 
-if [ "$NVMRC_MAJOR" -gt "$FLOORS" ] 2>/dev/null; then
-  printf '%s\n' "$NVMRC_MAJOR"
-else
-  printf '%s\n' "$FLOORS"
+FORK_MAJOR=0
+if [ -f .fork/node-major ]; then
+  candidate=$(tr -dc '0-9' < .fork/node-major)
+  if [ -n "$candidate" ]; then
+    FORK_MAJOR=$candidate
+  fi
 fi
+BEST=$FLOORS
+for major in "$NVMRC_MAJOR" "$FORK_MAJOR"; do
+  if [ "$major" -gt "$BEST" ] 2>/dev/null; then
+    BEST=$major
+  fi
+done
+printf '%s\n' "$BEST"
+

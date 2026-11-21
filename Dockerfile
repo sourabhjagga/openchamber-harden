@@ -5,8 +5,15 @@
 # install silently produced an image below the requirement. CircleCI derives
 # the major from engines.node (.fork/resolve-node-version.sh) and passes it as
 # --build-arg; the build then verifies it with .fork/check-node-version.mjs.
-ARG NODE_VERSION=24
+# The major comes from .fork/node-major (kept in step with the Node line the
+# upstream CI uses) unless engines.node demands a newer one; see
+# .fork/resolve-node-version.sh and .fork/reconcile-node-version.sh.
+ARG NODE_VERSION=26
+# uv/uvx run the Python MCP servers the integrations catalog declares
+# (`uvx markitdown-mcp`, `uvx mcp-grafana`). Pinned; bump like any other ARG.
+ARG UV_VERSION=0.13.9
 FROM node:${NODE_VERSION}-bookworm-slim AS node-dist
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv-dist
 
 FROM oven/bun:1.4.4 AS base
 WORKDIR /app
@@ -39,6 +46,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   bash \
   bzip2 \
   ca-certificates \
+  chromium \
+  curl \
   git \
   less \
   libstdc++6 \
@@ -54,6 +63,50 @@ RUN ln -sf ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
   && ln -sf ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
   && node --version \
   && npm --version
+
+# uv + uvx (Python MCP servers). Copied from the official image so the version
+# is pinned by ARG rather than downloaded at build time.
+COPY --from=uv-dist /uv /uvx /usr/local/bin/
+RUN uv --version && uvx --version
+
+# Headless Chromium for the Server Browser and the in-app browser pane. The
+# Debian package puts the real binary in /usr/lib/chromium; /opt/browser/chrome
+# is the stable path the app and the smoke test use. The wrapper drops the
+# sandbox only when user namespaces are unavailable (the container runs as
+# uid 1000, where Chromium's own sandbox probe can fail).
+RUN mkdir -p /opt/browser \
+  && ln -sf /usr/lib/chromium/chromium /opt/browser/chrome \
+  && cat > /usr/local/bin/chromium <<'CHROMIUM_WRAPPER'
+#!/bin/sh
+set -u
+BROWSER="${OPENCHAMBER_BROWSER_BIN:-/opt/browser/chrome}"
+if [ ! -x "$BROWSER" ]; then
+  echo "chromium: browser not found at $BROWSER" >&2
+  exit 127
+fi
+if [ "${OPENCHAMBER_BROWSER_NO_SANDBOX:-0}" = "1" ]; then
+  exec "$BROWSER" --no-sandbox "$@"
+fi
+if ! { command -v unshare >/dev/null 2>&1 && unshare -U true 2>/dev/null; }; then
+  exec "$BROWSER" --no-sandbox "$@"
+fi
+"$BROWSER" "$@" &
+pid=$!
+sleep 2
+if kill -0 "$pid" 2>/dev/null; then
+  wait "$pid"
+  exit $?
+fi
+wait "$pid" 2>/dev/null
+status=$?
+if [ "$status" -eq 0 ]; then
+  exit 0
+fi
+exec "$BROWSER" --no-sandbox "$@"
+CHROMIUM_WRAPPER
+RUN chmod 755 /usr/local/bin/chromium \
+  && /opt/browser/chrome --no-sandbox --version \
+  && OPENCHAMBER_BROWSER_NO_SANDBOX=1 /usr/local/bin/chromium --version
 
 # Replace the base image's 'bun' user (UID 1000) with 'openchamber'
 # so mounted volumes with 1000:1000 ownership work correctly.

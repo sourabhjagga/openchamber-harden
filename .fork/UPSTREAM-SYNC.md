@@ -66,7 +66,7 @@ different rule; the rule column is what actually matters.
 
 | # | Area | Files | Why | Merge rule |
 |---|---|---|---|---|
-| 1 | Node runtime | `Dockerfile` (`ARG NODE_VERSION`, `node-dist` stage, build guard), `.fork/resolve-node-version.sh`, `.fork/check-node-version.mjs`, `.fork/check-dockerfile.sh`, `.fork/reconcile-node-version.sh` | Debian's apt `nodejs` is v20, the app declares `engines.node >= 24.14` | **Keep ours**; the version is derived from `engines.node`, and the sync job fails if the block or guard is gone |
+| 1 | Runtime tooling versions | `Dockerfile` (`ARG NODE_VERSION`, `node-dist` stage, build guard, `ARG UV_VERSION`, Chromium wrapper), `.fork/node-major`, `.fork/resolve-node-version.sh`, `.fork/check-node-version.mjs`, `.fork/check-dockerfile.sh`, `.fork/reconcile-node-version.sh` | Debian's apt `nodejs` is v20 while the app declares `engines.node >= 24.14`; uv/uvx run Python MCP servers and Chromium runs the Server Browser | **Keep ours**; versions are derived from `engines.node`/`.fork/node-major`/`packageManager`, and the sync job fails if the blocks or guards are gone |
 | 2 | Orphan process sweeper | `scripts/docker-entrypoint.sh` (background sweep) | Detached MCP children reparented to init hold memory | **Keep ours**, re-verify against upstream's entrypoint |
 | 3 | CI/CD | `.circleci/config.yml`, `.fork/*.sh`, `docker-compose.yaml` | This fork ships an image, not npm/desktop/mobile artifacts | **Keep ours** |
 | 4 | Upstream workflows | `.github/workflows/*`, plus tests that import a deleted workflow (`scripts/release-workflow.test.mjs`) | Upstream workflows need upstream's GitHub App and Blacksmith runners, and publish artifacts nobody here consumes | **Take upstream, then run `.fork/sync-upstream-workflows.sh`** (it also removes those tests, which otherwise fail `bun test` on import) |
@@ -97,14 +97,31 @@ several majors behind `engines.node` (trixie ships v20, the app declares
    compares the image's Node with every `engines.node` in the tree and fails
    the build when it is older.
 
+The major this fork actually builds with is `.fork/node-major` (currently 26,
+kept equal to the upstream CI's Node line) as long as it satisfies
+`engines.node`; otherwise the engine floor wins. `ARG NODE_VERSION` is only the
+default for a manual `docker build .`.
+
 The version is never edited by hand for a release: CircleCI runs
 `.fork/resolve-node-version.sh` (reads `engines.node` and `.nvmrc`), passes
 `--build-arg NODE_VERSION=<major>`, then re-checks the image it just built.
-`.fork/check-dockerfile.sh` asserts the four markers above; it runs in CI and in
+`.fork/check-dockerfile.sh` asserts the Node markers plus the other pinned
+tools: `oven/bun:<version>` against `packageManager`, the `@opencode/cli` pin
+against `@opencode/client`, and the uv/uvx and Chromium blocks below. It runs in CI and in
 the upstream sync job, so a merge that drops the block fails instead of shipping
 a stale Node. The sync job additionally runs
 `.fork/reconcile-node-version.sh` so the `ARG` default follows an upstream
 requirement bump.
+
+**Runtime tooling the app expects (also checked).** The runtime stage installs:
+
+- `uv`/`uvx` from `ghcr.io/astral-sh/uv:${UV_VERSION}` — the integrations
+  catalog runs `uvx markitdown-mcp`, `uvx mcp-grafana`.
+- `chromium` from apt, with `/opt/browser/chrome` pointing at the Debian binary
+  and a `/usr/local/bin/chromium` wrapper (drops `--no-sandbox` in only when
+  user namespaces are unavailable), which the Server Browser and the smoke test
+  start from `PATH`.
+- `curl`, which the smoke test uses for its `GET /` check.
 
 A Dockerfile conflict during a merge keeps the fork's file (the sync job does
 `git checkout HEAD -- Dockerfile`), which is deliberate: taking upstream's file
@@ -492,7 +509,12 @@ commit that lands upstream v2.5.1 sits on top of these and is not counted.
 - [ ] `sh .fork/reconcile-node-version.sh` ran; `ARG NODE_VERSION` equals the
       major from `engines.node`
 - [ ] CircleCI "Verify the image ships Node >= engines.node" step is green
-- [ ] `Dockerfile` CLI version == `package.json` `@opencode/client`
+- [ ] `Dockerfile` CLI version == `package.json` `@opencode/client` (also
+      checked by `.fork/check-dockerfile.sh`)
+- [ ] `oven/bun` tag == `packageManager` (also checked)
+- [ ] uv/uvx and Chromium blocks present (also checked)
+- [ ] `.fork/node-major` still satisfies `engines.node` (resolver falls back to
+      the engine floor if upstream raises it)
 - [ ] reaping wiring re-derived, not blindly resolved
 - [ ] `bun.lock` regenerated, not hand-merged
 - [ ] `package.json` version == `docker-compose.yaml` tag

@@ -25,7 +25,7 @@ jobs:
             echo "export VERSION_TAG=$VERSION_TAG" >> "$BASH_ENV"
             echo "export APP_VERSION=$APP_VERSION" >> "$BASH_ENV"
             set -o pipefail
-            docker build \
+            DOCKER_BUILDKIT=1 docker build \
               --build-arg NODE_VERSION="$NODE_MAJOR" \
               -t sourabhjagga/openchamber-harden:latest \
               -t sourabhjagga/openchamber-harden:main \
