@@ -13,6 +13,12 @@ Read this whole file before touching the working tree.
 - Fork commits ahead of that base: **104** (Appendix A predates the
   v2.6/v2.7 syncs and is stale)
 
+> **Read this first.** Section 2 and the checklist describe the tree as of
+> v2.7.3. Older parts (Appendix A, the "12 fork blocks" wording that may
+> survive in a sentence or two) describe the pre-v2.6 fork and are kept for
+> history only. Never re-add a block because this file mentions it - check the
+> file, and `git log` it.
+
 ---
 
 ## 1. How this fork ships
@@ -60,17 +66,13 @@ different rule; the rule column is what actually matters.
 
 | # | Area | Files | Why | Merge rule |
 |---|---|---|---|---|
-| 1 | Slim runtime dependencies | `Dockerfile` (`prod-deps` stage, runtime `COPY --from=prod-deps`) | Builder tree was 1400 MB; the app needs 654 MB | **Keep ours**, rebase onto upstream's stage layout |
-| 2 | Browser flavour switch | `Dockerfile` (`ARG CHROMIUM_FLAVOR` etc.), wrapper at `/usr/local/bin/chromium` | Debian chromium vs Chrome-for-Testing; both land at `/opt/browser/chrome` | **Keep ours**, default stays `debian` |
-| 3 | Runtime tooling | `Dockerfile` (uv, engram, Node, cloudflared, browser libs) | `uvx` MCP entries, Engram panel, tunnel, extension permissions | **Keep ours**, bump versions only |
-| 4 | Shared MCP vendor | `Dockerfile` (vendor `RUN` + ARGs), `scripts/docker-entrypoint.sh` (`unpack_vendor`, launchers) | One install per container instead of one per project location | **Keep ours**; re-verify against upstream's entrypoint |
-| 5 | Shared Doppler bridge | `scripts/docker-entrypoint.sh` (bridge heredoc), `mcp-process-cleanup.js` (marker exemption) | One HTTP MCP server every project shares | **Keep ours**, the two halves must both survive |
-| 6 | Orphan process reaping | `packages/web/server/lib/opencode/mcp-process-cleanup.js` (+ `.test.js`), `lifecycle.js`, `index.js`, `shutdown-runtime.js` | Stray `opencode` runs leak 1 GB+ of MCP servers per command | **Re-apply** on top of upstream's lifecycle changes |
-| 7 | CI/CD | `.circleci/config.yml`, `.fork/*.sh`, `docker-compose.yaml` | This fork ships an image, not npm/desktop/mobile artifacts | **Keep ours** |
-| 8 | Upstream workflows | `.github/workflows/*` | Upstream workflows need upstream's GitHub App, Blacksmith runners, and publish artifacts nobody here consumes | **Take upstream, then run `.fork/sync-upstream-workflows.sh`** |
-| 9 | Renovate | `renovate.json` | Dependency PRs for `bun.lock` | **Take upstream**, then re-apply fork additions |
+| 1 | Node runtime | `Dockerfile` (`ARG NODE_VERSION`, `node-dist` stage, build guard), `.fork/resolve-node-version.sh`, `.fork/check-node-version.mjs`, `.fork/check-dockerfile.sh`, `.fork/reconcile-node-version.sh` | Debian's apt `nodejs` is v20, the app declares `engines.node >= 24.14` | **Keep ours**; the version is derived from `engines.node`, and the sync job fails if the block or guard is gone |
+| 2 | Orphan process sweeper | `scripts/docker-entrypoint.sh` (background sweep) | Detached MCP children reparented to init hold memory | **Keep ours**, re-verify against upstream's entrypoint |
+| 3 | CI/CD | `.circleci/config.yml`, `.fork/*.sh`, `docker-compose.yaml` | This fork ships an image, not npm/desktop/mobile artifacts | **Keep ours** |
+| 4 | Upstream workflows | `.github/workflows/*` | Upstream workflows need upstream's GitHub App and Blacksmith runners, and publish artifacts nobody here consumes | **Take upstream, then run `.fork/sync-upstream-workflows.sh`** |
+| 5 | Smoke test | `scripts/smoke-test.sh` | Post-deploy checks no upstream job runs | **Keep ours** |
 
-Details for the two groups that need real thought (1–2 and 6) follow.
+Details for the groups that need real thought (1–2) follow.
 
 ### 2.1 Image build (`Dockerfile`)
 
@@ -109,40 +111,19 @@ A Dockerfile conflict during a merge keeps the fork's file (the sync job does
 would drop the Node block. The Node *version* still follows upstream because it
 is derived from the merged `engines.node`, not from the file.
 
-### 2.2 Orphan reaping (server code)
+### 2.2 Orphan process sweeper (entrypoint)
 
-`mcp-process-cleanup.js` is a new module. It exports:
+`scripts/docker-entrypoint.sh` starts a detached loop (unless
+`ORPHAN_SWEEP_ENABLED=false`) every `ORPHAN_SWEEP_INTERVAL` seconds (default
+900). It finds `mcp`/`markitdown` processes reparented to PID 1 and sends them
+`TERM`, skipping any command line that names `openchamber` or `cli.js` (the app
+itself). The server-side `mcp-process-cleanup.js` that earlier versions of this
+document described is **not in the tree anymore** - if it comes back, rewrite
+this section.
 
-- `killMcpChildrenOf(pid)` — end the MCP servers a **live** OpenCode pid
-  started. Must run before the parent dies, because the parent link is the
-  only way to identify them.
-- `reapOrphanedMcpServers()` — end MCP servers whose parent is gone
-  (reparented to init).
-- `reapOrphanedOpencodeServers()` — end OpenCode servers whose owner died.
-
-Two hard-won exceptions live in `isBridgeProcess()`:
-
-- `BRIDGE_MARKER = 'openchamber-bridge'` — the wrapper script name.
-- `BRIDGE_TRANSPORT_FLAG = '--outputTransport streamableHttp'` — the same
-  bridge after its wrapper was replaced.
-
-Without both, the sweep kills the shared Doppler bridge and every project
-loses its MCP server.
-
-Wiring:
-
-- `lifecycle.js` imports all three; kills MCP children before the process
-  tree is signalled; reaps at startup; `startOrphanReapMonitoring()` runs
-  every `OPENCHAMBER_ORPHAN_REAP_INTERVAL_MS` (default 120000, `unref()`d).
-- `index.js` holds `orphanReapInterval`, exposes it through
-  `openCodeLifecycleState`, calls `startOrphanReapMonitoring()` after
-  bootstrap, and hands the getter/clearer to the graceful-shutdown runtime.
-- `shutdown-runtime.js` clears the interval on shutdown.
-
-Upstream rewrites `lifecycle.js` and `index.js` often. Expect conflicts and
-**re-derive the wiring instead of resolving the hunk blindly**: find where
-upstream starts its health monitoring, put the reap call next to it, and find
-where upstream registers its shutdown clears.
+Upstream owns the rest of the entrypoint (SSH key, UI password, the `bun
+packages/web/build/bin/cli.js` start). Expect conflicts; keep the sweeper block
+between the `OPENCHAMBER_HOST` export and `echo "[entrypoint] starting..."`.
 
 ---
 
@@ -238,33 +219,31 @@ entrypoint took the merge cleanly. Expect a similar shape.
 |---|---|
 | `.github/workflows/{nix-eval,nix-hashes,pr-intake,pr-review,stale}.yml` and the other 17 disabled ones | `git checkout --ours .github/workflows` (or `git rm`) then `sh .fork/sync-upstream-workflows.sh`. Never hand-edit these. |
 | `.github/workflows/oc-review.yml` | Take **upstream's**, then let the script repoint `blacksmith-4vcpu-ubuntu-2404` → `ubuntu-latest`. |
-| `renovate.json` | Take **upstream's**, then re-apply fork additions: `"schedule": ["* 1 1 * *"]` and, if still present upstream, the `ARG NODE_VERSION` custom manager. Verify before dropping either. |
+| `renovate.json` | The fork currently ships **no** `renovate.json`. If upstream's is restored, keep only what the fork needs; the Node ARG is maintained by `.fork/reconcile-node-version.sh`, not by Renovate. |
 | `docker-compose.yaml` | Take **ours**. It is fork-only in practice (upstream ships a different compose). Check the image tag, `security_opt: seccomp=unconfined`, `shm_size: 1gb`, the volume list, and the `OPENCHAMBER_UI_PASSWORD` guard. |
 | `.circleci/config.yml`, `.fork/*` | Take **ours**, wholesale. Upstream has no such pipeline. |
-| `Dockerfile` | Mixed — see below. |
-| `packages/web/server/index.js` | Take **ours** where the reaping wiring lives; take upstream everywhere else. Re-derive if upstream moved bootstrap/shutdown. |
-| `packages/web/server/lib/opencode/lifecycle.js` | Mixed — re-derive (see §2.2). |
+| `Dockerfile` | Take **ours**: it carries the Node block and its guard. Port upstream's real changes into it by hand (see below). Never resolve with upstream's file. |
 | `bun.lock` | `--theirs`, then `bun install`. |
-| `package.json` (`@opencode/client`) | Take upstream's version. It must match the CLI pin. |
+| `package.json` (`@opencode/client`) | Take upstream's version. It must match the `@opencode/cli@<version>` pin in the Dockerfile. |
 
 ### Dockerfile, in order
 
-1. Take upstream's stage skeleton first: `base`, `deps` (its `COPY`
-   package.jsons, `bun install`), `builder` (its build commands, including
-   `bun run --cwd packages/sdk build` and `bun run build:web`).
-2. Re-insert `prod-deps` after `deps`, and point the runtime `COPY`s at it.
-3. Re-insert the runtime blocks 1–12 from §2.1, in upstream's ordering
-   constraints: `USER openchamber` must come before the vendor block, the
-   vendor block before the `COPY --from=prod-deps`.
-4. Re-check every `ARG` default: `CHROMIUM_FLAVOR=debian`,
-   `PRUNE_DEV_DEPS=true`, `NODE_VERSION`, `ENGRAM_VERSION`/`SHA256`,
-   `CHROME_HEADLESS_SHELL_*`, `ANALYTICS_MCP_VERSION`,
-   `MARKITDOWN_MCP_VERSION`, `SUPERGATEWAY_VERSION`.
-5. `@opencode/cli@<version>`: **take upstream's new version** unless there is
-   a written reason to hold back. Then set `@opencode/client` in
-   `package.json` to the same version — they are a pair.
-6. `ENTRYPOINT` must stay
+1. Keep the fork's file (`git checkout HEAD -- Dockerfile` on conflict).
+2. Confirm the Node block survived: `ARG NODE_VERSION` before the first
+   `FROM`, `FROM node:${NODE_VERSION}-bookworm-slim AS node-dist`, the
+   `COPY --from=node-dist` lines, `libstdc++6` in the apt list (and **no**
+   `nodejs`/`npm`), and the `check-node-version.mjs` guard after the
+   `package.json` copies.
+3. Diff upstream's Dockerfile against the previous tag and apply anything real
+   it changed (base image, CLI pin, new runtime packages, build commands) by
+   hand, around the Node block.
+4. `@opencode/cli@<version>`: **take upstream's new version** unless there is a
+   written reason to hold back. Then set `@opencode/client` in `package.json`
+   to the same version - they are a pair.
+5. `ENTRYPOINT` must stay
    `["sh", "/home/openchamber/openchamber-entrypoint.sh"]`.
+6. Run `sh .fork/reconcile-node-version.sh && sh .fork/check-dockerfile.sh`
+   before committing.
 
 ---
 
@@ -277,8 +256,10 @@ entrypoint took the merge cleanly. Expect a similar shape.
 bun run --cwd packages/web type-check        # or the repo's documented equivalent
 bun run lint
 
-# the reaper has its own tests
-bun test packages/web/server/lib/opencode/mcp-process-cleanup.test.js
+# the Node invariant: block present, ARG in step, guard present
+sh .fork/check-dockerfile.sh
+sh .fork/reconcile-node-version.sh
+sh .fork/resolve-node-version.sh          # prints the major CI will pass
 ```
 
 If `bun` cannot resolve something locally that Docker could, remember:
@@ -429,7 +410,7 @@ redeploys and restarts the container.
 Two consequences:
 
 - The final image is byte-identical for the common case, because the runtime
-  stage only copies `scripts/docker-entrypoint.sh` plus `builder`/`prod-deps`
+  stage only copies `scripts/docker-entrypoint.sh` plus `builder`
   outputs — a new `.md` file lives only in the throwaway `builder` stage.
 - The restart is real. With "one change per deploy" in force, either accept
   one restart for the docs, or batch the docs with the next real change.
@@ -486,18 +467,14 @@ commit that lands upstream v2.5.1 sits on top of these and is not counted.
 
 | Path | Owner | Notes |
 |---|---|---|
-| `Dockerfile` | **both** | fork blocks are listed in §2.1; upstream owns the stage skeleton |
-| `scripts/docker-entrypoint.sh` | **both** | upstream owns SSH/UI-password/oh-my-opencode; fork owns vendor + bridge |
+| `Dockerfile` | **both** | fork owns the Node block (§2.1); upstream owns everything else, port its changes by hand |
+| `scripts/docker-entrypoint.sh` | **both** | upstream owns SSH/UI-password/startup; fork owns the orphan sweeper block |
 | `scripts/smoke-test.sh` | fork | no upstream counterpart |
 | `.fork/*` | fork | never upstream |
 | `.circleci/*` | fork | upstream uses GitHub Actions |
 | `docker-compose.yaml` | fork | upstream ships a different one |
 | `.github/workflows/*` | upstream | re-run the sync script after every merge |
-| `renovate.json` | **both** | take upstream, re-apply fork additions |
-| `packages/web/server/index.js` | **both** | reaping wiring only |
-| `packages/web/server/lib/opencode/lifecycle.js` | **both** | reaping wiring only |
-| `packages/web/server/lib/opencode/mcp-process-cleanup*.js` | fork | new files, no upstream counterpart |
-| `packages/web/server/lib/opencode/shutdown-runtime.js` | **both** | one added getter/clearer |
+| `renovate.json` | fork | currently not shipped; the Node ARG is maintained by `.fork/reconcile-node-version.sh` |
 | `package.json` / `bun.lock` | upstream | except `@opencode/client`, which must match the CLI pin |
 | `AGENTS.md`, `CLAUDE.md`, `README.md` | upstream | do not put fork notes here, it conflicts every sync |
 
