@@ -12,6 +12,11 @@ import type { normalizeTunnelProvider, normalizeTunnelMode, normalizeOptionalPat
 import { idleStopSchema } from '../spaces/idle-stop.js';
 import { sshHostSchema } from '../spaces/places/ssh-host.js';
 import { PROVIDER_LOGO_MIMES } from '../appearance/provider-logo-routes.js';
+import { sanitizeChatActivitySettings } from './settings-chat-activity.js';
+import { sanitizeDictationSettings } from './settings-dictation.js';
+import { keepOmittedBuiltinSections, sanitizeSidebarSections, sanitizeSidebarSettings, type SidebarSection } from './settings-sidebar.js';
+import { sanitizeSessionWorkSettings, sessionWorkResponseFields } from './settings-session-work.js';
+import { keepOrderedSessionCostAmounts, sanitizeSessionLimitSettings } from './settings-session-limits.js';
 
 const settingsDocumentSchema = z.looseObject({});
 export type SettingsDocument = z.infer<typeof settingsDocumentSchema>;
@@ -60,91 +65,6 @@ export type SettingsHelpersDependencies = Pick<Normalization,
   normalizeOptionalPath: typeof normalizeOptionalPath;
 };
 
-const SIDEBAR_BUILTIN_SECTION_IDS = ['pages', 'chats', 'pinned', 'work', 'projects'];
-const SIDEBAR_SECTIONS_STORED_MAX = 24 + SIDEBAR_BUILTIN_SECTION_IDS.length;
-const sidebarSectionIdSchema = z.string().trim().min(1).max(64);
-const sidebarSectionNameSchema = z.string().trim().min(1).transform((value) => value.slice(0, 60));
-const sidebarChips = (values: string[]) => z.array(z.unknown()).transform((entries) => (
-  [...new Set(entries.flatMap((entry) => {
-    const parsed = z.enum(values).safeParse(entry);
-    return parsed.success ? [parsed.data] : [];
-  }))]
-));
-const sidebarIdList = (schema: z.ZodString) => z.array(z.unknown()).transform((entries) => (
-  [...new Set(entries.flatMap((entry) => {
-    const parsed = schema.safeParse(entry);
-    return parsed.success ? [parsed.data] : [];
-  }))]
-));
-const sidebarIds = sidebarIdList(sidebarSectionIdSchema);
-const sidebarProjectIds = sidebarIdList(z.string().trim().min(1).max(4096));
-const sidebarSectionSchema = z.union([
-  z.object({ kind: z.literal('builtin'), id: z.enum(SIDEBAR_BUILTIN_SECTION_IDS) }),
-  z.object({
-    kind: z.literal('custom'),
-    id: sidebarSectionIdSchema,
-    name: sidebarSectionNameSchema,
-    grouping: z.enum(['time', 'project']).catch('time'),
-    filter: z.object({
-      states: sidebarChips(['running', 'needs-answer', 'unread', 'failed', 'looks-done']).catch([]),
-      work: sidebarChips(['in-work', 'done']).catch([]),
-      pins: sidebarIds.catch([]),
-      kinds: sidebarChips(['session', 'worktree', 'space', 'run', 'scheduled']).catch([]),
-      links: sidebarChips(['pr', 'issue', 'tracker', 'plan', 'goal']).catch([]),
-      projectIds: sidebarProjectIds.catch([]),
-      folders: sidebarIds.catch([]),
-      activity: z.enum(['any', 'today', 'two-days', 'week', 'stalled']).catch('any'),
-      text: z.union([z.string().transform((value) => [value]), z.array(z.unknown())]).transform((entries) => (
-        [...new Set(entries.flatMap((entry) => {
-          const phrase = z.string().trim().transform((value) => value.slice(0, 100)).safeParse(entry);
-          return phrase.success && phrase.data ? [phrase.data] : [];
-        }))].slice(0, 12)
-      )).catch([]),
-    }).partial().catch({}),
-    claims: z.boolean().catch(false),
-    hideWhenEmpty: z.boolean().catch(true),
-  }),
-]);
-
-export type SidebarSection = z.infer<typeof sidebarSectionSchema>;
-
-const sanitizeSidebarSections = (entries: readonly JsonValue[] | readonly unknown[]) => {
-  const result: SidebarSection[] = [];
-  const seen = new Set();
-  for (const entry of entries) {
-    const parsed = sidebarSectionSchema.safeParse(entry);
-    if (!parsed.success || seen.has(parsed.data.id) || result.length >= SIDEBAR_SECTIONS_STORED_MAX) continue;
-    if (parsed.data.kind === 'custom' && SIDEBAR_BUILTIN_SECTION_IDS.includes(parsed.data.id)) continue;
-    seen.add(parsed.data.id);
-    result.push(parsed.data);
-  }
-  return result;
-};
-
-const keepOmittedBuiltinSections = (stored: SidebarSection[], incoming: SidebarSection[]) => {
-  const result = [...incoming];
-  const has = (id: string) => result.some((entry) => entry.id === id);
-  stored.forEach((entry, index) => {
-    if (entry?.kind !== 'builtin' || has(entry.id)) return;
-    const previous = stored.slice(0, index).reverse().find((candidate) => has(candidate?.id));
-    const at = previous ? result.findIndex((candidate) => candidate.id === previous.id) + 1 : 0;
-    result.splice(at, 0, entry);
-  });
-  return result;
-};
-
-const sanitizeSidebarPinLists = (entries: readonly unknown[]) => {
-  const result: { id: string; name: string }[] = [];
-  const seen = new Set(['pinned']);
-  for (const entry of entries) {
-    const parsed = z.object({ id: sidebarSectionIdSchema, name: sidebarSectionNameSchema }).safeParse(entry);
-    if (!parsed.success || seen.has(parsed.data.id) || result.length >= 24) continue;
-    seen.add(parsed.data.id);
-    result.push(parsed.data);
-  }
-  return result;
-};
-
 const isPersistableSettingsKey = (key: string) => {
   const field = settingsRegistry.fields[key];
   if (!field) return false;
@@ -166,10 +86,15 @@ import {
   isInputHistoryScope,
 } from './input-history-scope.js';
 
+const largeTextPasteBehaviorSchema = z.string().trim().pipe(z.enum(['ask', 'attach', 'inline', 'inline-double-paste']));
+const documentAttachBehaviorSchema = z.string().trim().pipe(z.enum(['ask', 'save', 'convert']));
+const fileEditorKeymapSchema = z.string().trim().pipe(z.enum(['default', 'vim']));
+
 const AGENT_TOOL_BOOLEAN_KEYS = [
   'agentControlToolEnabled', 'agentScheduleToolEnabled', 'agentMemoryToolEnabled', 'agentMemoryDreamingEnabled',
-  'agentKnowledgeToolEnabled', 'agentWorkflowToolEnabled', 'agentWorkflowAutoApprove', 'agentNotifyToolEnabled',
+  'agentKnowledgeToolEnabled', 'agentWorkflowToolEnabled', 'agentWorkflowAutoApprove', 'agentWorkflowAutoApproveLeads', 'agentNotifyToolEnabled',
   'agentRenderToolEnabled', 'agentImageToolEnabled', 'agentSecretToolEnabled', 'agentUsageToolEnabled', 'agentTerminalToolEnabled',
+  'agentActionsToolEnabled',
 ] as const;
 
 const dreamingModelSchema = z.string().trim().refine((value) => value === '' || /^[^/\s]+\/\S+$/.test(value));
@@ -216,22 +141,23 @@ type BooleanSettingsKey =
   | 'desktopLanAccessEnabled' | 'desktopKeepAwakeEnabled' | 'desktopMinimizeToTrayEnabled' | 'desktopMacMenuBarEnabled'
   | 'desktopLinuxNativeFrame' | 'messageSearchEnabled' | 'messageSearchReasoningEnabled'
   | 'sidebarKeepWorkInPlace' | 'sidebarKeepPinnedInPlace' | 'sidebarShowChatsSection' | 'sidebarShowWorkSection'
-  | 'sidebarShowPinnedSection' | 'sidebarDetailedZoneRows' | 'sidebarWorktreeNameByBranch'
+  | 'sidebarShowPinnedSection' | 'sidebarDetailedZoneRows' | 'sidebarShowSubagentSessions' | 'sidebarWorktreeNameByBranch'
   | 'draftStartersVisible' | 'draftStartersCraftGoalAdded' | 'draftStartersScheduleTaskAdded'
   | 'showReasoningTraces' | 'streamingAutoFollowEnabled' | 'expandReasoningWhileStreaming'
   | 'codeBlockLineWrap' | 'tableCellWrap' | 'copyMessagesAsPlainText' | 'autoSaveEnabled' | 'fileEditorWrapLines'
   | 'confirmFileTreeMove' | 'layoutAnimations' | 'openLinksInBrowserPanel' | 'agentBrowserSharesLogins'
-  | 'openTrackerLinksOnBoard' | 'diffWrapLines' | 'diffHideWhitespace' | 'allowPromptingSubagentSessions'
+  | 'openTrackerLinksOnBoard' | 'diffWrapLines' | 'diffHideWhitespace' | 'allowPromptingSubagentSessions' | 'referencePreviewNewestFirst'
+  | 'referencePreviewCollapseDescription'
   | 'savePastedImagesAsFiles' | 'showOpenCodeRestartConfirm' | 'sessionTabsEnabled' | 'sessionTabsPerWorkspace'
   | 'terminalCloseOnExit' | 'terminalOpenOnProjectAction' | 'sessionRecapEnabled' | 'sessionSuggestionEnabled'
-  | 'sessionWorkEnabled' | 'sessionReviewOfferEnabled' | 'sessionGoalEnabled' | 'sessionGoalDefaultBudgetEnabled'
+  | 'sessionWorkEnabled' | 'sessionWorkIncludesPinned' | 'sessionReviewOfferEnabled' | 'sessionGoalEnabled' | 'sessionGoalDefaultBudgetEnabled' | 'sessionCostAlertsEnabled'
   | 'collapsibleThinkingBlocks' | 'showTextJustificationActivity' | 'showDeletionDialog' | 'nativeNotificationsEnabled'
   | 'notifyOnSubtasks' | 'notifyOnCompletion' | 'notifyOnPullRequests' | 'notifyOnError' | 'notifyOnQuestion'
   | 'summarizeLastMessage' | 'autoDeleteEnabled' | 'sessionRetentionOnlyArchived' | 'sessionRetentionIncludeInWork'
   | 'mergedWorktreeCleanupEnabled' | 'worktreeArchiveOnDoneEnabled' | 'smallModelUseDefault' | 'autoCreateWorktree'
   | 'gitmojiEnabled' | 'defaultFileViewerPreview' | 'inputSpellcheckEnabled' | 'enterToSend' | 'enterToSendConfigured'
-  | 'mobileReturnKeySends' | 'showOpenCodeUpdateNotifications' | 'agentWebToolEnabled' | 'isolatedSpacesEnabled'
-  | 'showToolFileIcons' | 'showTurnChangedFiles' | 'collapsibleUserMessages' | 'stickyUserHeader'
+  | 'mobileReturnKeySends' | 'showOpenCodeUpdateNotifications' | 'useGlobalOpenCodeService' | 'agentWebToolEnabled' | 'isolatedSpacesEnabled'
+  | 'showToolFileIcons' | 'showTurnChangedFiles' | 'keepEarlierReplies' | 'collapsibleUserMessages' | 'stickyUserHeader'
   | 'promptNavigatorEnabled' | 'wideChatLayoutEnabled' | 'showSplitAssistantMessageActions' | 'directoryShowHidden'
   | 'filesViewShowGitignored' | 'reportUsage' | 'responseStyleEnabled' | 'dictationEnabled' | 'dictationAutoSend'
   | 'sttCorrectTranscript' | (typeof AGENT_TOOL_BOOLEAN_KEYS)[number];
@@ -244,23 +170,23 @@ type StringSettingsKey =
   | 'pwaAppName' | 'pwaOrientation' | 'mobileKeyboardMode' | 'browserProvider' | 'agentMemoryDreamingModel'
   | 'agentMemoryDreamingVariant' | 'agentImageModel' | 'isolatedSpacesSshHost' | 'openCodeUpdateToastDismissedVersion'
   | 'terminalShell' | 'openInAppId' | 'globalBehaviorPrompt' | 'responseStylePreset' | 'responseStyleCustomInstructions'
-  | 'sttServerUrl' | 'sttModel' | 'sttEndpointPath' | 'sttLocalModel' | 'sttLanguage' | 'sidebarProjectDisplayMode'
+  | 'sttServerUrl' | 'sttModel' | 'sttEndpointPath' | 'sttKeyProvider' | 'sttLocalModel' | 'sttLanguage' | 'sttPrompt' | 'sidebarProjectDisplayMode'
   | 'sidebarViewMode' | 'sidebarListSessionGrouping' | 'sidebarGrouping' | 'sidebarProjectSortOrder'
   | 'selectionApprovalText';
 
 type ClearableStringSettingsKey =
   | 'managedRemoteTunnelHostname' | 'managedRemoteTunnelSelectedPresetId' | 'defaultModel' | 'defaultVariant'
   | 'defaultAgent' | 'smallModelOverride' | 'smallModelVariant' | 'walkthroughModelOverride' | 'walkthroughModelVariant'
-  | 'fallbackModel' | 'fallbackVariant' | 'defaultGitIdentityId' | 'zenModel';
+  | 'fallbackModel' | 'fallbackVariant' | 'defaultGitIdentityId' | 'zenModel' | 'chatsDefaultModel' | 'chatsDefaultVariant' | 'chatsDefaultAgent';
 
 type NumberSettingsKey =
   | 'inputHistoryLimit' | 'sidebarSessionBatchSize' | 'liveBrowserTabLimit' | 'sessionGoalMaxAutoTurns'
-  | 'sessionGoalDefaultBudget' | 'summaryThreshold' | 'summaryLength' | 'maxLastMessageLength' | 'autoDeleteAfterDays'
+  | 'sessionGoalDefaultBudget' | 'sessionCostWarnThreshold' | 'sessionCostCriticalThreshold' | 'summaryThreshold' | 'summaryLength' | 'maxLastMessageLength' | 'autoDeleteAfterDays'
   | 'tunnelSessionTtlMs' | 'tunnelHttpsPort' | 'fontSize' | 'chatFontSize' | 'terminalFontSize' | 'editorFontSize'
   | 'padding' | 'cornerRadius' | 'inputBarOffset';
 
 type StringArraySettingsKey =
-  | 'workStatusHiddenSections' | 'workStatusSectionOrder' | 'sidebarHiddenSections' | 'securityScopedBookmarks'
+  | 'workStatusHiddenSections' | 'workStatusSectionOrder' | 'sidebarHiddenSections' | 'sidebarPageOrder' | 'sidebarHiddenPages' | 'securityScopedBookmarks'
   | 'pinnedDirectories' | 'providerOrder' | 'usageDropdownProviders' | 'accountSwitchProviders'
   | 'terminalLoginShells' | 'collapsedModelProviders' | 'recentAgents' | 'favoriteAgents';
 
@@ -299,6 +225,7 @@ export type SanitizedSettings = Partial<Record<BooleanSettingsKey, boolean>>
     draftStarters?: { type: 'command' | 'skill'; name: string }[];
     fileTreeSide?: 'left' | 'right';
     largeTextPasteBehavior?: 'ask' | 'attach' | 'inline' | 'inline-double-paste';
+    documentAttachBehavior?: 'ask' | 'save' | 'convert';
     fileEditorKeymap?: 'default' | 'vim';
     sessionGoalChecker?: 'classifier' | 'small-model';
     notificationMode?: 'always' | 'hidden-only';
@@ -316,7 +243,7 @@ export type SanitizedSettings = Partial<Record<BooleanSettingsKey, boolean>>
     weekStartPreference?: 'auto' | 'sunday' | 'monday';
     chatRenderMode?: 'sorted' | 'live';
     messageStreamTransport?: 'auto' | 'ws' | 'sse';
-    activityRenderMode?: 'collapsed' | 'summary';
+    activityRenderMode?: 'collapsed' | 'grouped' | 'summary';
     mermaidRenderingMode?: 'svg' | 'ascii';
     userMessageRenderingMode?: 'markdown' | 'plain';
     chatWidth?: 'default' | 'wider' | 'full';
@@ -360,10 +287,6 @@ export const createSettingsHelpers = (dependencies: SettingsHelpersDependencies)
   } = dependencies;
 
   const PWA_APP_NAME_MAX_LENGTH = 64;
-  const STT_SERVER_URL_MAX_LENGTH = 2048;
-  const STT_ENDPOINT_PATH_MAX_LENGTH = 1024;
-  const STT_MODEL_MAX_LENGTH = 256;
-  const STT_LANGUAGE_MAX_LENGTH = 64;
   const VERSION_STRING_MAX_LENGTH = 128;
   const SHORTCUT_OVERRIDE_KEY_MAX_LENGTH = 128;
   const SHORTCUT_OVERRIDE_VALUE_MAX_LENGTH = 128;
@@ -670,27 +593,13 @@ export const createSettingsHelpers = (dependencies: SettingsHelpersDependencies)
     if (isBoolean(candidate.sidebarShowWorkSection)) {
       result.sidebarShowWorkSection = candidate.sidebarShowWorkSection;
     }
-    if (candidate.sidebarShowPinnedSection === true || candidate.sidebarShowPinnedSection === false) {
-      result.sidebarShowPinnedSection = candidate.sidebarShowPinnedSection;
-    }
-    if (candidate.sidebarDetailedZoneRows === true || candidate.sidebarDetailedZoneRows === false) {
-      result.sidebarDetailedZoneRows = candidate.sidebarDetailedZoneRows;
-    }
+    if (isBoolean(candidate.sidebarShowPinnedSection)) result.sidebarShowPinnedSection = candidate.sidebarShowPinnedSection;
+    if (isBoolean(candidate.sidebarDetailedZoneRows)) result.sidebarDetailedZoneRows = candidate.sidebarDetailedZoneRows;
+    if (isBoolean(candidate.sidebarShowSubagentSessions)) result.sidebarShowSubagentSessions = candidate.sidebarShowSubagentSessions;
     if (candidate.sidebarWorktreeNameByBranch === true || candidate.sidebarWorktreeNameByBranch === false) {
       result.sidebarWorktreeNameByBranch = candidate.sidebarWorktreeNameByBranch;
     }
-    if (Array.isArray(candidate.sidebarSections)) {
-      result.sidebarSections = sanitizeSidebarSections(candidate.sidebarSections);
-    }
-    if (Array.isArray(candidate.sidebarPinLists)) {
-      result.sidebarPinLists = sanitizeSidebarPinLists(candidate.sidebarPinLists);
-    }
-    if (Array.isArray(candidate.sidebarHiddenSections)) {
-      result.sidebarHiddenSections = [...new Set(candidate.sidebarHiddenSections.flatMap((entry) => {
-        const parsed = sidebarSectionIdSchema.safeParse(entry);
-        return parsed.success ? [parsed.data] : [];
-      }))];
-    }
+    sanitizeSidebarSettings(candidate, result);
 
     if (Array.isArray(candidate.securityScopedBookmarks)) {
       result.securityScopedBookmarks = normalizeStringArray(candidate.securityScopedBookmarks);
@@ -810,12 +719,6 @@ export const createSettingsHelpers = (dependencies: SettingsHelpersDependencies)
     if (candidate.fileTreeSide === 'left' || candidate.fileTreeSide === 'right') {
       result.fileTreeSide = candidate.fileTreeSide;
     }
-    if (isBoolean(candidate.diffWrapLines)) {
-      result.diffWrapLines = candidate.diffWrapLines;
-    }
-    if (isBoolean(candidate.diffHideWhitespace)) {
-      result.diffHideWhitespace = candidate.diffHideWhitespace;
-    }
     if (isBoolean(candidate.allowPromptingSubagentSessions)) {
       result.allowPromptingSubagentSessions = candidate.allowPromptingSubagentSessions;
     }
@@ -837,18 +740,12 @@ export const createSettingsHelpers = (dependencies: SettingsHelpersDependencies)
     if (candidate.terminalOpenOnProjectAction === true || candidate.terminalOpenOnProjectAction === false) {
       result.terminalOpenOnProjectAction = candidate.terminalOpenOnProjectAction;
     }
-    if (isString(candidate.largeTextPasteBehavior)) {
-      const mode = candidate.largeTextPasteBehavior.trim();
-      if (mode === 'ask' || mode === 'attach' || mode === 'inline' || mode === 'inline-double-paste') {
-        result.largeTextPasteBehavior = mode;
-      }
-    }
-    if (isString(candidate.fileEditorKeymap)) {
-      const mode = candidate.fileEditorKeymap.trim();
-      if (mode === 'default' || mode === 'vim') {
-        result.fileEditorKeymap = mode;
-      }
-    }
+    const largeTextPasteBehavior = largeTextPasteBehaviorSchema.safeParse(candidate.largeTextPasteBehavior);
+    if (largeTextPasteBehavior.success) result.largeTextPasteBehavior = largeTextPasteBehavior.data;
+    const documentAttachBehavior = documentAttachBehaviorSchema.safeParse(candidate.documentAttachBehavior);
+    if (documentAttachBehavior.success) result.documentAttachBehavior = documentAttachBehavior.data;
+    const fileEditorKeymap = fileEditorKeymapSchema.safeParse(candidate.fileEditorKeymap);
+    if (fileEditorKeymap.success) result.fileEditorKeymap = fileEditorKeymap.data;
     if (isString(candidate.fileEditorVimMappings)) {
       result.fileEditorVimMappings = candidate.fileEditorVimMappings.slice(0, 10_000);
     }
@@ -861,27 +758,11 @@ export const createSettingsHelpers = (dependencies: SettingsHelpersDependencies)
     if (isBoolean(candidate.sessionSuggestionEnabled)) {
       result.sessionSuggestionEnabled = candidate.sessionSuggestionEnabled;
     }
-    if (isBoolean(candidate.sessionWorkEnabled)) {
-      result.sessionWorkEnabled = candidate.sessionWorkEnabled;
-    }
+    Object.assign(result, sanitizeSessionWorkSettings(candidate));
     if (isBoolean(candidate.sessionReviewOfferEnabled)) {
       result.sessionReviewOfferEnabled = candidate.sessionReviewOfferEnabled;
     }
-    if (isBoolean(candidate.sessionGoalEnabled)) {
-      result.sessionGoalEnabled = candidate.sessionGoalEnabled;
-    }
-    if (candidate.sessionGoalChecker === 'classifier' || candidate.sessionGoalChecker === 'small-model') {
-      result.sessionGoalChecker = candidate.sessionGoalChecker;
-    }
-    if (isInteger(candidate.sessionGoalMaxAutoTurns) && candidate.sessionGoalMaxAutoTurns >= 1 && candidate.sessionGoalMaxAutoTurns <= 200) {
-      result.sessionGoalMaxAutoTurns = candidate.sessionGoalMaxAutoTurns;
-    }
-    if (isBoolean(candidate.sessionGoalDefaultBudgetEnabled)) {
-      result.sessionGoalDefaultBudgetEnabled = candidate.sessionGoalDefaultBudgetEnabled;
-    }
-    if (isNumber(candidate.sessionGoalDefaultBudget) && Number.isFinite(candidate.sessionGoalDefaultBudget) && candidate.sessionGoalDefaultBudget > 0) {
-      result.sessionGoalDefaultBudget = Math.floor(candidate.sessionGoalDefaultBudget);
-    }
+    sanitizeSessionLimitSettings(candidate, result);
     if (isBoolean(candidate.collapsibleThinkingBlocks)) {
       result.collapsibleThinkingBlocks = candidate.collapsibleThinkingBlocks;
     }
@@ -1039,7 +920,7 @@ export const createSettingsHelpers = (dependencies: SettingsHelpersDependencies)
     if (candidate.walkthroughModelVariant !== undefined) {
       result.walkthroughModelVariant = asNonEmptyString(candidate.walkthroughModelVariant) ?? undefined;
     }
-    for (const key of ['fallbackModel', 'fallbackVariant'] as const) {
+    for (const key of ['fallbackModel', 'fallbackVariant', 'chatsDefaultModel', 'chatsDefaultVariant', 'chatsDefaultAgent'] as const) {
       const value = z.string().trim().safeParse(candidate[key]);
       if (value.success) result[key] = value.data.length > 0 ? value.data : undefined;
     }
@@ -1092,11 +973,8 @@ export const createSettingsHelpers = (dependencies: SettingsHelpersDependencies)
     if (candidate.mobileReturnKeySends === true || candidate.mobileReturnKeySends === false) {
       result.mobileReturnKeySends = candidate.mobileReturnKeySends;
     }
-    if (isBoolean(candidate.showOpenCodeUpdateNotifications)) {
-      result.showOpenCodeUpdateNotifications = candidate.showOpenCodeUpdateNotifications;
-    }
-    if (isBoolean(candidate.agentWebToolEnabled)) {
-      result.agentWebToolEnabled = candidate.agentWebToolEnabled;
+    for (const key of ['showOpenCodeUpdateNotifications', 'useGlobalOpenCodeService', 'agentWebToolEnabled', 'diffWrapLines', 'diffHideWhitespace', 'referencePreviewNewestFirst', 'referencePreviewCollapseDescription'] as const) {
+      if (isBoolean(candidate[key])) result[key] = candidate[key];
     }
     if (isString(candidate.browserProvider) && candidate.browserProvider.trim()) {
       result.browserProvider = candidate.browserProvider.trim();
@@ -1154,12 +1032,7 @@ export const createSettingsHelpers = (dependencies: SettingsHelpersDependencies)
         result.messageStreamTransport = mode;
       }
     }
-    if (isString(candidate.activityRenderMode)) {
-      const mode = candidate.activityRenderMode.trim();
-      if (mode === 'collapsed' || mode === 'summary') {
-        result.activityRenderMode = mode;
-      }
-    }
+    sanitizeChatActivitySettings(candidate, result);
     if (isString(candidate.mermaidRenderingMode)) {
       const mode = candidate.mermaidRenderingMode.trim();
       if (mode === 'svg' || mode === 'ascii') {
@@ -1441,52 +1314,7 @@ export const createSettingsHelpers = (dependencies: SettingsHelpersDependencies)
       }
     }
 
-    if (isBoolean(candidate.dictationEnabled)) {
-      result.dictationEnabled = candidate.dictationEnabled;
-    }
-    const dictationAutoSend = z.boolean().safeParse(candidate.dictationAutoSend);
-    if (dictationAutoSend.success) result.dictationAutoSend = dictationAutoSend.data;
-    if (isString(candidate.sttProvider)) {
-      const provider = candidate.sttProvider.trim();
-      if (provider === 'local' || provider === 'openai-compatible') {
-        result.sttProvider = provider;
-      } else if (provider === 'server') {
-        result.sttProvider = 'openai-compatible';
-      } else if (provider === 'browser' || provider === 'wasm') {
-        result.sttProvider = 'local';
-      }
-    }
-    if (isString(candidate.sttServerUrl)) {
-      const trimmed = candidate.sttServerUrl.trim();
-      if (trimmed.length <= STT_SERVER_URL_MAX_LENGTH) {
-        result.sttServerUrl = trimmed;
-      }
-    }
-    if (isString(candidate.sttModel)) {
-      const trimmed = candidate.sttModel.trim();
-      if (trimmed.length <= STT_MODEL_MAX_LENGTH) {
-        result.sttModel = trimmed;
-      }
-    }
-    const sttEndpointPath = z.string().trim().safeParse(candidate.sttEndpointPath);
-    if (sttEndpointPath.success && sttEndpointPath.data.length <= STT_ENDPOINT_PATH_MAX_LENGTH) {
-      result.sttEndpointPath = sttEndpointPath.data;
-    }
-    if (isString(candidate.sttLocalModel)) {
-      const trimmed = candidate.sttLocalModel.trim();
-      if (trimmed.length <= STT_MODEL_MAX_LENGTH) {
-        result.sttLocalModel = trimmed;
-      }
-    }
-    if (isString(candidate.sttLanguage)) {
-      const trimmed = candidate.sttLanguage.trim();
-      if (trimmed.length <= STT_LANGUAGE_MAX_LENGTH) {
-        result.sttLanguage = trimmed;
-      }
-    }
-    if (candidate.sttCorrectTranscript === true || candidate.sttCorrectTranscript === false) {
-      result.sttCorrectTranscript = candidate.sttCorrectTranscript;
-    }
+    sanitizeDictationSettings(candidate, result);
 
     for (const key of Object.keys(result)) {
       if (!isPersistableSettingsKey(key)) {
@@ -1517,6 +1345,7 @@ export const createSettingsHelpers = (dependencies: SettingsHelpersDependencies)
     if (Array.isArray(changes.sidebarSections) && Array.isArray(current.sidebarSections)) {
       next.sidebarSections = keepOmittedBuiltinSections(sanitizeSidebarSections(current.sidebarSections), changes.sidebarSections);
     }
+    keepOrderedSessionCostAmounts(current, next);
 
     return next;
   };
@@ -1561,6 +1390,7 @@ export const createSettingsHelpers = (dependencies: SettingsHelpersDependencies)
       inputHistoryScope,
       inputHistoryLimit,
       messageSearchEnabled: isMessageSearchEnabled(sanitized),
+      ...sessionWorkResponseFields(sanitized),
       securityScopedBookmarks: bookmarks,
       pinnedDirectories: normalizeStringArray(settings.pinnedDirectories),
       ...desktopFields,

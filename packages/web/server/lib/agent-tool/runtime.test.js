@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
+import compression from 'compression';
 import express from 'express';
 import request from 'supertest';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -76,7 +77,10 @@ const loadTools = async (dataDir, tag, hooks = {}, removed = [], namespaces = []
       },
     },
     session: {
-      hook: async (name, callback) => { hooks[name] = callback; },
+      hook: async (name, callback) => {
+        const earlier = hooks[name];
+        hooks[name] = earlier ? async (draft) => { await earlier(draft); await callback(draft); } : callback;
+      },
     },
   });
   return registered;
@@ -347,6 +351,46 @@ describe('managed agent tool runtime', () => {
     expect(knowledge.description).toContain('retry the save with the same id');
   });
 
+  it('tells an agent where to save a plan before it picks a tool, only while the knowledge tool is on', async () => {
+    const { runtime, dataDir } = await createRuntime();
+    await prepareManagedEnv(runtime, { includeKnowledge: true });
+    const namespaces = [];
+    const hooks = {};
+    const { openchamber_knowledge: knowledge } = await loadTools(dataDir, 'knowledge-plan-store', hooks, [], namespaces);
+
+    // The catalog line is all an agent sees while it chooses; without Code Mode
+    // it sees the description. Both answer OpenCode's Plan mode reminder, which
+    // names ~/.opencode/plan, and leave that folder to a request for a file.
+    const line = namespaces.find(({ name }) => name === 'openchamber_knowledge').description;
+    expect(line).toContain('knowledge.save with kind plan');
+    for (const text of [line, knowledge.description]) {
+      expect(text).toContain('in Plan mode too');
+      expect(text).toContain('~/.opencode/plan');
+      expect(text).toContain('when the user asks for a file');
+    }
+    expect(knowledge.description.length).toBeLessThanOrEqual(2048);
+
+    const user = (text) => ({ role: 'user', content: [{ type: 'text', text }] });
+    const reminder = user('<system-update>\nYou are in Plan mode. Write plan files only in:\n/home/u/.opencode/plan\n</system-update>');
+    const prompt = user('Save this plan');
+    for (const hook of ['context', 'compaction', 'generate']) {
+      const draft = { agent: 'plan', messages: [reminder, prompt] };
+      await hooks[hook](draft);
+      expect(draft.messages).toEqual([reminder, user(expect.stringContaining('knowledge.save with kind plan')), prompt]);
+    }
+    const ordinary = { agent: 'build', messages: [prompt] };
+    await hooks.context(ordinary);
+    expect(ordinary.messages).toEqual([prompt]);
+
+    await runtime.materializePlugin({ includeKnowledge: false });
+    const withoutKnowledge = [];
+    const hooksOff = {};
+    await loadTools(dataDir, 'knowledge-plan-store-off', hooksOff, [], withoutKnowledge);
+    for (const hook of ['context', 'generate']) expect(hooksOff[hook]).toBeUndefined();
+    expect(withoutKnowledge.length).toBeGreaterThan(0);
+    expect(withoutKnowledge.some(({ description }) => description.includes('~/.opencode/plan'))).toBe(false);
+  });
+
   it('uses the callback session for knowledge scope and provenance', async () => {
     const { runtime, executeAction } = await createRuntime({ resolveSessionDirectory: async (id) => id === 'ses_real' ? '/real' : null });
     const input = { action: 'knowledge.save', kind: 'note', body: 'Note', origin: { sessionId: 'spoof' }, sessionId: 'spoof' };
@@ -516,7 +560,7 @@ describe('managed agent tool runtime', () => {
       'workflow.check', 'workflow.run', 'workflow.status', 'workflow.result', 'workflow.stop', 'workflow.resume', 'workflow.save', 'workflow.list',
     ]);
     const parameters = tools.openchamber_workflow.input.properties.parameters.properties;
-    expect(parameters.script.description).toContain('agent(prompt, { label, phase, agent, model, schema })');
+    expect(parameters.script.description).toContain('agent(prompt, { id, forkFrom, label, phase, agent, model, schema })');
     expect(Object.keys(parameters)).toEqual(['script', 'name', 'args', 'runId', 'agent', 'overwrite']);
     // The answer tool comes along, direct; the managed config denies it outside workflow agents.
     expect(tools.openchamber_workflow_answer.options).toEqual({ codemode: false });
@@ -742,6 +786,51 @@ describe('managed agent tool runtime', () => {
     expect((await runtime.execute({ tool: 'openchamber', input: { action: 'terminal.list' }, sessionID: 'ses_a' })).ok).toBe(false);
   });
 
+  it('exposes project actions as their own tool only when switched on, owned by the session OpenCode reported', async () => {
+    const created = [];
+    const closed = [];
+    const terminals = {
+      listTerminals: () => created.map((sessionId) => ({ sessionId, cwd: '/repo', status: 'running', createdAt: 1, mode: 'command', purpose: { type: 'project-action', actionId: 'dev', executionId: sessionId, agentSessionId: 'ses_real' } })),
+      readTerminal: () => null,
+      createSession: async ({ sessionId }, agentSessionId) => { created.push(sessionId); expect(agentSessionId).toBe('ses_real'); return sessionId; },
+      closeTerminal: async (sessionId) => { closed.push(sessionId); return true; },
+    };
+    const releaseAnswerWaits = vi.fn();
+    const { runtime, dataDir, executeAction } = await createRuntime({
+      releaseAnswerWaits,
+      projectActions: {
+        readSettings: async () => ({ agentActionsToolEnabled: true, projects: [{ id: 'proj', path: '/repo' }] }),
+        getTerminalRuntime: () => terminals,
+        projectPathFor: async () => '/repo',
+        readProjectSetup: async () => ({ projectActions: [{ id: 'dev', name: 'Dev', command: 'bun run dev', icon: null }], trust: { trusted: true } }),
+      },
+    });
+    await prepareManagedEnv(runtime, { includeControl: false, includeWeb: false, includeMemory: false, includeActions: true });
+    const namespaces = [];
+    const tool = await loadTools(dataDir, 'actions', {}, [], namespaces);
+
+    expect(Object.keys(tool)).toEqual(['openchamber_actions']);
+    expect(Object.keys(tool.openchamber_actions.input.properties.parameters.properties).sort()).toEqual(['maxBytes', 'name']);
+    expect(tool.openchamber_actions.options).toEqual({ codemode: true });
+    expect(namespaces).toEqual([expect.objectContaining({ name: 'openchamber_actions' })]);
+    expect(tool.openchamber_actions.description.length).toBeLessThanOrEqual(2048);
+
+    // A run belongs to the session OpenCode named, never to one the payload claims.
+    const result = await runtime.execute({ tool: 'openchamber_actions', input: { action: 'run', name: 'dev' }, sessionID: 'ses_real', contextSessionId: 'ses_spoof', contextDirectory: '/repo' });
+    expect(result).toMatchObject({ ok: true, action: 'actions.run', data: { started: true } });
+    expect(executeAction).not.toHaveBeenCalled();
+    expect(await runtime.hasProjectActions('/repo')).toBe(true);
+
+    // The session's end stops its runs; idle and errors release waits as before.
+    runtime.processSessionEvent({ type: 'session.archived', properties: { sessionID: 'ses_real' } });
+    await vi.waitFor(() => expect(closed).toEqual(created));
+    runtime.processSessionEvent({ type: 'session.error', properties: { sessionID: 'ses_real' } });
+    expect(releaseAnswerWaits).toHaveBeenCalledWith('ses_real');
+
+    await runtime.materializePlugin({ includeControl: true, includeWeb: false, includeMemory: false });
+    expect(await loadTools(dataDir, 'actions-off')).not.toHaveProperty('openchamber_actions');
+  });
+
   it('declares share on render only while sharing is available', async () => {
     const { runtime, dataDir } = await createRuntime();
     await prepareManagedEnv(runtime, { includeControl: false, includeWeb: false, includeMemory: false, includeRender: true, includeShare: true });
@@ -793,7 +882,7 @@ describe('managed agent tool runtime', () => {
 
     expect(Object.keys(tools)).toEqual(['openchamber_secret']);
     expect(Object.keys(tools.openchamber_secret.input.properties.parameters.properties).sort())
-      .toEqual(['args', 'inputs', 'label', 'placeholder', 'program', 'reason', 'timeoutMs']);
+      .toEqual(['args', 'inputs', 'label', 'placeholder', 'program', 'reason', 'saved', 'timeoutMs']);
     expect(tools.openchamber_secret.options).toEqual({ codemode: false });
     expect(tools.openchamber_secret.description.length).toBeLessThanOrEqual(2048);
     // A chat message ends the wait, like a page's.
@@ -849,9 +938,75 @@ describe('managed agent tool runtime', () => {
     }
   });
 
+  it('sends an undeclared field of parameters on only for lead.brief and lead.digest', async () => {
+    const { runtime, dataDir } = await createRuntime();
+    const prepared = await prepareManagedEnv(runtime);
+    const tools = await loadTools(dataDir, 'lead-undeclared');
+    const saved = { fetch: globalThis.fetch, url: process.env.OPENCHAMBER_AGENT_TOOL_URL, token: process.env.OPENCHAMBER_AGENT_TOOL_TOKEN };
+    process.env.OPENCHAMBER_AGENT_TOOL_URL = prepared.OPENCHAMBER_AGENT_TOOL_URL;
+    process.env.OPENCHAMBER_AGENT_TOOL_TOKEN = prepared.OPENCHAMBER_AGENT_TOOL_TOKEN;
+    let sent;
+    globalThis.fetch = async (_url, init) => {
+      sent = JSON.parse(init.body).input;
+      return new Response(JSON.stringify({ schemaVersion: 1, ok: true, action: sent.action, data: {} }));
+    };
+    const call = (input) => tools.openchamber.execute(input, { sessionID: 'ses_1', agent: 'build', messageID: 'msg_1', id: 'call_1', progress: async () => {} });
+    try {
+      expect(tools.openchamber.input.properties.parameters.additionalProperties).toBe(true);
+      for (const action of ['lead.brief', 'lead.digest']) {
+        await call({ action, parameters: { body: 'x', disabled: null, timeout: '', extra: [] } });
+        expect(sent).toEqual({ action, body: 'x' });
+      }
+      await call({ action: 'session.create', wait: true, parameters: { title: 'T', body: 'x', wait: false, timeout: 5 } });
+      expect(sent).toEqual({ action: 'session.create', title: 'T', wait: true });
+    } finally {
+      globalThis.fetch = saved.fetch;
+      if (saved.url === undefined) delete process.env.OPENCHAMBER_AGENT_TOOL_URL;
+      else process.env.OPENCHAMBER_AGENT_TOOL_URL = saved.url;
+      if (saved.token === undefined) delete process.env.OPENCHAMBER_AGENT_TOOL_TOKEN;
+      else process.env.OPENCHAMBER_AGENT_TOOL_TOKEN = saved.token;
+    }
+  });
+
+  it('throws a refused lead.brief or lead.digest inside a script, and answers a direct call and other actions as before', async () => {
+    const { runtime, dataDir } = await createRuntime();
+    const prepared = await prepareManagedEnv(runtime, { includeWeb: false, includeMemory: false });
+    const tools = await loadTools(dataDir, 'lead-refusal');
+    const saved = { fetch: globalThis.fetch, url: process.env.OPENCHAMBER_AGENT_TOOL_URL, token: process.env.OPENCHAMBER_AGENT_TOOL_TOKEN };
+    process.env.OPENCHAMBER_AGENT_TOOL_URL = prepared.OPENCHAMBER_AGENT_TOOL_URL;
+    process.env.OPENCHAMBER_AGENT_TOOL_TOKEN = prepared.OPENCHAMBER_AGENT_TOOL_TOKEN;
+    let answer;
+    globalThis.fetch = async () => {
+      if (answer instanceof Error) throw answer;
+      return new Response(JSON.stringify(answer));
+    };
+    const call = (action, codemode) => tools.openchamber.execute({ action }, { sessionID: 'ses_1', agent: 'build', messageID: 'msg_1', id: 'call_1', codemode, progress: async () => {} });
+    const refused = (action) => ({ schemaVersion: 1, ok: false, action, error: { message: 'Nothing was saved.', kind: 'usage' } });
+    try {
+      for (const action of ['lead.brief', 'lead.digest']) {
+        answer = refused(action);
+        await expect(call(action, true)).rejects.toThrow(`${action} was refused: Nothing was saved.`);
+        expect(JSON.parse((await call(action, undefined)).content)).toEqual(answer);
+        answer = { schemaVersion: 1, ok: true, action, data: { saved: true } };
+        expect(JSON.parse((await call(action, true)).content)).toEqual(answer);
+        answer = new Error('connection refused');
+        await expect(call(action, true)).rejects.toThrow('connection refused');
+      }
+      answer = refused('session.link');
+      expect(JSON.parse((await call('session.link', true)).content)).toEqual(answer);
+    } finally {
+      globalThis.fetch = saved.fetch;
+      if (saved.url === undefined) delete process.env.OPENCHAMBER_AGENT_TOOL_URL;
+      else process.env.OPENCHAMBER_AGENT_TOOL_URL = saved.url;
+      if (saved.token === undefined) delete process.env.OPENCHAMBER_AGENT_TOOL_TOKEN;
+      else process.env.OPENCHAMBER_AGENT_TOOL_TOKEN = saved.token;
+    }
+  });
+
   it.each([
     ['secret.request', { action: 'request', label: 'Token', reason: 'Deploy' }],
     ['secret.run', { action: 'run', program: 'wrangler', args: ['deploy'], reason: 'Deploy', inputs: [{ env: 'TOKEN', label: 'Token' }] }],
+    ['secret.forget', { action: 'forget', saved: 'true' }],
   ])('keeps a %s card waiting through an agent or queued prompt, and ends it for the user', async (action, input) => {
     const { runtime, dataDir } = await createRuntime();
     const prepared = await prepareManagedEnv(runtime, { includeControl: false, includeWeb: false, includeMemory: false, includeSecret: true });
@@ -1131,6 +1286,64 @@ describe('managed agent tool runtime', () => {
     }
   });
 
+  it('answers a waiting call before its result is there, and tells the agent to stop when the connection is lost', async () => {
+    const service = createOpenChamberControlService({ sessionService: { resolveDirectory: async () => '/repo' } });
+    const { runtime, dataDir } = await createRuntime({
+      keepAliveMs: 100,
+      resolveSessionDirectory: async () => '/repo',
+      executeAction: (...args) => service.execute(...args),
+    });
+    const prepared = await prepareManagedEnv(runtime, { includeControl: false, includeWeb: false, includeMemory: false, includeRender: true });
+    const tools = await loadTools(dataDir, 'render-keep-alive');
+    const app = express();
+    app.use(compression({ threshold: 1024 }));
+    runtime.registerRoutes(app, express);
+    const server = await new Promise((resolve) => {
+      const listener = app.listen(0, '127.0.0.1', () => resolve(listener));
+    });
+    vi.stubEnv('OPENCHAMBER_AGENT_TOOL_URL', `http://127.0.0.1:${server.address().port}/api/openchamber/agent-tool`);
+    vi.stubEnv('OPENCHAMBER_AGENT_TOOL_TOKEN', prepared.OPENCHAMBER_AGENT_TOOL_TOKEN);
+    const ask = (id) => tools.openchamber_render.execute(
+      { action: 'render.page', parameters: { html: '<p>Pick</p>', title: 'Pick a layout', awaitAnswer: true } },
+      { sessionID: 'ses_caller', id, signal: new AbortController().signal, progress: async () => {} },
+    );
+    // The plugin reads the body itself, so a copy of each response shows what reached it while it waits.
+    const realFetch = globalThis.fetch;
+    const bodies = [];
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (...args) => {
+      const response = await realFetch(...args);
+      const body = { encoding: response.headers.get('content-encoding'), text: '' };
+      bodies.push(body);
+      void (async () => {
+        const decoder = new TextDecoder();
+        for await (const chunk of response.clone().body) body.text += decoder.decode(chunk);
+      })().catch(() => {});
+      return response;
+    });
+    try {
+      const answered = ask('call_1');
+      // Node's fetch ends a request after five minutes without headers, or without a body chunk after them.
+      await vi.waitFor(() => expect(bodies[0]?.text.length).toBeGreaterThan(1), { timeout: 4000 });
+      expect(bodies[0]).toMatchObject({ encoding: null, text: expect.stringMatching(/^ +$/) });
+      service.answerPage({ sessionId: 'ses_caller', callId: 'call_1', summary: 'Layout B' });
+      const result = await answered;
+      expect(result.content.startsWith('{')).toBe(true);
+      expect(JSON.parse(result.content)).toMatchObject({ ok: true, data: { answer: { answered: true, summary: 'Layout B' } } });
+
+      const lost = ask('call_2');
+      await vi.waitFor(() => expect(bodies[1]?.text).toMatch(/^ +$/), { timeout: 4000 });
+      server.closeAllConnections();
+      const lostResult = JSON.parse((await lost).content);
+      expect(lostResult).toMatchObject({ ok: false, error: { kind: 'runtime' } });
+      expect(lostResult.error.message).toContain('end your turn');
+    } finally {
+      fetchSpy.mockRestore();
+      vi.unstubAllEnvs();
+      server.closeAllConnections();
+      await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
   it('keeps a page waiting through a prompt an agent sent or one queued for after the turn', async () => {
     const pageWaits = createPageWaitSignals();
     const service = createOpenChamberControlService({ sessionService: { resolveDirectory: async () => '/repo' }, onPageWaitChange: pageWaits.onPageWaitChange });
@@ -1264,6 +1477,7 @@ describe('managed agent tool runtime', () => {
     ['browser.type', 'openchamber_web', { selector: '#q', value: 'x', submit: 'yes' }, 'submit'],
     ['knowledge.save', 'openchamber_knowledge', { kind: 'todo', id: 't1', completed: 'false' }, 'completed'],
     ['notify.send', 'openchamber_notify', { title: 't', showWhenFocused: 1 }, 'showWhenFocused'],
+    ['secret.forget', 'openchamber_secret', { saved: 'yes' }, 'saved'],
   ])('refuses a %s whose boolean %s field is not a boolean', async (action, tool, input, field) => {
     const { runtime, executeAction } = await createRuntime();
     const result = await runtime.execute({ input: { action, ...input }, sessionID: 'ses_1', tool });

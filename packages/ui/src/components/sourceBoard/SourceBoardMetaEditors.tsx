@@ -5,12 +5,15 @@ import { recordLabelWrite } from '@/components/references/labelWrites';
 import type { CachedValue } from '@/components/references/referenceCache';
 import { labelColor, referenceNumberLabel } from '@/components/references/referencePickerItems';
 import { ReferenceLabelChips } from '@/components/references/ReferencePickerRow';
+import { ReviewerPerson } from '@/components/references/ReviewerChip';
+
 import { toast } from '@/components/ui';
-import { useAvatarImage } from '@/hooks/useAvatarImage';
+import { useIssueAssigneeCandidates } from '@/hooks/useIssueAssigneeCandidates';
 import { useRuntimeAPIs } from '@/hooks/useRuntimeAPIs';
 import type {
     Label,
     RepositoryChangeRequestReference,
+    RepositoryIssueReference,
     RepositoryReference,
     RepositoryReferenceDetail,
     RepositoryReferenceReviewer,
@@ -20,6 +23,7 @@ import { useI18n } from '@/lib/i18n';
 import { useSourceControlProvider } from '@/lib/source-control/providers/registry';
 import { SourceBoardChoicePicker, type BoardChoice } from './SourceBoardChoicePicker';
 import { newMutationKey } from './mutationKey';
+import { claimChangeRequestWrite, releaseChangeRequestWrite, useChangeRequestWrite } from './changeRequestWrites';
 
 const labelChoice = (label: Label): BoardChoice => ({
     id: label.name,
@@ -27,26 +31,10 @@ const labelChoice = (label: Label): BoardChoice => ({
     content: <ReferenceLabelChips labels={[{ name: label.name, color: labelColor(label.color) }]} />,
 });
 
-const Person: React.FC<{ person: RepositoryReferenceReviewer }> = ({ person }) => {
-    const { broken, onError } = useAvatarImage(person.avatarUrl);
-    return (
-        <span className="inline-flex min-w-0 items-center gap-1.5">
-            {person.avatarUrl && !broken ? (
-                <img src={person.avatarUrl} alt="" className="size-4 shrink-0 rounded-full" loading="lazy" onError={onError} />
-            ) : person.avatarUrl ? (
-                <span className="flex size-4 shrink-0 items-center justify-center rounded-full bg-surface-muted text-[0.625rem] leading-none">
-                    {person.login.slice(0, 1).toUpperCase()}
-                </span>
-            ) : null}
-            <span className="truncate">{person.login}</span>
-        </span>
-    );
-};
-
 const reviewerChoice = (person: RepositoryReferenceReviewer): BoardChoice => ({
     id: person.id,
     label: person.login,
-    content: <Person person={person} />,
+    content: <ReviewerPerson person={person} />,
 });
 
 const MetaValue: React.FC<{ empty: boolean; children: React.ReactNode; picker: React.ReactNode }> = ({ empty, children, picker }) => {
@@ -125,7 +113,7 @@ export const SourceBoardLabels: React.FC<{
     );
 };
 
-export const SourceBoardReviewers: React.FC<{
+export const SourceBoardReviewerPicker: React.FC<{
     pull: RepositoryChangeRequestReference;
     detail: CachedValue<RepositoryReferenceDetail>;
     context: SourceControlReadContext;
@@ -159,26 +147,158 @@ export const SourceBoardReviewers: React.FC<{
 
     if (detail.status === 'error') return null;
     if (!reviewers) return <Icon name="loader-4" className="size-3.5 animate-spin text-muted-foreground" />;
+    if (pull.state !== 'open') return null;
+    return (
+        <SourceBoardChoicePicker
+            ariaLabel={t('sourceBoard.reviewers.edit')}
+            searchPlaceholder={t('sourceBoard.reviewers.search')}
+            emptyText={t('sourceBoard.reviewers.empty')}
+            selected={reviewers.map((person) => person.id)}
+            selectedChoices={reviewers.map(reviewerChoice)}
+            loadChoices={async () => (await sourceControl.referenceReviewers(context, project))
+                // external: https://docs.github.com/en/rest/pulls/review-requests#request-reviewers-for-a-pull-request GitHub refuses review requests to the PR author; GitLab allows them.
+                .filter((person) => descriptor.features.authorCanReview || person.login !== pull.author?.login)
+                .map(reviewerChoice)}
+            onCommit={(ids) => void commit(ids)}
+            busy={busy}
+        />
+    );
+};
+
+export const SourceBoardBase: React.FC<{
+    pull: RepositoryChangeRequestReference;
+    context: SourceControlReadContext;
+    onChanged: () => void | Promise<void>;
+    sheet?: boolean;
+}> = ({ pull, context, onChanged, sheet = false }) => {
+    const { t } = useI18n();
+    const { sourceControl } = useRuntimeAPIs();
+    const write = useChangeRequestWrite(pull);
+    const descriptor = useSourceControlProvider(pull.provider);
+    const { owner, repo } = pull.sourceRepo;
+    const shown = React.useRef({ head: pull.head, base: pull.base });
+
+    const commit = async (base: string) => {
+        if (!claimChangeRequestWrite(pull, 'base')) return;
+        try {
+            await sourceControl.changeRequestSetBase({
+                ...context,
+                idempotencyKey: newMutationKey(),
+                target: { project: { owner, name: repo }, number: pull.number, ...shown.current },
+                base,
+            });
+            await onChanged();
+        } catch (error) {
+            toast.error(t('sourceBoard.base.failed', { reference: referenceNumberLabel(pull, descriptor) }), {
+                description: error instanceof Error ? error.message : String(error),
+            });
+        } finally {
+            releaseChangeRequestWrite(pull);
+        }
+    };
+
+    return (
+        <SourceBoardChoicePicker
+            single
+            ariaLabel={t('sourceBoard.base.edit')}
+            searchPlaceholder={t('sourceBoard.base.search')}
+            emptyText={t('sourceBoard.base.empty')}
+            selected={[]}
+            loadChoices={async () => {
+                shown.current = { head: pull.head, base: pull.base };
+                const branches = await sourceControl.projectBranches(context, owner, repo);
+                return branches
+                    .filter((branch) => branch !== pull.base)
+                    .map((branch) => ({
+                        id: branch,
+                        label: branch,
+                        content: (
+                            <span className="flex min-w-0 flex-1 items-center gap-2">
+                                <Icon name="git-branch" className="size-3.5 shrink-0 text-muted-foreground" />
+                                <span className="truncate font-mono">{branch}</span>
+                            </span>
+                        ),
+                    }));
+            }}
+            onCommit={([base]) => void commit(base)}
+            busy={write === 'base'}
+            disabled={write !== null}
+            sheet={sheet}
+        />
+    );
+};
+
+const assigneeChoice = (person: RepositoryReferenceReviewer): BoardChoice => ({
+    id: person.id,
+    label: person.login,
+    content: <ReviewerPerson person={person} />,
+});
+
+export const SourceBoardAssignees: React.FC<{
+    issue: RepositoryIssueReference;
+    detail: CachedValue<RepositoryReferenceDetail>;
+    writeAccess?: boolean;
+    context: SourceControlReadContext;
+    onChanged: () => void | Promise<void>;
+    sheet?: boolean;
+}> = ({ issue, detail, writeAccess, context, onChanged, sheet = false }) => {
+    const { t } = useI18n();
+    const { sourceControl } = useRuntimeAPIs();
+    const [busy, setBusy] = React.useState(false);
+    const assignees = detail.status === 'ready' ? detail.value.assignees ?? null : null;
+    const descriptor = useSourceControlProvider(issue.provider);
+    const { owner, repo } = issue.sourceRepo;
+    const { candidates, setCandidates } = useIssueAssigneeCandidates(context, owner, repo);
+
+    const commit = async (ids: string[]) => {
+        setBusy(true);
+        try {
+            await sourceControl.issueSetAssignees({
+                ...context,
+                idempotencyKey: newMutationKey(),
+                target: { project: { owner, name: repo }, number: issue.number },
+                assignees: ids,
+            });
+        } catch (error) {
+            toast.error(t('sourceBoard.assignees.saveFailed', { reference: referenceNumberLabel(issue, descriptor) }), {
+                description: error instanceof Error ? error.message : String(error),
+            });
+        } finally {
+            try {
+                await onChanged();
+            } finally {
+                setBusy(false);
+            }
+        }
+    };
+
+    if (detail.status === 'idle' || detail.status === 'loading') return <Icon name="loader-4" className="size-3.5 animate-spin text-muted-foreground" />;
+    if (!assignees) return null;
+    const editable = descriptor.features.issueAssignees && candidates !== null && writeAccess !== false;
     return (
         <MetaValue
-            empty={reviewers.length === 0}
-            picker={pull.state === 'open' ? (
+            empty={false}
+            picker={editable ? (
                 <SourceBoardChoicePicker
-                    ariaLabel={t('sourceBoard.reviewers.edit')}
+                    ariaLabel={t('sourceBoard.assignees.edit')}
                     searchPlaceholder={t('sourceBoard.reviewers.search')}
                     emptyText={t('sourceBoard.reviewers.empty')}
-                    selected={reviewers.map((person) => person.id)}
-                    selectedChoices={reviewers.map(reviewerChoice)}
-                    loadChoices={async () => (await sourceControl.referenceReviewers(context, project))
-                        // external: https://docs.github.com/en/rest/pulls/review-requests#request-reviewers-for-a-pull-request GitHub refuses review requests to the PR author; GitLab allows them.
-                        .filter((person) => descriptor.features.authorCanReview || person.login !== pull.author?.login)
-                        .map(reviewerChoice)}
+                    selected={assignees.map((person) => person.id)}
+                    selectedChoices={assignees.map(assigneeChoice)}
+                    loadChoices={async () => {
+                        const people = await sourceControl.referenceReviewers(context, { owner, repo }, 'assignee');
+                        setCandidates(people);
+                        return people.map(assigneeChoice);
+                    }}
                     onCommit={(ids) => void commit(ids)}
                     busy={busy}
+                    sheet={sheet}
                 />
             ) : null}
         >
-            {reviewers.map((person) => <Person key={person.id} person={person} />)}
+            {assignees.length === 0
+                ? <span className="text-muted-foreground">{t('sourceBoard.assignees.empty')}</span>
+                : assignees.map((person) => <ReviewerPerson key={person.id} person={person} />)}
         </MetaValue>
     );
 };

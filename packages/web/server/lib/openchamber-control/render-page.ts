@@ -60,7 +60,7 @@ export const RENDER_PAGE_MAX_TITLE_LENGTH = 120;
 const RENDER_PAGE_MAX_SUMMARY_LENGTH = 500;
 const RENDER_PAGE_MAX_ANSWER_DATA_LENGTH = 16_000;
 
-const LOCAL_IMAGE_RE = /(["'`])((?:file:\/\/|\/(?!\/)|[A-Za-z]:[\\/])[^"'`<>\n]*?\.(?:png|jpe?g|gif|webp))\1|url\(\s*((?:file:\/\/|\/(?!\/)|[A-Za-z]:[\\/])[^"'`<>()\s]*?\.(?:png|jpe?g|gif|webp))\s*\)/gi;
+const LOCAL_IMAGE_RE = /(["'`])((?:file:\/\/|\/(?!\/)|[A-Za-z]:[\\/])(?:(?!\1)[^<>\n])*?\.(?:png|jpe?g|gif|webp))\1|url\(\s*((?:file:\/\/|\/(?!\/)|[A-Za-z]:[\\/])[^"'`<>()\s]*?\.(?:png|jpe?g|gif|webp))\s*\)/gi;
 export const RENDER_PAGE_IMAGE_BUDGET_BYTES = 25 * 1024 * 1024;
 
 export const renderPageImageSources = (html: string) => {
@@ -154,7 +154,11 @@ const ANSWERED_NOTE = "The user answered on the page. summary is their choice in
 
 export const RENDER_PAGE_CLOSED_IN_CHAT_NOTE = "The user did not answer on the page and wrote in the chat instead; their message follows this result. Continue from that message and don't ask the same question on a page again unless they want it.";
 
+export const RENDER_PAGE_CONNECTION_LOST_NOTE = "The connection to OpenChamber was lost while this call waited for the user, so the page is closed and no answer came back. Don't show it again on your own: say what is blocked and end your turn; the user can ask you to continue.";
+
 const UI_NOT_DRAWN_NOTE = "The chat could not draw this ui, so the user saw its source instead of fields. Fix the program from the errors below and call again.";
+
+const PAGE_SCRIPT_FAILED_NOTE = "The page's script threw before the page showed anything to answer with, so the user saw an empty page. Fix the script from the errors below and call again.";
 
 const DECLINED_NOTE = "The user declined to answer on the page. Don't choose for them and don't ask the same question again. Stop here: say in one short line that you left it, and wait for their next message.";
 
@@ -328,7 +332,7 @@ export const createRenderPageAction = ({ isEnabled, pageAnswers, hasUnreadChat, 
     if (!laterPages) {
       throw new OpenChamberControlError('This server cannot keep a page open for a later answer; ask in text', 503);
     }
-    await laterPages.open({ sessionId, callId, title, ...renderPageQuestion(field, content), directory });
+    await laterPages.open({ sessionId, callId, title, field, ...renderPageQuestion(field, content), directory });
     return withHidden({ shown: true, title, answerLater: true }, LATER_NOTE);
   }
   if (input.awaitAnswer !== true) {
@@ -342,7 +346,8 @@ export const createRenderPageAction = ({ isEnabled, pageAnswers, hasUnreadChat, 
   }
   const answer = await pageAnswers.wait({ sessionId, callId, title, directory, signal });
   if (answer.reason === 'ui-not-drawn') {
-    return { title, answer: { answered: false, reason: 'ui-not-drawn' }, note: [UI_NOT_DRAWN_NOTE, ...answer.errors].join('\n') };
+    const note = field === 'html' ? PAGE_SCRIPT_FAILED_NOTE : UI_NOT_DRAWN_NOTE;
+    return { title, answer: { answered: false, reason: 'ui-not-drawn' }, note: [note, ...answer.errors].join('\n') };
   }
   if (answer.reason === 'declined') {
     return { title, answer, note: DECLINED_NOTE };

@@ -17,7 +17,7 @@ import {
   type SpacesSwitchChange,
 } from '@/lib/spaces/spaces-api';
 import { resetSpaceCreationRequests } from '@/lib/spaces/space-creation-requests';
-import { resetSpaceModelAccess } from '@/lib/spaces/space-model-access';
+import { resetSpaceModelAccess } from '@/lib/spaces/space-model-offer';
 import { refreshSpacesJourney, spacesWithoutProject, useSpacesJourneyRead, useSpacesStore } from '@/lib/spaces/spaces-store';
 import { SpaceRow } from '@/components/session/spaces/SpaceRow';
 import { SpacePlacesSettings } from './SpacePlacesSettings';
@@ -206,7 +206,8 @@ export const IsolatedSpacesSettings: React.FC = () => {
             onChange={(next) => void handleChange(next)}
             label={t('settings.openchamber.spaces.field.enabled')}
             ariaLabel={t('settings.openchamber.spaces.field.enabledAria')}
-            info={t('settings.openchamber.spaces.field.enabledInfo')}
+            description={enabled ? undefined : t('settings.openchamber.spaces.field.enabledInfo')}
+            info={enabled ? t('settings.openchamber.spaces.field.enabledInfo') : undefined}
           />
           {notice ? (
             <div className="space-y-2 ps-6" role="alert">

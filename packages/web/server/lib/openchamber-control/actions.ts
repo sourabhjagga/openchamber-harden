@@ -2,7 +2,8 @@ export const OPENCHAMBER_CONTROL_ACTION_DEFINITIONS = Object.freeze([
   { action: 'projects.list', title: 'List session destinations', description: 'Projects and Chats; use an id as projectId for session.create. No parameters' },
   { action: 'models.list', title: 'Show model preferences', description: 'Default, favorite and recent models; no parameters' },
   { action: 'models.search', title: 'Search models', description: 'The model catalog, favorites and recent models first; optional query, provider, all, limit, offset' },
-  { action: 'session.list', title: 'List sessions', description: 'Newest top-level sessions here; each has inWork (in the sidebar\'s In work) and doneSuggested (its last turn looks finished). Filters inWork, busy (running now), query (title words); inWork and busy span every project unless scoped and return all matches. Optional limit, all, children, withStatus (status as in session.status)' },
+  { action: 'session.list', title: 'List sessions', description: 'Newest top-level sessions here; each has inWork (in the sidebar\'s In work) and doneSuggested (its last turn looks finished), and lead: true on a lead. Filters inWork, busy (running now), leads, mine (sessions you created with ownWork, with their status), query (title words); inWork, busy, leads and mine span every project unless scoped and return all matches. Optional limit, all, children, withStatus (status as in session.status)' },
+  { action: 'session.archive', title: 'Archive a session', description: 'Archive sessionId, a session you created with ownWork. Restoring one is the user\'s' },
   { action: 'session.markDone', title: 'Mark a session done', description: 'Take sessionId (default: this session) out of In work, as the Done button does. Only on the user\'s word; a later message puts it back' },
   { action: 'session.track', title: 'Put a session in work', description: 'Put sessionId back in In work, as the Track button does, such as to undo a markDone' },
   { action: 'session.create', title: 'Create a session', description: 'In this directory by default; projectId from projects.list selects a project or openchamber:chats for a new Chat. Use the returned directory for later session actions. Prompt optional' },
@@ -16,9 +17,11 @@ export const OPENCHAMBER_CONTROL_ACTION_DEFINITIONS = Object.freeze([
   { action: 'pr.watch', title: 'Wait on a pull request', description: 'Requires url of a GitHub pull request or GitLab merge request. Same as wait.start with source "pr"', agentExposed: false },
   { action: 'pr.unwatch', title: 'Stop waiting on a pull request', description: 'This session stops waiting on the pull request at url, or on every one without url', agentExposed: false },
   { action: 'wait.list', title: 'List waits', description: "This session's waits, and the sources to wait on (the built-in timer, pull requests, and what extensions offer), with the args each takes" },
-  { action: 'wait.start', title: 'Wait on a timer, a pull request or an extension', description: 'Requires source and args: "timer" with { "minutes": N } (1 to 1440); "pr" with { "url": "<GitHub pull request or GitLab merge request address>" }, which wakes the session when a check fails or every check passes, someone comments or reviews, the branch conflicts or falls behind, or it is merged or closed; or a source from wait.list with args as its params say. Each pull request is its own wait, so a session can wait on several. One wake ends the wait, so start it again to keep waiting. End your turn while you wait. Never wait with a sleep loop' },
+  { action: 'wait.start', title: 'Wait on a timer, a script, a pull request or an extension', description: 'Requires source and args: "timer" with { "minutes": N } (1 to 1440); "script" with { "code": "<Code Mode script>", "minutes": N, "hours"?: N }, which runs the script every N minutes without a model for up to hours (24 by default, at most 168) and wakes the session when it returns a non-empty string or { wake }, keeping { state } between runs, with tools.<ns>.<tool>(...) and fetch allowed when their permission does not ask; "pr" with { "url": "<GitHub pull request or GitLab merge request address>" }, which wakes the session when a check fails or every check passes, someone comments or reviews, the branch conflicts or falls behind, GitHub removes it from the merge queue, or it is merged or closed; or a source from wait.list with args as its params say. Each pull request is its own wait, so a session can wait on several. One wake ends the wait, so start it again to keep waiting. End your turn while you wait. Never wait with a sleep loop' },
   { action: 'wait.stop', title: 'Stop a wait', description: 'Stop waitId (a pull request wait\'s waitId is its address), or every wait of this session without it' },
-  { action: 'work.name', title: 'Name the task', description: 'Name the worktree\'s or isolated space\'s task for sessionId (default: this session), never a session. In title: at most 4 words in the user\'s latest language; rename only for a different task. A user-given name stays. Main checkout and plain folders need no naming. A worktree on an OpenChamber-generated placeholder branch also requires branch, the English branch name after the task, and renames it; any other branch stays' },
+  { action: 'work.name', title: 'Name the task', description: 'Name the worktree\'s or isolated space\'s task for sessionId (default: this session), never a session; a lead\'s name is its session title, so for a lead it renames the session. In title: at most 4 words in the user\'s latest language; rename only for a different task. A user-given name stays. Main checkout and plain folders need no naming. A worktree on an OpenChamber-generated placeholder branch also requires branch, the English branch name after the task, and renames it; any other branch stays' },
+  { action: 'lead.brief', title: "Keep the lead's brief", description: 'Only in a lead session. Without parameters it returns the brief. brief replaces the free text (goal, outcomes, rules) and edits changes parts of it; strands sets or closes strands of work by id. The answer says how full the brief is. A refusal throws inside a script' },
+  { action: 'lead.digest', title: "Update the lead's digest", description: 'Only in a lead session. Replaces the digest the user reads above the chat with needsYou, now, news and suggestions. A refusal throws inside a script' },
   { action: 'schedule.status', title: 'Check scheduler status', description: 'No parameters', agentExposed: false },
   { action: 'schedule.list', title: 'List scheduled tasks', description: 'Tasks and scheduler status' },
   { action: 'schedule.create', title: 'Create a scheduled task', description: 'Requires name, prompt, one schedule selector, and model unless targetSessionId is set. That session keeps its model and agent unless the task names others, which then become the session\'s. A named model is checked against the catalog when the task is written. runInWorktree (git only) runs each run in a fresh worktree on baseBranch (default HEAD); cleanupWorktree false keeps it' },
@@ -127,7 +130,7 @@ export const OPENCHAMBER_IMAGE_ACTIONS = Object.freeze(
 export const OPENCHAMBER_SECRET_ACTION_DEFINITIONS = Object.freeze([
   { action: 'secret.run', title: 'Run with secrets', description: 'Requires program, reason and inputs; optional args and timeoutMs' },
   { action: 'secret.request', title: 'Ask for a secret', description: 'Requires label and reason' },
-  { action: 'secret.forget', title: 'Forget remembered secrets', description: 'No inputs' },
+  { action: 'secret.forget', title: 'Forget remembered secrets', description: 'Optional saved: true, only when the user asks, to forget the project\'s saved secrets too' },
 ]);
 
 export const OPENCHAMBER_SECRET_ACTIONS = Object.freeze(
@@ -151,6 +154,17 @@ export const OPENCHAMBER_TERMINAL_ACTIONS = Object.freeze(
   OPENCHAMBER_TERMINAL_ACTION_DEFINITIONS.map(({ action }) => action),
 );
 
+export const OPENCHAMBER_PROJECT_ACTIONS_ACTION_DEFINITIONS = Object.freeze([
+  { action: 'actions.list', title: 'List project actions', description: "This project's actions for this computer: id, name, command, the folder it runs in, url when set, and its current or last run with who started it" },
+  { action: 'actions.run', title: 'Run a project action', description: 'Start the action name in its folder, as the actions menu does. When the action already runs, nothing starts a second copy and the answer says whose run it is' },
+  { action: 'actions.logs', title: 'Read project action output', description: "The end of the current or last run of the action name as plain text; maxBytes caps it" },
+  { action: 'actions.stop', title: 'Stop a project action', description: 'Stop the action name, only a run you started' },
+]);
+
+export const OPENCHAMBER_PROJECT_ACTIONS_ACTIONS = Object.freeze(
+  OPENCHAMBER_PROJECT_ACTIONS_ACTION_DEFINITIONS.map(({ action }) => action),
+);
+
 export const OPENCHAMBER_WORKFLOW_ACTION_DEFINITIONS = Object.freeze([
   { action: 'workflow.check', title: 'Check a workflow', description: 'Compile script, or a saved workflow by name, without running it: its name, description and phases' },
   { action: 'workflow.run', title: 'Propose a workflow run', description: 'script, or name of a saved workflow, with optional args. The run waits for the user to approve it in the chat, or starts at once when their settings allow that; the report arrives here as a message when the run ends. Returns runId and state at once' },
@@ -167,6 +181,35 @@ export const OPENCHAMBER_WORKFLOW_ACTIONS = Object.freeze(
 );
 
 export const WORKFLOW_ANSWER_TOOL = 'openchamber_workflow_answer';
+
+export const CONTROL_ONLY_PARAMETER_PROPERTIES = Object.freeze({
+  url: { type: 'string', description: 'session.unlink: the address of the link to remove' },
+  identifier: { type: 'string', description: 'session.unlink: the identifier of the link to remove, when no url' },
+  source: { type: 'string', description: 'wait.start: "timer", "script", "pr", or <extension>/<wait> as wait.list names it' },
+  args: { type: 'object', description: 'wait.start: the arguments the source\'s params list, such as { "minutes": 10 } or { "url": "https://github.com/o/r/pull/1" }' },
+  waitId: { type: 'string', description: 'wait.stop: the wait to stop; without it every wait of this session' },
+  brief: { type: 'string', description: "lead.brief: the brief's free text as markdown: the user's goal and agreed outcomes in their words, and rules. The strands stay; together at most 12000 characters" },
+  edits: {
+    type: 'array',
+    items: { type: 'object', properties: { find: { type: 'string' }, replace: { type: 'string' } }, required: ['find', 'replace'] },
+    description: 'lead.brief: changes to the free text, applied in order, each replacing the exact text find, which must appear once, with replace; nothing is saved when one fails',
+  },
+  strands: {
+    type: 'array',
+    items: { type: 'object', properties: { id: { type: 'string' }, text: { type: 'string' }, close: { type: 'boolean' } }, required: ['id'] },
+    description: 'lead.brief: strands to change, the others stay. { id, text } sets or replaces one, at most 600 characters: the expected result, its session, where it stands now. { id, close: true } removes a finished one. id is a short name such as relay-push',
+  },
+  needsYou: {
+    type: 'array',
+    items: { type: 'object', properties: { question: { type: 'string' }, options: { type: 'array', items: { type: 'string' } }, recommended: { type: 'string' } }, required: ['question'] },
+    description: 'lead.digest: at most 3 questions to the user, each with up to 4 short options and the recommended one, word for word',
+  },
+  now: { type: 'array', items: { type: 'string' }, description: 'lead.digest: one line per strand of work, where it stands' },
+  news: { type: 'array', items: { type: 'string' }, description: 'lead.digest: at most 5 lines, only what changed the picture since the user last wrote' },
+  suggestions: { type: 'array', items: { type: 'string' }, description: 'lead.digest: at most 3 lines, work worth doing outside what the user gave you, with why' },
+  mine: { type: 'boolean', description: 'session.list: only the sessions you created with ownWork, each with its status' },
+  leads: { type: 'boolean', description: 'session.list: only lead sessions' },
+});
 
 export const OPENCHAMBER_WORKFLOW_ANSWER_ACTION_DEFINITIONS = Object.freeze([
   { action: 'workflow.answer', title: 'Submit a workflow answer', description: 'Only for a workflow agent whose prompt asks for it: answer, a JSON value matching the schema in that prompt. Checked on the spot; a mismatch says what to fix' },
@@ -188,9 +231,27 @@ const ACTIONS_BY_TOOL: Readonly<Record<string, readonly string[]>> = Object.free
   openchamber_secret: OPENCHAMBER_SECRET_ACTIONS,
   openchamber_usage: OPENCHAMBER_USAGE_ACTIONS,
   openchamber_terminal: OPENCHAMBER_TERMINAL_ACTIONS,
+  openchamber_actions: OPENCHAMBER_PROJECT_ACTIONS_ACTIONS,
   openchamber_workflow: OPENCHAMBER_WORKFLOW_ACTIONS,
   [WORKFLOW_ANSWER_TOOL]: OPENCHAMBER_WORKFLOW_ANSWER_ACTIONS,
 });
+
+export const AGENT_TOOL_ACTION_TITLES: Readonly<Record<string, string>> = Object.freeze(Object.fromEntries([
+  ...OPENCHAMBER_AGENT_TOOL_ACTION_DEFINITIONS,
+  ...OPENCHAMBER_SCHEDULE_ACTION_DEFINITIONS,
+  ...OPENCHAMBER_WEB_ACTION_DEFINITIONS,
+  ...OPENCHAMBER_MEMORY_ACTION_DEFINITIONS,
+  ...OPENCHAMBER_KNOWLEDGE_ACTION_DEFINITIONS,
+  ...OPENCHAMBER_NOTIFY_ACTION_DEFINITIONS,
+  ...OPENCHAMBER_RENDER_ACTION_DEFINITIONS,
+  ...OPENCHAMBER_IMAGE_ACTION_DEFINITIONS,
+  ...OPENCHAMBER_SECRET_ACTION_DEFINITIONS,
+  ...OPENCHAMBER_USAGE_ACTION_DEFINITIONS,
+  ...OPENCHAMBER_TERMINAL_ACTION_DEFINITIONS,
+  ...OPENCHAMBER_PROJECT_ACTIONS_ACTION_DEFINITIONS,
+  ...OPENCHAMBER_WORKFLOW_ACTION_DEFINITIONS,
+  ...OPENCHAMBER_WORKFLOW_ANSWER_ACTION_DEFINITIONS,
+].map(({ action, title }) => [action, title])));
 
 const bareName = (action: string) => {
   const separator = action.indexOf('.');
@@ -223,7 +284,10 @@ export const resolveAgentToolAction = (requested: string | null, toolName: strin
   };
 };
 
+export const OPENCHAMBER_USER_ACTIONS = Object.freeze(['lead.handover']);
+
 export const OPENCHAMBER_ALL_ACTIONS = Object.freeze([
+  ...OPENCHAMBER_USER_ACTIONS,
   ...OPENCHAMBER_CONTROL_ACTIONS,
   ...OPENCHAMBER_WEB_ACTIONS,
   ...OPENCHAMBER_MEMORY_ACTIONS,
@@ -234,6 +298,7 @@ export const OPENCHAMBER_ALL_ACTIONS = Object.freeze([
   ...OPENCHAMBER_SECRET_ACTIONS,
   ...OPENCHAMBER_USAGE_ACTIONS,
   ...OPENCHAMBER_TERMINAL_ACTIONS,
+  ...OPENCHAMBER_PROJECT_ACTIONS_ACTIONS,
   ...OPENCHAMBER_WORKFLOW_ACTIONS,
   ...OPENCHAMBER_WORKFLOW_ANSWER_ACTIONS,
 ]);

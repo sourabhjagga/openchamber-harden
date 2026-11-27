@@ -10,9 +10,9 @@ import { pcm16ToWav } from './audio.js';
 
 const OPENAI_COMPATIBLE_SAMPLE_RATE = 16000;
 
-export interface OpenAICompatibleSessionConfig extends Pick<TranscribeAudioOptions, 'baseURL' | 'model' | 'apiKey' | 'language' | 'endpointPath'> {
+export interface OpenAICompatibleSessionConfig extends Pick<TranscribeAudioOptions, 'baseURL' | 'model' | 'apiKey' | 'language' | 'prompt' | 'endpointPath'> {
   baseURL: TranscribeAudioOptions['baseURL'];
-  prompt?: string;
+  resolveProviderKey?: (() => Promise<string | undefined>) | undefined;
 }
 
 export interface OpenAICompatibleSessionEvents {
@@ -91,7 +91,9 @@ export class OpenAICompatibleTranscriptionSession extends EventEmitter<OpenAICom
           model: this.config.model,
           baseURL: this.config.baseURL,
           apiKey: this.config.apiKey,
+          providerKey: await this.config.resolveProviderKey?.(),
           language: this.config.language,
+          prompt: this.config.prompt,
           endpointPath: this.endpointPath,
         });
         this.emit('transcript', {

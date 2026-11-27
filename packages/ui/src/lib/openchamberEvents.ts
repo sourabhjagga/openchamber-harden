@@ -5,8 +5,9 @@ import { getRuntimeExtraHeadersSync } from './runtime-auth';
 import { isCapacitorApp } from './platform';
 import { isRelayModeActive } from './relay/runtime-tunnel';
 import { subscribeRuntimeEndpointChanged } from './runtime-switch';
-import { isVSCodeRuntime } from './desktop';
+import { isDesktopShell, isVSCodeRuntime } from './desktop';
 import { canDriveBrowserPage } from './browser/hostCapability';
+import { parseBrowserControlEvent, type BrowserControlEvent } from './browser/controlEvents';
 import { messageQueueUpdatedEventSchema, type MessageQueueUpdatedEvent } from '@/stores/messageQueueStore';
 import { autoReviewUpdatedEventSchema, type AutoReviewUpdatedEvent } from '@/stores/useAutoReviewStore';
 import { prWatchUpdatedEventSchema, type PrWatchUpdatedEvent } from '@/sync/pr-watch';
@@ -19,6 +20,7 @@ import { z } from 'zod';
 import { trackedItemRecordsSchema } from './trackedItems/model';
 import type { SyncEvent } from './opencode/events';
 import { classifyStreamPayload } from '@/sync/event-pipeline';
+import { dispatchAppearanceChangedEvent, type AppearanceChangedEvent } from './appearanceEvents';
 
 type ScheduledTaskRanEvent = {
   type: 'scheduled-task-ran';
@@ -44,21 +46,6 @@ type WorktreeChangedEvent = {
   directories: string[];
   changedAt: number;
 };
-
-type BrowserControlRequestEvent = {
-  type: 'browser-control-request';
-  requestId: string;
-  action: string;
-  parameters: Record<string, unknown>;
-  context: BrowserControlRequestContext;
-};
-
-const browserControlRequestContextSchema = z.object({
-  directory: z.string().min(1).nullable().catch(null),
-  sessionId: z.string().min(1).nullable().catch(null),
-});
-export type BrowserControlRequestContext = z.infer<typeof browserControlRequestContextSchema>;
-const UNKNOWN_BROWSER_CONTROL_CONTEXT: BrowserControlRequestContext = { directory: null, sessionId: null };
 
 const fileOpenRequestSchema = z.object({
   path: z.string().min(1),
@@ -102,14 +89,13 @@ type SourceControlProvidersChangedEvent = { type: 'source-control-providers-chan
 type TrackerProvidersChangedEvent = { type: 'tracker-providers-changed' };
 
 type QuotaProvidersChangedEvent = { type: 'quota-providers-changed' };
+type QuotaCredentialsChangedEvent = { type: 'quota-credentials-changed' };
 
 type GuestsChangedEvent = { type: 'guests-changed' };
 
 type GuestMarksChangedEvent = { type: 'guest-marks-changed' };
 
 type GuestServiceEvent = { type: 'guest-service-event'; guestId: string; topic: string; data: JsonValue };
-
-type ThemesChangedEvent = { type: 'themes-changed' };
 
 const limitFailoverSchema = z.discriminatedUnion('kind', [
   z.object({
@@ -219,6 +205,7 @@ const notificationPropertiesSchema = z.object({
 });
 
 type OpenChamberEvent =
+  | AppearanceChangedEvent
   | { type: 'terminal-sessions-changed' }
   | { type: 'notification'; payload: z.infer<typeof notificationPropertiesSchema> }
   | { type: 'event-stream-ready'; connectionId: string | null }
@@ -242,17 +229,17 @@ type OpenChamberEvent =
   | ScheduledTaskRanEvent
   | SessionCreatedEvent
   | WorktreeChangedEvent
-  | BrowserControlRequestEvent
+  | BrowserControlEvent
   | FileOpenRequestEvent
   | PlanOpenRequestEvent
   | BrowserProviderResetEvent
   | SourceControlProvidersChangedEvent
   | TrackerProvidersChangedEvent
   | QuotaProvidersChangedEvent
+  | QuotaCredentialsChangedEvent
   | GuestsChangedEvent
   | GuestMarksChangedEvent
   | GuestServiceEvent
-  | ThemesChangedEvent
   | LimitFailoverEvent
   | ProjectContextChangedEvent
   | SharePageChangedEvent
@@ -335,6 +322,7 @@ const connectFetchStream = (canControlBrowser: boolean) => {
       const response = await runtimeFetch('/api/openchamber/events', {
         query: canControlBrowser ? { browser: '1' } : undefined,
         headers: { Accept: 'text/event-stream' },
+        credentials: 'include',
         signal: controller.signal,
       });
       if (controller.signal.aborted) {
@@ -422,6 +410,15 @@ const getEventProperties = (properties: unknown): Record<string, unknown> | null
 };
 
 const guestServiceEventSchema = z.object({ guestId: z.string().min(1), topic: z.string().min(1), data: z.json() });
+
+const signalEvents = new Map<string, OpenChamberEvent>([
+  ['openchamber:source-control-providers-changed', { type: 'source-control-providers-changed' }],
+  ['openchamber:tracker-providers-changed', { type: 'tracker-providers-changed' }],
+  ['openchamber:quota-providers-changed', { type: 'quota-providers-changed' }],
+  ['openchamber:quota-credentials-changed', { type: 'quota-credentials-changed' }],
+  ['openchamber:guests-changed', { type: 'guests-changed' }],
+  ['openchamber:guest-marks-changed', { type: 'guest-marks-changed' }],
+]);
 
 const dispatchFromEnvelope = (envelope: { type: string; properties: unknown }) => {
   if (envelope.type === 'openchamber:terminal-sessions-changed') {
@@ -588,28 +585,9 @@ const dispatchFromEnvelope = (envelope: { type: string; properties: unknown }) =
     return;
   }
 
-  if (envelope.type === 'openchamber:source-control-providers-changed') {
-    for (const listener of listeners) listener({ type: 'source-control-providers-changed' });
-    return;
-  }
-
-  if (envelope.type === 'openchamber:tracker-providers-changed') {
-    for (const listener of listeners) listener({ type: 'tracker-providers-changed' });
-    return;
-  }
-
-  if (envelope.type === 'openchamber:quota-providers-changed') {
-    for (const listener of listeners) listener({ type: 'quota-providers-changed' });
-    return;
-  }
-
-  if (envelope.type === 'openchamber:guests-changed') {
-    for (const listener of listeners) listener({ type: 'guests-changed' });
-    return;
-  }
-
-  if (envelope.type === 'openchamber:guest-marks-changed') {
-    for (const listener of listeners) listener({ type: 'guest-marks-changed' });
+  const signal = signalEvents.get(envelope.type);
+  if (signal) {
+    for (const listener of listeners) listener(signal);
     return;
   }
 
@@ -620,10 +598,7 @@ const dispatchFromEnvelope = (envelope: { type: string; properties: unknown }) =
     return;
   }
 
-  if (envelope.type === 'openchamber:themes-changed') {
-    for (const listener of listeners) listener({ type: 'themes-changed' });
-    return;
-  }
+  if (dispatchAppearanceChangedEvent(envelope, listeners)) return;
 
   if (envelope.type === 'openchamber:limit-failover') {
     const parsed = limitFailoverSchema.safeParse(envelope.properties);
@@ -714,27 +689,9 @@ const dispatchFromEnvelope = (envelope: { type: string; properties: unknown }) =
     return;
   }
 
-  if (envelope.type === 'openchamber:browser-control-request') {
-    const properties = getEventProperties(envelope.properties);
-    const requestId = typeof properties?.requestId === 'string' ? properties.requestId : '';
-    const action = typeof properties?.action === 'string' ? properties.action : '';
-    if (!requestId || !action) {
-      return;
-    }
-
-    const rawParameters = properties?.parameters;
-    const nextEvent: BrowserControlRequestEvent = {
-      type: 'browser-control-request',
-      requestId,
-      action,
-      parameters: rawParameters && typeof rawParameters === 'object' && !Array.isArray(rawParameters)
-        ? rawParameters as Record<string, unknown>
-        : {},
-      context: browserControlRequestContextSchema.safeParse(properties?.context).data ?? UNKNOWN_BROWSER_CONTROL_CONTEXT,
-    };
-    for (const listener of listeners) {
-      listener(nextEvent);
-    }
+  const browserControlEvent = parseBrowserControlEvent(envelope);
+  if (browserControlEvent) {
+    for (const listener of listeners) listener(browserControlEvent);
     return;
   }
 
@@ -778,7 +735,7 @@ const connect = () => {
   cleanupSource();
 
   const canControlBrowser = canDriveBrowserPage();
-  if (isRelayModeActive() || (Object.keys(getRuntimeExtraHeadersSync()).length > 0 && isCapacitorApp())) {
+  if (isDesktopShell() || isRelayModeActive() || (Object.keys(getRuntimeExtraHeadersSync()).length > 0 && isCapacitorApp())) {
     connectFetchStream(canControlBrowser);
     return;
   }

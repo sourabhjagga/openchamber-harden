@@ -184,6 +184,15 @@ non-SSH remote is disabled with a localized reason (`describeIdentityApplicabili
 and never proposed. The instance's separate SSH address (`instanceSshUrl`) counts as
 its host for an SSH remote, so a Gitea or Forgejo instance whose `SSH_DOMAIN`
 differs from its web address still serves its own repositories.
+An SCP remote on an SSH alias (`git@gh-work:owner/repo`) counts as the host the
+server resolved it to: binding reads and the repository context carry it as the
+remote's `sshHostName`, and `identityApplicability`, `resolveSourceControlTarget`
+and the links built from them compare it with the instance's hostname, the
+same rule the server's binding check applies. The client never reads SSH
+configuration itself; a remote without `sshHostName` (from `/api/git/remotes`,
+or a server that does not send it) matches only by its written host, so the
+Git panel's header copies the read's value onto its remotes by name and
+address (`withRepositorySshHostNames`).
 Remote recognition compares the separate SSH address only with SSH remotes,
 using normalized hostname and SSH port. SCP, omitted port and explicit port 22
 have the same default-port identity. An HTTP(S) remote on an SSH-only host
@@ -398,6 +407,14 @@ Invariants:
   may send reads as its closest known meaning: an unknown change-request term as
   `pullRequest`, an unknown CI term as `checks`, an unknown auth method is
   dropped, an unknown settings field kind as `unknown`, a missing feature as off.
+- `reviewDismissal.ts` reads the dismissal capability a descriptor publishes.
+  `reviewDismiss` names who may dismiss: `others` for a review the
+  viewer did not write, `own` for withdrawing the viewer's own approval, absent
+  for no dismissal control at all; `reviewUndismiss: true` adds restoring a
+  dismissed review, which only the Gitea family does. `reviewSummary.ts` holds the
+  review row every surface reads (`RepositoryReferenceReview`), carried by
+  `RepositoryReferenceDetail.pull.reviews` and by `ChangeRequestContext.reviews`,
+  the path a host without a reference detail sends them on.
   The change-review features (*Change-based review hosts* below) read a
   missing or unknown value as the behavior every older host has:
   `reviewModel: 'verdict'`, `revisions`, `submitRequirements` and
@@ -494,6 +511,15 @@ Invariants:
   callers. Non-React code that reads links (`lib/linkedIssues.ts`,
   `components/references/listBackedReferences.ts`) takes it as a parameter. The
   matcher reads `www.` in front of a default instance's host as that instance.
+  An extension may also name `urls.resolve`, a service path. Canonical instances
+  keep native template priority; an existing alias uses the converter even when
+  its path also matches a native template. A canonical template miss can use it
+  too. `resolverFor` supplies deferred conversion through the ordinary guest
+  service proxy. Only a composer paste invokes it; `match` and rendering
+  remain synchronous. The converted URL is matched against the converting
+  descriptor and its instance alone (a built-in provider with the same path on
+  the same origin cannot claim it), must be a change request, and goes through
+  the native reader.
 - `useSourceControlDescriptorOf()` is the lookup for surfaces that name several
   providers in one render, and `useSourceControlProviderServing(id)` gates
   what only a served provider has (change-request diffs, walkthroughs): it is
@@ -597,6 +623,12 @@ anywhere under `packages/ui/src`).
   preview offers a picker when there is more than one, and the detail of an
   older one is read with `revision` (`useRepositoryReferenceDetail`), cached
   apart from the latest.
+- `reviewerStates` on the context names everyone asked to review and everyone
+  who answered, one entry per person; a host that does not say leaves it out, so
+  the preview falls back to the requested `reviewers`. A requested reviewer
+  missing from `reviewerStates` still shows, without a state. The client skips
+  an entry it cannot read (a state a newer server added, a malformed user)
+  instead of failing the read, so that person falls back to the roster too.
 - `features.submitRequirements`: submit (`MergeMethod` `submit`, alone) waits
   for the context's requirements and stays disabled while one is unmet
   (`sourceBoard/mergeChoice.ts`). Methods this version has no words for are

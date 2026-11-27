@@ -3,13 +3,20 @@ import { getCustomizableShortcutActions } from '@/lib/shortcuts';
 import { canKeepScreenAwake } from '@/lib/platform';
 import { isIsolatedSpacesPageVisible } from '@/lib/spaces/release';
 import { useUIStore } from '@/stores/useUIStore';
-import { useConfigStore } from '@/stores/useConfigStore';
+import type { useConfigStore } from '@/stores/useConfigStore';
 import { trackerPresentation } from '@/lib/trackers/presentation';
 import type { TrackerDescriptor } from '@/lib/trackers/types';
 import type { ChangeRequestTerm, SourceControlProviderDescriptor } from '@/lib/source-control/providers/descriptor';
 import type { SettingsPageSlug, SettingsRuntimeContext } from './metadata';
 import { getSettingsPageMeta } from './metadata';
 import { OPENCHAMBER_TOOLS_SEARCH_ITEMS } from './search-openchamber-tools';
+import { CHAT_ACTIVITY_SEARCH_ITEMS } from './search-chat-activity';
+import { CHAT_SENDING_SEARCH_ITEMS } from './search-chat-sending';
+import { SESSION_DEFAULTS_SEARCH_ITEMS } from './search-session-defaults';
+import { SIDEBAR_SESSION_SEARCH_ITEMS } from './search-sidebar-sessions';
+import { SESSION_COST_SEARCH_ITEMS, SESSION_GOAL_SEARCH_ITEMS } from './search-session-limits';
+import { VOICE_SEARCH_ITEMS } from './search-voice';
+import { SKILLS_SEARCH_ITEMS } from './search-skills';
 
 type SettingsSearchTitle =
   | { titleKey: I18nKey; titleParams?: I18nParams; literalTitle?: never }
@@ -47,7 +54,7 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     id: 'chat.activity-default',
     page: 'chat',
     titleKey: 'settings.openchamber.visual.section.activityDefault',
-    keywords: ['activity', 'collapsed', 'expanded', 'live', 'tools', 'history'],
+    keywords: ['activity', 'collapsed', 'text', 'expanded', 'live', 'tools', 'history'],
   },
   {
     id: 'appearance.language',
@@ -361,34 +368,7 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     keywords: ['review', 'walkthrough', 'changes', 'diff', 'jev', 'classification'],
     isAvailable: (ctx) => !ctx.isVSCode,
   },
-  {
-    id: 'chat.session-goal',
-    page: 'chat',
-    titleKey: 'settings.openchamber.visual.field.sessionGoal',
-    keywords: ['goal', 'objective', 'auto continue'],
-    isAvailable: (ctx) => !ctx.isVSCode,
-  },
-  {
-    id: 'chat.session-goal-checker',
-    page: 'chat',
-    titleKey: 'settings.openchamber.visual.goal.checkerLabel',
-    keywords: ['goal', 'progress', 'check', 'jev', 'classification', 'small model'],
-    isAvailable: (ctx) => !ctx.isVSCode,
-  },
-  {
-    id: 'chat.session-goal-max-turns',
-    page: 'chat',
-    titleKey: 'settings.openchamber.visual.goal.maxTurnsLabel',
-    keywords: ['goal', 'turns', 'limit', 'continuations', 'safety'],
-    isAvailable: (ctx) => !ctx.isVSCode,
-  },
-  {
-    id: 'chat.session-goal-budget',
-    page: 'chat',
-    titleKey: 'settings.openchamber.visual.goal.budgetLabel',
-    keywords: ['goal', 'budget', 'tokens', 'limit'],
-    isAvailable: (ctx) => !ctx.isVSCode,
-  },
+  ...SESSION_GOAL_SEARCH_ITEMS,
   {
     id: 'chat.reasoning-traces',
     page: 'chat',
@@ -492,18 +472,7 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     descriptionKey: 'settings.openchamber.visual.field.savePastedImagesAsFilesInfo',
     keywords: ['image', 'screenshot', 'paste', 'vision', 'text-only', 'model', 'path', 'attachment', 'file', 'link'],
   },
-  {
-    id: 'chat.tool-file-icons',
-    page: 'chat',
-    titleKey: 'settings.openchamber.visual.field.showToolFileIcons',
-    keywords: ['tools', 'files', 'icons'],
-  },
-  {
-    id: 'chat.changed-files',
-    page: 'chat',
-    titleKey: 'settings.openchamber.visual.field.showTurnChangedFiles',
-    keywords: ['changed files', 'turns'],
-  },
+  ...CHAT_ACTIVITY_SEARCH_ITEMS,
   {
     id: 'chat.dotfiles',
     page: 'general',
@@ -585,62 +554,8 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     keywords: ['search', 'reasoning', 'thinking', 'index'],
     isAvailable: (ctx) => !ctx.isVSCode,
   },
-  {
-    id: 'chat.composer',
-    page: 'chat',
-    titleKey: 'settings.layout.chat.section.sending',
-    keywords: ['composer', 'input', 'send', 'paste', 'follow-up'],
-  },
-  {
-    id: 'chat.spellcheck',
-    page: 'chat',
-    titleKey: 'settings.openchamber.visual.field.enableSpellcheckInTextInputs',
-    keywords: ['spelling', 'input'],
-    isAvailable: (ctx) => !ctx.isMobile,
-  },
-  {
-    id: 'chat.large-text-paste',
-    page: 'chat',
-    titleKey: 'settings.openchamber.visual.field.largeTextPaste',
-    descriptionKey: 'settings.openchamber.visual.field.largeTextPasteHint',
-    keywords: ['paste', 'clipboard', 'attachment', 'large', 'text', 'file', 'double paste', 'ctrl v', 'cmd v'],
-  },
-  {
-    id: 'chat.enter-to-send',
-    page: 'chat',
-    titleKey: 'settings.openchamber.visual.field.enterToSend',
-    descriptionKey: 'settings.openchamber.visual.field.enterToSendHint',
-    keywords: ['enter', 'shift enter', 'ctrl enter', 'cmd enter', 'mod enter', 'send', 'newline'],
-    isAvailable: (ctx) => !ctx.isMobile,
-  },
-  {
-    id: 'chat.mobile-return-key-sends',
-    page: 'chat',
-    titleKey: 'settings.openchamber.visual.field.mobileReturnKeySends',
-    descriptionKey: 'settings.openchamber.visual.field.mobileReturnKeySendsHint',
-    keywords: ['enter', 'return', 'send', 'newline', 'keyboard', 'enterkeyhint', 'voice', 'dictation', 'swipe up'],
-    isAvailable: (ctx) => ctx.isMobile,
-  },
-  {
-    id: 'sessions.default-model',
-    page: 'sessions',
-    titleKey: 'settings.openchamber.defaults.field.defaultModel',
-    keywords: ['model', 'provider', 'new sessions', 'thinking', 'reasoning', 'variant'],
-  },
-  {
-    id: 'sessions.fallback-model',
-    page: 'sessions',
-    titleKey: 'settings.openchamber.defaults.field.fallbackModel',
-    descriptionKey: 'settings.openchamber.defaults.field.fallbackModelInfo',
-    keywords: ['fallback', 'backup', 'usage limit', 'quota', 'rate limit', 'model', 'thinking'],
-    isAvailable: (ctx) => !ctx.isVSCode,
-  },
-  {
-    id: 'sessions.default-agent',
-    page: 'sessions',
-    titleKey: 'settings.openchamber.defaults.field.defaultAgent',
-    keywords: ['agent', 'new sessions'],
-  },
+  ...CHAT_SENDING_SEARCH_ITEMS,
+  ...SESSION_DEFAULTS_SEARCH_ITEMS,
   {
     id: 'sessions.deletion-dialog',
     page: 'sessions',
@@ -651,7 +566,7 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     id: 'sessions.warming',
     page: 'sessions',
     titleKey: 'settings.openchamber.defaults.field.sessionWarming',
-    descriptionKey: 'settings.openchamber.defaults.field.sessionWarmingInfo',
+    descriptionKey: 'settings.openchamber.defaults.sessionWarming.searchDescription',
     keywords: ['warming', 'warm', 'cache', 'prompt cache', 'keep-alive', 'idle', 'per session', 'keep warm', 'duration', 'how long', 'hour'],
   },
   {
@@ -690,13 +605,7 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     keywords: ['permissions', 'auto-accept', 'accept', 'safety net', 'ask', 'shield', 'approval', 'new session'],
     isAvailable: (ctx) => !ctx.isVSCode,
   },
-  {
-    id: 'sessions.show-chats',
-    page: 'sessions',
-    titleKey: 'settings.openchamber.defaults.field.showChats',
-    keywords: ['chats', 'sidebar', 'hide', 'show', 'section'],
-    isAvailable: (ctx) => !ctx.isVSCode,
-  },
+  ...SIDEBAR_SESSION_SEARCH_ITEMS,
   {
     id: 'sessions.work',
     page: 'sessions',
@@ -710,6 +619,7 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     titleKey: 'settings.openchamber.sessionWork.field.enabled',
     keywords: ['in work', 'in progress', 'track', 'done', 'sidebar'],
   },
+  ...SESSION_COST_SEARCH_ITEMS,
   {
     id: 'sessions.small-model',
     page: 'sessions',
@@ -1364,48 +1274,7 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
     descriptionKey: 'settings.webSearch.section.providersInfo',
     keywords: ['api key', 'exa', 'tavily', 'firecrawl', 'parallel', 'tinyfish', 'searxng', 'brave', 'kagi', 'perplexity', 'linkup', 'serper', 'credentials'],
   },
-  {
-    id: 'skills.create',
-    page: 'skills.installed',
-    titleKey: 'settings.skills.page.title.newSkill',
-    keywords: ['create', 'add', 'new skill'],
-  },
-  {
-    id: 'skills.basic-information',
-    page: 'skills.installed',
-    titleKey: 'settings.skills.page.section.basicInformation',
-    keywords: ['name', 'location', 'description', 'manual', 'invocation', 'autoinvoke'],
-  },
-  {
-    id: 'skills.instructions',
-    page: 'skills.installed',
-    titleKey: 'settings.skills.page.section.instructions',
-    keywords: ['markdown', 'skill.md', 'content'],
-  },
-  {
-    id: 'skills.supporting-files',
-    page: 'skills.installed',
-    titleKey: 'settings.skills.page.section.supportingFiles',
-    keywords: ['files', 'resources'],
-  },
-  {
-    id: 'skills.catalog.source',
-    page: 'skills.catalog',
-    titleKey: 'settings.skills.catalog.page.section.sourceRepository',
-    keywords: ['catalog', 'repository', 'source', 'refresh'],
-  },
-  {
-    id: 'skills.catalog.search',
-    page: 'skills.catalog',
-    titleKey: 'settings.skills.catalog.shared.field.searchSkillsPlaceholder',
-    keywords: ['find skills', 'install skills', 'catalog search'],
-  },
-  {
-    id: 'skills.catalog.add-catalog',
-    page: 'skills.catalog',
-    titleKey: 'settings.skills.catalog.page.actions.addCatalog',
-    keywords: ['external repository', 'add source', 'catalog'],
-  },
+  ...SKILLS_SEARCH_ITEMS,
   {
     id: 'magic-prompts.scope',
     page: 'magic-prompts',
@@ -1450,54 +1319,7 @@ const SETTINGS_SEARCH_ITEMS: readonly SettingsSearchItem[] = [
       keywords: ['shortcut', 'hotkey', 'keyboard', 'keybinding'],
       isAvailable: (ctx) => !('nativeMenu' in action) || (ctx.isDesktop && (action.nativeMenu === 'all' || !ctx.isMac)),
     })),
-  {
-    id: 'voice.playback',
-    page: 'voice',
-    titleKey: 'settings.voice.page.section.playbackAndSummary',
-    keywords: ['tts', 'read aloud', 'voice', 'provider', 'speech rate', 'speech pitch', 'speech volume', 'tts input mode', 'markdown'],
-  },
-  {
-    id: 'voice.auto-read-aloud',
-    page: 'voice',
-    titleKey: 'settings.voice.page.field.autoReadAloud',
-    descriptionKey: 'settings.voice.page.tooltip.autoReadAloud',
-    keywords: ['tts', 'read aloud', 'automatic', 'auto', 'speech', 'finished', 'reply'],
-  },
-  {
-    id: 'voice.speech-recognition',
-    page: 'voice',
-    titleKey: 'settings.voice.page.section.speechRecognition',
-    keywords: ['stt', 'dictation', 'voice input', 'transcribe', 'whisper', 'parakeet', 'qwen', 'microphone', 'misheard', 'correct', 'fix', 'small model'],
-  },
-  {
-    id: 'voice.dictation-auto-send',
-    page: 'voice',
-    titleKey: 'settings.voice.page.field.dictationAutoSend',
-    descriptionKey: 'settings.voice.page.field.dictationAutoSendInfo',
-    keywords: ['dictation', 'voice input', 'send', 'submit', 'automatic'],
-  },
-  {
-    id: 'voice.tts-endpoint-path',
-    page: 'voice',
-    titleKey: 'settings.voice.page.field.endpointPath',
-    descriptionKey: 'settings.voice.page.field.endpointPathHint',
-    keywords: ['tts', 'read aloud', 'endpoint path', 'custom endpoint', 'resource path'],
-    isAvailable: (ctx) => {
-      const state = ctx.voiceSettings ?? useConfigStore.getState();
-      return (state.showMessageTTSButtons || state.autoReadAloudEnabled) && state.voiceProvider === 'openai-compatible';
-    },
-  },
-  {
-    id: 'voice.stt-endpoint-path',
-    page: 'voice',
-    titleKey: 'settings.voice.page.field.endpointPath',
-    descriptionKey: 'settings.voice.page.field.endpointPathHint',
-    keywords: ['stt', 'dictation', 'endpoint path', 'custom endpoint', 'resource path'],
-    isAvailable: (ctx) => {
-      const state = ctx.voiceSettings ?? useConfigStore.getState();
-      return state.dictationEnabled && state.sttProvider === 'openai-compatible';
-    },
-  },
+  ...VOICE_SEARCH_ITEMS,
   {
     id: 'tunnel.provider',
     page: 'tunnel',

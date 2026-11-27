@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import { DISPATCH_GUIDANCE, KNOWLEDGE_ENTRY_KEYS, RENDER_PAGE_GUIDANCE, REPLY_COMMAND_GUIDANCE, SECRET_REQUEST_GUIDANCE, SESSION_LINK_GUIDANCE, WORK_NAME_GUIDANCE, WORKFLOW_GUIDANCE, buildKnowledgeEntries, createSessionKnowledgeRuntime, directToolsGuidance } from './runtime.js';
+import { DISPATCH_GUIDANCE, KNOWLEDGE_ENTRY_KEYS, RENDER_PAGE_GUIDANCE, REPLY_COMMAND_GUIDANCE, SECRET_REQUEST_GUIDANCE, SESSION_LINK_GUIDANCE, WAKE_REPLY_GUIDANCE, WORK_NAME_GUIDANCE, WORKFLOW_GUIDANCE, PROJECT_ACTIONS_GUIDANCE, buildKnowledgeEntries, createSessionKnowledgeRuntime, directToolsGuidance } from './runtime.js';
 import { UI_BLOCKS_GUIDANCE } from './ui-blocks-guidance.js';
 
 const DIRECTORY = '/work/project';
@@ -39,8 +39,8 @@ const createRuntime = (overrides = {}) => {
   },
   };
   for (const key of [
-    'readSessionMetadata', 'persistSessionMetadata', 'isAgentMemoryEnabled', 'isMemoryToolAvailable', 'isSessionLinkingAvailable',
-    'isPageRenderingAvailable', 'isSecretRequestAvailable', 'isWorkflowAvailable', 'readCheckoutBranch', 'readPlaceholderBranch', 'instructionEntries', 'isWorkNamingAvailable',
+    'readSessionMetadata', 'persistSessionMetadata', 'isAgentMemoryEnabled', 'isToolHost', 'isMemoryToolAvailable', 'isSessionLinkingAvailable',
+    'isPageRenderingAvailable', 'isSecretRequestAvailable', 'isWorkflowAvailable', 'readCheckoutBranch', 'readPlaceholderBranch', 'instructionEntries', 'isWorkNamingAvailable', 'hasProjectActions',
   ]) {
     if (key in overrides) dependencies[key] = overrides[key];
   }
@@ -161,6 +161,45 @@ describe('writing the knowledge into a session', () => {
   });
 });
 
+describe('whether the agent has the tools', () => {
+  const everyToolOn = {
+    isSessionLinkingAvailable: async () => true,
+    isPageRenderingAvailable: async () => true,
+    isSecretRequestAvailable: async () => true,
+    readCheckoutBranch: async () => 'main',
+  };
+
+  test('a folder whose OpenCode has no OpenChamber plugin hears nothing about the tools', async () => {
+    const instructionEntries = createEntriesStub();
+    const runtime = createRuntime({ ...pinnedStore(), ...everyToolOn, instructionEntries, isToolHost: async () => false });
+
+    expect(await runtime.sync('ses_a', DIRECTORY)).toBe(true);
+
+    expect(instructionEntries.held.get(PINNED)).toContain('Pinned note body.');
+    for (const key of [GUIDANCE, MEMORY, CHECKOUT]) {
+      expect(instructionEntries.calls).toContainEqual(['remove', 'ses_a', DIRECTORY, key]);
+    }
+  });
+
+  test('a check that could not answer keeps what the session was told', async () => {
+    const instructionEntries = createEntriesStub();
+    await createRuntime({ ...pinnedStore(), ...everyToolOn, instructionEntries }).sync('ses_a', DIRECTORY);
+    const told = new Map(instructionEntries.held);
+    expect(told.get(GUIDANCE)).toContain(SESSION_LINK_GUIDANCE);
+
+    for (const isToolHost of [async () => null, async () => { throw new Error('OpenCode unreachable'); }]) {
+      instructionEntries.calls.length = 0;
+      await createRuntime({ ...pinnedStore(), ...everyToolOn, instructionEntries, isToolHost }).sync('ses_a', DIRECTORY);
+
+      for (const key of [GUIDANCE, MEMORY, CHECKOUT]) {
+        expect(instructionEntries.calls.some((call) => call[3] === key)).toBe(false);
+        expect(instructionEntries.held.get(key)).toBe(told.get(key));
+      }
+      expect(instructionEntries.calls).toContainEqual(['put', 'ses_a', DIRECTORY, PINNED]);
+    }
+  });
+});
+
 describe('when to link', () => {
   test('is told in a session whose agent has the tool, even with nothing else to tell', async () => {
     const runtime = createRuntime({
@@ -170,7 +209,7 @@ describe('when to link', () => {
     });
     const entries = await entriesFor(runtime, NO_PINS);
 
-    expect(entries[GUIDANCE]).toBe(`${SESSION_LINK_GUIDANCE}\n\n${DISPATCH_GUIDANCE}`);
+    expect(entries[GUIDANCE]).toBe(`${SESSION_LINK_GUIDANCE}\n\n${DISPATCH_GUIDANCE}\n\n${WAKE_REPLY_GUIDANCE}`);
     expect(entries[PINNED]).toBe('');
     expect(entries[MEMORY]).toBe('');
   });
@@ -179,6 +218,10 @@ describe('when to link', () => {
     expect(DISPATCH_GUIDANCE).toContain('tools.openchamber inside execute');
     expect(SESSION_LINK_GUIDANCE).toContain('tools.openchamber inside a Code Mode execute script');
     expect(WORK_NAME_GUIDANCE).toContain('tools.openchamber inside execute');
+    for (const guidance of [SESSION_LINK_GUIDANCE, WORK_NAME_GUIDANCE, DISPATCH_GUIDANCE, WORKFLOW_GUIDANCE]) {
+      expect(guidance).toContain('if execute is unavailable');
+      expect(guidance).toContain('openchamber directly');
+    }
     expect(DISPATCH_GUIDANCE).toContain('session.send');
     expect(DISPATCH_GUIDANCE).toContain('subagent tool');
   });
@@ -260,6 +303,25 @@ describe('when to offer a workflow', () => {
 
     const without = await entriesFor(createRuntime({ ...bare, isWorkflowAvailable: async () => { throw new Error('settings unreadable'); } }), NO_PINS);
     expect(without[GUIDANCE]).toBe('');
+  });
+});
+
+describe('when to run a project action', () => {
+  const bare = {
+    isMemoryToolAvailable: async () => false,
+    projectContextRuntime: { readContext: async () => ({ notes: [], todos: [], plans: [] }) },
+  };
+
+  test('is told only in a session whose project has actions the agent may run', async () => {
+    const asked = [];
+    const withActions = await entriesFor(createRuntime({ ...bare, hasProjectActions: async (directory) => { asked.push(directory); return true; } }), NO_PINS);
+    expect(withActions[GUIDANCE]).toBe(PROJECT_ACTIONS_GUIDANCE);
+    expect(asked).toEqual([DIRECTORY]);
+
+    const none = await entriesFor(createRuntime({ ...bare, hasProjectActions: async () => false }), NO_PINS);
+    expect(none[GUIDANCE]).toBe('');
+    const unreadable = await entriesFor(createRuntime({ ...bare, hasProjectActions: async () => { throw new Error('setup unreadable'); } }), NO_PINS);
+    expect(unreadable[GUIDANCE]).toBe('');
   });
 });
 
@@ -582,6 +644,37 @@ describe('size', () => {
     expect(memory).not.toContain('- Project decision number 0 about something');
     const shown = memory.split('\n').filter((line) => line.startsWith('- Project decision')).length;
     expect(memory).toContain(`${300 - shown} older titles did not fit here; memory.list gives every title.`);
+  });
+});
+
+describe('lead', () => {
+  const base = { notes: [], plans: [], memory: { global: [], project: [] } };
+
+  test('tells a lead how to lead and what its brief says, and nobody else', () => {
+    const lead = buildKnowledgeEntries({ ...base, linking: true, lead: { brief: '# Goal\nShip it' } });
+    expect(lead[KNOWLEDGE_ENTRY_KEYS.lead]).toContain('You are a lead');
+    const leadGuidance = buildKnowledgeEntries({ ...base, linking: true, workflows: true, lead: { brief: null } })[KNOWLEDGE_ENTRY_KEYS.guidance];
+    const plainGuidance = buildKnowledgeEntries({ ...base, linking: true, workflows: true, lead: null })[KNOWLEDGE_ENTRY_KEYS.guidance];
+    for (const general of [DISPATCH_GUIDANCE, WAKE_REPLY_GUIDANCE, WORKFLOW_GUIDANCE]) {
+      expect(leadGuidance).not.toContain(general);
+      expect(plainGuidance).toContain(general);
+    }
+    expect(lead[KNOWLEDGE_ENTRY_KEYS.leadBrief]).toContain('# Goal\nShip it');
+    expect(buildKnowledgeEntries({ ...base, linking: true, lead: { brief: null } })[KNOWLEDGE_ENTRY_KEYS.leadBrief]).toContain('no brief yet');
+
+    for (const entries of [buildKnowledgeEntries({ ...base, linking: true, lead: null }), buildKnowledgeEntries({ ...base, linking: false, lead: { brief: 'x' } })]) {
+      expect(entries[KNOWLEDGE_ENTRY_KEYS.lead]).toBe('');
+      expect(entries[KNOWLEDGE_ENTRY_KEYS.leadBrief]).toBe('');
+    }
+  });
+
+  test('leaves the lead entries as they are when the session or its brief cannot be read', () => {
+    const unknown = buildKnowledgeEntries({ ...base, linking: true, lead: undefined });
+    expect(KNOWLEDGE_ENTRY_KEYS.lead in unknown).toBe(false);
+    expect(KNOWLEDGE_ENTRY_KEYS.leadBrief in unknown).toBe(false);
+    const unreadableBrief = buildKnowledgeEntries({ ...base, linking: true, lead: { brief: undefined } });
+    expect(unreadableBrief[KNOWLEDGE_ENTRY_KEYS.lead]).toContain('You are a lead');
+    expect(KNOWLEDGE_ENTRY_KEYS.leadBrief in unreadableBrief).toBe(false);
   });
 });
 

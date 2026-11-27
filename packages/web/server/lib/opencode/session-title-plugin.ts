@@ -2,7 +2,7 @@ const PLUGIN_ID = 'openchamber-session-title';
 
 const TITLE_SYSTEM_PROMPT = [
   'You name coding sessions so the user can find them later in a list.',
-  'Reply with a title of two to four words in the language of the user\'s message, at most 40 characters. Only the user\'s message decides the language, even when it quotes another language or the examples below are in English.',
+  'Reply with a title of two to four words in the language of the user\'s message, at most 40 characters. Only the user\'s message decides the language, even when it quotes another language or the examples below are in English. Words inside a path or file name count only when the message has no other words: `read ~/plans/sync.md` is English, `阅读 ~/plans/sync.md` is Chinese, and `~/plans/sync.md` alone is English.',
   'Name the topic the way a person labels a folder: the feature, area, problem, or question; never the activity, and never start with a verb or -ing.',
   'Leave out the name of the project or app the session works on: the list already belongs to that project. Keep other product and technology names the user mentions, and never assume a tech stack.',
   'Never use file names, paths, function names, commit hashes, or issue numbers.',
@@ -14,7 +14,7 @@ const TITLE_SYSTEM_PROMPT = [
 const SHORT_MESSAGE_LENGTH = 20;
 const MAX_ATTACHED_CONTEXT_LENGTH = 2000;
 
-const PLUGIN_SOURCE = `const TITLE_SYSTEM_PROMPT = ${JSON.stringify(TITLE_SYSTEM_PROMPT)}
+export const SESSION_TITLE_PLUGIN_HELPERS = `const TITLE_SYSTEM_PROMPT = ${JSON.stringify(TITLE_SYSTEM_PROMPT)}
 const SHORT_MESSAGE_LENGTH = ${SHORT_MESSAGE_LENGTH}
 const MAX_ATTACHED_CONTEXT_LENGTH = ${MAX_ATTACHED_CONTEXT_LENGTH}
 
@@ -32,11 +32,20 @@ const attachedContextOfShortFirstMessage = (messages) => {
     .slice(0, MAX_ATTACHED_CONTEXT_LENGTH)
 }
 
-export default {
-  id: ${JSON.stringify(PLUGIN_ID)},
-  setup: async (ctx) => {
-    let originalTitleSystem
+/** Whether OpenCode's catalog prices this Zen model at zero. Free Zen models do not all end in -free (big-pickle). */
+const isFreeZenModel = async (ctx, model) => {
+  if (model?.providerID !== "opencode") return false
+  const catalog = await ctx.model.list().then((result) => result?.data, () => undefined)
+  const info = Array.isArray(catalog) && catalog.find((entry) => entry.providerID === model.providerID && entry.id === model.id)
+  // No price to go by (a failed read, or a model the list leaves out): the -free suffix still marks a free model.
+  if (!info?.cost?.length) return model.id.endsWith("-free")
+  return info.cost.every((tier) => tier.input === 0 && tier.output === 0)
+}
+`;
+
+export const createSessionTitleSetupCode = ({ isActiveExpr = 'true' }: { isActiveExpr?: string } = {}) => `    let originalTitleSystem
     await ctx.agent.transform((editor) => {
+      if (!(${isActiveExpr})) return
       if (!editor.get("title")) return
       if (editor.get("title").system !== TITLE_SYSTEM_PROMPT) originalTitleSystem = editor.get("title").system
       editor.update("title", (agent) => {
@@ -44,19 +53,20 @@ export default {
       })
     })
     await ctx.session.hook("title", async (draft) => {
+      if (!(${isActiveExpr})) return
       const request = draft.messages.at(-1)
+      // A failed read leaves the title to the message alone, as OpenCode built it.
+      const attachedContext = ctx.session.context({ sessionID: draft.sessionID })
+        .then(attachedContextOfShortFirstMessage, () => "")
       // Free OpenCode models failed to generate titles with a replaced system
       // prompt. Keep the native prompt and give the same style in the input.
       // A user-configured title prompt wins and must not be rewritten here.
-      if (draft.model?.providerID === "opencode" && draft.model.id.endsWith("-free")
-        && originalTitleSystem && draft.system.length === 1 && draft.system[0].text === TITLE_SYSTEM_PROMPT
-        && request?.role === "user") {
+      if (originalTitleSystem && draft.system.length === 1 && draft.system[0].text === TITLE_SYSTEM_PROMPT
+        && request?.role === "user" && await isFreeZenModel(ctx, draft.model)) {
         draft.system[0].text = originalTitleSystem
         request.content.push({ type: "text", text: TITLE_SYSTEM_PROMPT })
       }
-      // A failed read leaves the title to the message alone, as OpenCode built it.
-      const context = await ctx.session.context({ sessionID: draft.sessionID })
-        .then(attachedContextOfShortFirstMessage, () => "")
+      const context = await attachedContext
       if (!context || request?.role !== "user") return
       // A text part on the same user message: some providers reject two user messages in a row.
       draft.messages = [
@@ -74,7 +84,13 @@ export default {
           ],
         },
       ]
-    })
+    })`;
+
+const PLUGIN_SOURCE = `${SESSION_TITLE_PLUGIN_HELPERS}
+export default {
+  id: ${JSON.stringify(PLUGIN_ID)},
+  setup: async (ctx) => {
+${createSessionTitleSetupCode()}
   },
 }
 `;

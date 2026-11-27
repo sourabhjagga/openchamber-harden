@@ -17,7 +17,44 @@ client). VS Code does not mount `ContextPanel`, so it has no such menu.
 
 ## Context panel file tabs
 
-`ContextPanel` owns the open-file strip in each workspace zone. Its editor mounts `FilesView` in editor-only mode, which omits that view's own tab row. The file strip enables `SortableTabsStrip`'s `scrollWithWheel` option, so a regular vertical mouse wheel reaches tabs past either edge without changing the open file or showing a scrollbar. Other context panel tab modes keep their existing wheel behavior.
+`ContextPanel` owns the open-file strip in each workspace zone. Its editor mounts `FilesView`, which has no tab row of its own. The file strip enables `SortableTabsStrip`'s `scrollWithWheel` option, so a regular vertical mouse wheel reaches tabs past either edge without changing the open file or showing a scrollbar. Other context panel tab modes keep their existing wheel behavior.
+
+## Context panel window
+
+`ContextWindowLayout.tsx` is the context panel in a window of its own: the
+rail and three zones, with the bottom zone as the center column where a main
+window has the chat. `ContextPanel` `variant="center"` fills that column with
+no resize handle; `variant="side"` marks the side zones there. No zone in
+that window expands, since the center already takes the room. The mode
+itself, routing and following the main window live in `lib/contextWindow`
+(`DOCUMENTATION.md` there). While a main window is detached, `MainLayout`
+mounts no zones, panes, drop overlay or fit arbiter, and keeps only the
+closed right zone, whose slot holds the work-status card. In the rail's place
+it shows `DetachedPanelRail`: a pressed button that brings the panel window
+to the front, and in the slot of the detach control a button that brings the
+panel back to this window, so the panel is never out of reach from the chat
+window. The rail and
+the zone header (`ContextZoneWindowButtons`) carry the control that detaches
+the panel; in the panel window the rail's control sends it back.
+
+- The three zone cards in the panel window start at one top edge and share
+  one header height: the center card takes no top gutter (the side cards
+  have none), and without the desktop header the row is padded by the
+  cards' bottom gutter so no card touches the window's edge.
+- The center is a destination everywhere a zone is chosen: the zone menu
+  (`ZoneMoveMenuItems`) names the bottom zone "center" there with its own
+  icon, and the drop overlay labels its target the same way.
+- Drop targets follow the layout direction: in a right-to-left layout the
+  measured physical sides map to the mirrored zones. Their labels are not
+  swapped again, because right-to-left dictionaries already name the start
+  zone by the side it shows on.
+- Drop target frames are opaque, so the zone's content does not read through
+  behind the label. An open zone's frame is its card cut to its target
+  (`computeZoneDropFrames`): in the panel window a closed side's strip is
+  carved out of the center column, and the center card would otherwise run
+  under that strip's frame.
+- A file surface with no editor beside its tree fills a bottom or center
+  zone with the tree; side zones shrink to the tree's width instead.
 
 ## Header session tabs
 
@@ -205,6 +242,10 @@ so it survives the sidebar closing and reopening. A folder change remounts the t
   use the session checkout. Session lookup uses the store's own directory key
   normalization to avoid Windows path mismatches. Transient fetch failure retains
   known actions, and an unavailable saved pick falls back to the first action.
+- A run an agent started through its tool comes from the server's listing with
+  `agentSessionId` in its purpose; the run carries `startedByAgent` while it runs,
+  and the header, menu and dialog mark it, so the user does not start a second
+  copy. The user can still stop it from here.
 - Repository actions require shared-setup trust before execution; declining runs
   nothing. The action chooser sets its highlight only on opening so updates
   cannot move the user's selection.
@@ -221,6 +262,10 @@ so it survives the sidebar closing and reopening. A folder change remounts the t
   neither consumes items nor clears badges, retains generation answers or
   acquires a microphone. Visible entries use panel/page entries; hidden execution
   prefers background.entry with panel.entry as the compatibility fallback.
+- Closing the rail zone drops the item handed to its panel, so a reopen hands
+  `null` instead of a stale item. Switching tabs, covering the panel, or the
+  fit arbiter closing the zone to make room and giving it back keeps it;
+  the mobile drawer does not pass `panelOpen` and keeps its item.
 - A new guest document retires the previous document's generation waiters.
   Answers arriving after a document leaves are retained for the next listening
   frame. File delivery and command registration wait for hello or load; theme
@@ -285,6 +330,9 @@ on every pointer frame; interpolated updates would trail the pointer.
 A window overlay supplies the cursor and intercepts embedded pages that would
 swallow pointer events. Window-level release, cancel and blur handlers end the
 gesture because capture alone can fail over iframes or disappear with a handle.
+The file tree column's own width grip ends the same way: the tree ignores the
+pointer while that grip is held, so a release lost to another window would
+otherwise leave the tree dead until reload.
 
 ### Why settled interactivity and not immediate inert toggles
 
@@ -305,6 +353,9 @@ zone itself activates descendant focus-visible selectors across a large tree.
 The right slot clips both axes so tab reveal cannot scroll its wider hidden
 content and drag the work-status card sideways. A size data attribute conveys
 the target size without an inherited CSS variable that restyles descendants.
+The zone and its card take their size as literal widths for the same reason:
+the zone's size used to be an inherited custom property, and every expand or
+collapse restyled the whole surface inside, 10,000 elements for the Git panel.
 
 ### Why local titlebar width publication and not a root variable
 
@@ -319,6 +370,19 @@ height directly so sidebar animation does not force layout reads.
 Portalled toolbars sit in the header DOM while their React events follow a
 different ancestry. Native listeners cover the header's empty drag regions
 without taking buttons, fields or strips that already own their gestures.
+
+### Why one native no-drag region for the session tabs
+
+Electron can count a tab's no-drag rectangle even where the scroller clips it.
+While the tabs overflow (`data-tabs-overflow`), the scroller supplies one
+bounded native region so hidden tabs cannot block window dragging in the
+sidebar, and every gap that lies inside the viewport (`data-gap-in-view` on the
+slot after it, set on scroll and resize) gets a full-height drag region of its
+own, the slot's `::after`, apart from the separator's `::before`. Gaps move the
+window at the start and after scrolling, next to a clipped tab too. A strip that fits keeps per-tab regions and its gaps
+drag through the header. Tab controls keep their no-drag class for the header's
+gesture handler; open dialogs and menus turn the gap regions off like the
+header's.
 
 ### Why grouped hidden settings and not a visible allowlist
 

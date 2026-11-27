@@ -2,11 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { WebSocketServer } from 'ws';
 import {
   TERMINAL_WS_MAX_PAYLOAD_BYTES,
-  TERMINAL_WS_PATH,
   createTerminalWsControlFrame,
-  parseRequestPathname,
   readTerminalWsControlFrame,
 } from './terminal-ws-protocol.js';
+import { createTerminalSocketUpgradeHandler } from './socket-upgrade.js';
 import { sanitizeTerminalHistoryChunk } from './history.js';
 import { terminalPlainText } from './plain-text.js';
 import { consumeTerminalThemeQueries, terminalThemeModeReport } from './theme-response.js';
@@ -14,9 +13,8 @@ import { buildTerminalShellLaunch, createTerminalShellResolver, normalizeTermina
 import { stripAppImageArgv0Leak, stripAppImageLauncherEnv, resolvePosixPtyLaunch } from '../inherited-env.js';
 import { shutdownTerminalProcesses } from './shutdown.js';
 import { bunVersionRunsBunPty } from './bun-pty-support.js';
-import { isOpaqueOriginRequest, isPasswordlessSocketOriginAllowed } from '../security/request-security.js';
 import { isString as isText } from '../shared/object-guards.js';
-import type { IncomingMessage, Server } from 'node:http';
+import type { Server } from 'node:http';
 import type { Duplex } from 'node:stream';
 import type { Stats } from 'node:fs';
 import type * as nodePath from 'node:path';
@@ -25,13 +23,14 @@ import type { Application } from '../shared/http-contracts.js';
 import type { WebSocket, WebSocketServer as TerminalWebSocketServer } from '../shared/websocket-contracts.js';
 import type { RequestOriginChecker } from '../security/request-security.js';
 import type { createUiAuth } from '../ui-auth/ui-auth.js';
+import type { createTunnelAuth } from '../tunnels/tunnel-auth.js';
 import type { createEnvironmentRuntime } from '../environment/runtime.js';
 import type { TerminalShellResolverOptions, TerminalShellPreference, TerminalLaunchMode, TerminalShellLaunchOptions } from './shells.js';
 import type { TerminalHistoryPending } from './history.js';
 import type { TerminalThemeMode } from './theme-response.js';
 import type { TerminalWsFrameOptions, TerminalWsJsonObject, TerminalWsJsonValue } from './terminal-ws-protocol.js';
 
-export type TerminalPurpose = { type: 'terminal' } | { type: 'project-action'; actionId: string; executionId: string };
+export type TerminalPurpose = { type: 'terminal' } | { type: 'project-action'; actionId: string; executionId: string; agentSessionId?: string };
 type TerminalStatus = 'running' | 'exited';
 type TerminalBackend = 'bun-pty' | 'node-pty';
 type PtyOptions = IPtyForkOptions & IWindowsPtyForkOptions;
@@ -61,6 +60,7 @@ export interface TerminalRuntimeOptions extends Pick<TerminalShellResolverOption
   fs: { promises: TerminalShellResolverOptions['fs']['promises'] & { stat(cwd: string): Promise<Pick<Stats, 'isDirectory'>> } };
   path: Pick<typeof nodePath, 'join' | 'resolve'>;
   uiAuthController?: Pick<ReturnType<typeof createUiAuth>, 'enabled' | 'ensureSessionToken'> | null;
+  tunnelAuthController?: Pick<ReturnType<typeof createTunnelAuth>, 'classifyRequestScope' | 'getActiveTunnelOrigin' | 'getTunnelSessionFromRequest' | 'bindTunnelSession'>;
   buildAugmentedPath: () => string;
   isRequestOriginAllowed: RequestOriginChecker;
   rejectWebSocketUpgrade(socket: Duplex, code: number, reason: string): void;
@@ -73,13 +73,13 @@ export interface TerminalRuntimeOptions extends Pick<TerminalShellResolverOption
   logger?: { warn?: typeof console.warn };
 }
 
-interface TerminalAppearanceInput {
+export interface TerminalAppearanceInput {
   themeMode?: unknown;
   terminalBackground?: unknown;
   terminalForeground?: unknown;
 }
 
-interface TerminalRequestFields extends TerminalAppearanceInput {
+export interface TerminalRequestFields extends TerminalAppearanceInput {
   cwd?: unknown;
   sessionId?: unknown;
   sessionIds?: unknown;
@@ -242,7 +242,7 @@ const normalizePurposeId = (value: string, errorMessage: string) => {
   if (normalized.length > MAX_PURPOSE_ID_CHARS) throw new Error(errorMessage);
   return normalized;
 };
-const normalizeTerminalPurpose = ({ purpose: value }: Pick<TerminalRequestFields, 'purpose'>): TerminalPurpose => {
+const normalizeTerminalPurpose = ({ purpose: value }: Pick<TerminalRequestFields, 'purpose'>, agentSessionId?: string): TerminalPurpose => {
   if (value == null) return TERMINAL_PURPOSE;
   if (!isObjectRecord(value)) throw new Error('Invalid terminal purpose');
   if (value.type === 'terminal') return TERMINAL_PURPOSE;
@@ -255,7 +255,7 @@ const normalizeTerminalPurpose = ({ purpose: value }: Pick<TerminalRequestFields
   const rawExecutionId = value.executionId;
   if (!isString(rawExecutionId)) throw new Error(executionIdError);
   const executionId = normalizePurposeId(rawExecutionId, executionIdError);
-  return { type: 'project-action', actionId, executionId };
+  return agentSessionId ? { type: 'project-action', actionId, executionId, agentSessionId } : { type: 'project-action', actionId, executionId };
 };
 const getSessionPurpose = (session: TerminalSession) => session.purpose ?? TERMINAL_PURPOSE;
 const isPurposeActionMatch = (left: TerminalPurpose, right: TerminalPurpose) => {
@@ -387,7 +387,7 @@ export async function loadTerminalPtyProvider(
 }
 
 export function createTerminalRuntime({
-  app, server, fs, path, uiAuthController, buildAugmentedPath, searchPathFor, isExecutable,
+  app, server, fs, path, uiAuthController, tunnelAuthController, buildAugmentedPath, searchPathFor, isExecutable,
   isRequestOriginAllowed, rejectWebSocketUpgrade, TERMINAL_INPUT_WS_HEARTBEAT_INTERVAL_MS,
   loadPtyProvider, terminalTerminationGraceMs = TERMINATION_GRACE_MS, shutdownProcesses = shutdownTerminalProcesses,
   environmentRuntime = null,
@@ -419,7 +419,7 @@ export function createTerminalRuntime({
     const hostEnv = { ...process.env, PATH: buildAugmentedPath() };
     const inheritedEnv = environmentRuntime ? await environmentRuntime.applyToDirectory(cwd, hostEnv, { refresh: true }) : hostEnv;
     let lastError = null;
-    for (const executable of resolvedShell.executables) {
+    for await (const executable of resolvedShell.executables) {
       try {
         const env: NodeJS.ProcessEnv = { ...inheritedEnv, TERM: 'xterm-256color', COLORTERM: 'truecolor', COLORFGBG: themeMode === 'light' ? '0;15' : '15;0' };
         delete env.NODE_CHANNEL_FD;
@@ -621,14 +621,14 @@ export function createTerminalRuntime({
     return { session, ptyProcess: spawned.process };
   };
 
-  const createSession = async ({ sessionId, cwd, cols = 80, rows = 24, themeMode, terminalBackground, terminalForeground, shell = 'auto', loginShell = false, mode, command, purpose }: TerminalRequestFields): Promise<TerminalSession> => {
+  const createSession = async ({ sessionId, cwd, cols = 80, rows = 24, themeMode, terminalBackground, terminalForeground, shell = 'auto', loginShell = false, mode, command, purpose }: TerminalRequestFields, agentSessionId?: string): Promise<TerminalSession> => {
     if (shutdownPromise) throw new Error('Terminal runtime is shutting down');
     if (!validateSize(cols, 1000) || !validateSize(rows, 500)) throw new Error('Invalid terminal dimensions');
     if (!isBoolean(loginShell)) throw new Error('Invalid terminal login mode');
     const normalizedShell = isText(shell) ? normalizeTerminalShell(shell) : null;
     if (!normalizedShell) throw new Error('Invalid terminal shell');
     const launchMode = normalizeCreateMode({ mode, command });
-    const normalizedPurpose = normalizeTerminalPurpose({ purpose });
+    const normalizedPurpose = normalizeTerminalPurpose({ purpose }, agentSessionId);
     const id = isText(sessionId) && sessionId.trim() ? sessionId.trim() : randomUUID();
     if (id.length > 128) throw new Error('Invalid terminal session id');
     const existing = sessions.get(id);
@@ -705,6 +705,7 @@ export function createTerminalRuntime({
     send(socket, { t: 'hello', v: 3 });
     const heartbeat = setInterval(() => { try { socket.ping(); } catch { return; } }, TERMINAL_INPUT_WS_HEARTBEAT_INTERVAL_MS);
     socket.on('message', (raw, isBinary) => {
+      if (socket.readyState !== socket.OPEN) return;
       if (!isBinary) { send(socket, { t: 'error', v: 3, code: 'BAD_FRAME', message: 'Binary control frame required', fatal: false }); return; }
       const message = readTerminalWsControlFrame(raw);
       if (!hasFrameFields(message) || message.v !== 3 || !isText(message.t)) { send(socket, { t: 'error', v: 3, code: 'BAD_FRAME', message: 'Invalid terminal frame', fatal: false }); return; }
@@ -735,56 +736,14 @@ export function createTerminalRuntime({
     socket.on('close', cleanup); socket.on('error', () => {});
   });
 
-  const upgradeHandler = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
-    if (parseRequestPathname(req.url) !== TERMINAL_WS_PATH) return;
-    const logUpgradeFailure = ({ error }: { error: unknown }) => {
-      logger.warn?.(`[terminal] websocket upgrade failed: ${(hasErrorFields(error) && error.message) || error}`);
-    };
-    const accept = () => {
-      const acceptingServer = wsServer;
-      if (!acceptingServer) { rejectWebSocketUpgrade(socket, 500, 'Terminal WebSocket unavailable'); return; }
-      try {
-        acceptingServer.handleUpgrade(req, socket, head, (ws) => acceptingServer.emit('connection', ws, req));
-      } catch (error) {
-        logUpgradeFailure({ error });
-        socket.destroy();
-      }
-    };
-    const checkOrigin = () => {
-      try {
-        const result = isRequestOriginAllowed(req);
-        if (!(result instanceof Promise)) {
-          if (result) accept();
-          else rejectWebSocketUpgrade(socket, 403, 'Invalid origin');
-          return;
-        }
-        void result.then((allowed) => {
-          if (allowed) accept();
-          else rejectWebSocketUpgrade(socket, 403, 'Invalid origin');
-        }).catch((error) => { logUpgradeFailure({ error }); rejectWebSocketUpgrade(socket, 500, 'Upgrade failed'); });
-      } catch (error) { logUpgradeFailure({ error }); rejectWebSocketUpgrade(socket, 500, 'Upgrade failed'); }
-    };
-    if (isOpaqueOriginRequest(req)) { rejectWebSocketUpgrade(socket, 403, 'Invalid origin'); return; }
-    if (!uiAuthController?.enabled) {
-      void isPasswordlessSocketOriginAllowed(req, isRequestOriginAllowed).then((allowed) => {
-        if (allowed) accept();
-        else rejectWebSocketUpgrade(socket, 403, 'Invalid origin');
-      }).catch((error) => { logUpgradeFailure({ error }); rejectWebSocketUpgrade(socket, 500, 'Upgrade failed'); });
-      return;
-    }
-    try {
-      const result = uiAuthController.ensureSessionToken(req, null);
-      if (!(result instanceof Promise)) {
-        if (result) checkOrigin();
-        else rejectWebSocketUpgrade(socket, 401, 'UI authentication required');
-        return;
-      }
-      void result.then((sessionToken) => {
-        if (sessionToken) checkOrigin();
-        else rejectWebSocketUpgrade(socket, 401, 'UI authentication required');
-      }).catch((error) => { logUpgradeFailure({ error }); rejectWebSocketUpgrade(socket, 500, 'Upgrade failed'); });
-    } catch (error) { logUpgradeFailure({ error }); rejectWebSocketUpgrade(socket, 500, 'Upgrade failed'); }
-  };
+  const upgradeHandler = createTerminalSocketUpgradeHandler({
+    getWebSocketServer: () => wsServer,
+    uiAuthController,
+    tunnelAuthController,
+    isRequestOriginAllowed,
+    rejectWebSocketUpgrade,
+    logger,
+  });
   server.on('upgrade', upgradeHandler);
 
   app.get('/api/terminal/shells', async (_req, res) => {
@@ -936,18 +895,17 @@ export function createTerminalRuntime({
     } catch (error) { res.status(400).json(errorBody(hasErrorFields(error) ? error : undefined, 'Failed to restart terminal')); }
     finally { if (pendingSessionRestarts.get(session.id) === restart) pendingSessionRestarts.delete(session.id); }
   });
-  app.delete('/api/terminal/:sessionId', async (req, res) => {
-    const sessionId = req.params.sessionId;
+  const closeTerminal = async (sessionId: string | undefined) => {
     const session = sessionId === undefined ? undefined : sessions.get(sessionId);
     if (!session) {
       const pending = sessionId === undefined ? undefined : pendingSessionCreates.get(sessionId);
-      if (!pending) return res.status(404).json({ error: 'Terminal session not found' });
+      if (!pending) return false;
       pending.cancelled = true;
       try { await pending.promise; }
       catch (error) {
         if (!hasErrorFields(error) || error.message !== 'Terminal session was closed during creation') throw error;
       }
-      return res.json({ success: true });
+      return true;
     }
     sessions.delete(session.id);
     announceSessionsChanged();
@@ -955,8 +913,9 @@ export function createTerminalRuntime({
     session.retired = true;
     closeAttachments(session.id, 'CLOSED', 'Terminal closed');
     await terminateProcess(session.process);
-    res.json({ success: true });
-  });
+    return true;
+  };
+  app.delete('/api/terminal/:sessionId', async (req, res) => (await closeTerminal(req.params.sessionId) ? res.json({ success: true }) : res.status(404).json({ error: 'Terminal session not found' })));
   app.post('/api/terminal/force-kill', (req, res) => {
     const { sessionId, cwd } = hasRequestFields(req.body) ? req.body : {}; let killedCount = 0;
     const killedSessionIds = [];
@@ -972,7 +931,7 @@ export function createTerminalRuntime({
     const now = Date.now();
     for (const [id, session] of sessions) {
       const attached = [...connections].some((connection) => connection.attachments.has(id));
-      if (!attached && now - session.lastActivity > IDLE_TIMEOUT_MS) {
+      if (!attached && !(session.status === 'running' && 'agentSessionId' in getSessionPurpose(session)) && now - session.lastActivity > IDLE_TIMEOUT_MS) {
         sessions.delete(id); session.retired = true; discardOutput(session); closeAttachments(id, 'IDLE_TIMEOUT', 'Terminal expired after being idle'); void terminateProcess(session.process, true);
         announceSessionsChanged();
       }
@@ -1010,5 +969,5 @@ export function createTerminalRuntime({
     if (!shutdownPromise) shutdownPromise = stop();
     return shutdownPromise;
   };
-  return { shutdown, listTerminals, readTerminal };
+  return { shutdown, listTerminals, readTerminal, closeTerminal, createSession: (fields: TerminalRequestFields, agentSessionId?: string) => createSession(fields, agentSessionId).then(({ id }) => id) };
 }

@@ -35,7 +35,7 @@ export const useMessageListHandle = (
         expandTurnActivity: (turnId: string) => boolean;
     },
 ) => {
-    const { messageIndexMap, turnIndexMap, rowIndexByKey, collapsibleTurnByMessageId, turnByAssistantMessageId } = indexes;
+    const { messageIndexMap, turnIndexMap, rowIndexByKey, foldKeysByMessageId, turnByAssistantMessageId } = indexes;
 
     const resolveScrollContainer = React.useCallback((): HTMLElement | null => {
         return listRef.current?.getScrollableNode() ?? null;
@@ -46,18 +46,20 @@ export const useMessageListHandle = (
         uiPageProjectionRef.current = { projection, defaultActivityExpanded };
     }, [projection, defaultActivityExpanded]);
 
-    const anchorRowIndex = React.useCallback((anchor: MessageViewportAnchor): number | undefined => (
-        (anchor.slice ? rowIndexByKey.get(`step:${anchor.messageId}:${anchor.slice}`) : undefined)
-            ?? messageIndexMap.get(anchor.messageId)
-    ), [messageIndexMap, rowIndexByKey]);
+    const anchorRowIndex = React.useCallback((anchor: MessageViewportAnchor): number | undefined => {
+        if (anchor.kept) return rowIndexByKey.get(anchor.kept.row);
+        return (anchor.slice ? rowIndexByKey.get(`step:${anchor.messageId}:${anchor.slice}`) : undefined)
+            ?? messageIndexMap.get(anchor.messageId);
+    }, [messageIndexMap, rowIndexByKey]);
 
     const revealFoldedMessage = React.useCallback((messageId: string): boolean => {
-        const turnId = isReasoningRevealTarget(messageId)
-            ? turnByAssistantMessageId.get(messageId)
-            : collapsibleTurnByMessageId.get(messageId);
-        if (!turnId) return false;
-        return expandTurnActivity(turnId);
-    }, [collapsibleTurnByMessageId, expandTurnActivity, turnByAssistantMessageId]);
+        const keys = [...(foldKeysByMessageId.get(messageId) ?? [])];
+        const turnId = isReasoningRevealTarget(messageId) ? turnByAssistantMessageId.get(messageId) : undefined;
+        if (turnId && !keys.includes(turnId)) keys.push(turnId);
+        let revealed = false;
+        for (const key of keys) revealed = expandTurnActivity(key) || revealed;
+        return revealed;
+    }, [foldKeysByMessageId, expandTurnActivity, turnByAssistantMessageId]);
 
     const findMessageElement = React.useCallback((messageId: string): HTMLElement | null => {
         const container = resolveScrollContainer();
@@ -65,17 +67,20 @@ export const useMessageListHandle = (
             return null;
         }
         if (isReasoningRevealTarget(messageId)) {
-            const reasoning = container.querySelector<HTMLElement>(`[data-reasoning-message-id="${messageId}"]`);
+            const reasoning = container.querySelector<HTMLElement>(`[data-reasoning-message-id="${messageId}"]:has(> [aria-expanded])`);
             if (reasoning) return reasoning;
         }
         return container.querySelector(`[data-message-id="${messageId}"]:not([data-message-slice])`);
     }, [resolveScrollContainer]);
 
-    const findAnchorElement = React.useCallback((anchor: MessageViewportAnchor): HTMLElement | null => (
-        anchor.slice && rowIndexByKey.has(`step:${anchor.messageId}:${anchor.slice}`)
+    const findAnchorElement = React.useCallback((anchor: MessageViewportAnchor): HTMLElement | null => {
+        if (anchor.kept) {
+            return resolveScrollContainer()?.querySelector<HTMLElement>(`[data-message-hoisted="${CSS.escape(anchor.kept.partId)}"]`) ?? null;
+        }
+        return anchor.slice && rowIndexByKey.has(`step:${anchor.messageId}:${anchor.slice}`)
             ? resolveScrollContainer()?.querySelector<HTMLElement>(`[data-message-id="${anchor.messageId}"][data-message-slice="${anchor.slice}"]`) ?? null
-            : findMessageElement(anchor.messageId)
-    ), [findMessageElement, resolveScrollContainer, rowIndexByKey]);
+            : findMessageElement(anchor.messageId);
+    }, [findMessageElement, resolveScrollContainer, rowIndexByKey]);
 
     const scrollHistoryIndexIntoView = React.useCallback((index: number) => {
         if (index < 0 || index >= rows.length) {
@@ -117,13 +122,14 @@ export const useMessageListHandle = (
         if (index === undefined || !container) {
             return 'missing';
         }
-        if (revealFoldedMessage(anchor.messageId)) {
+        if (!anchor.kept && revealFoldedMessage(anchor.messageId)) {
             scrollHistoryIndexIntoView(index);
             return 'moved';
         }
 
         const element = findAnchorElement(anchor);
         if (!element) {
+            if (anchor.kept && container.querySelector(`[data-row-key="${CSS.escape(anchor.kept.row)}"]`)) return 'missing';
             return scrollHistoryIndexIntoView(index) ? 'moved' : 'missing';
         }
         const delta = element.getBoundingClientRect().top
@@ -168,6 +174,7 @@ export const useMessageListHandle = (
                 if (!container) {
                     return false;
                 }
+                revealFoldedMessage(turnId);
                 const findTurnElement = () => container.querySelector<HTMLElement>(`[data-turn-id="${turnId}"]`);
                 const turnElement = findTurnElement();
                 if (turnElement) {

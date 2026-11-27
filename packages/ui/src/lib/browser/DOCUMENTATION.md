@@ -7,7 +7,7 @@ This folder is the UI half of the in-app browser and of agent browser control. T
 - `contract.ts` owns the vocabulary shared by every runtime: navigation status, annotation payloads and their guards. It validates payloads that come from a page we do not control.
 - `controlClient.ts` owns the client side of agent control: which mounted or sleeping tab serves a request, the claim that grants one client the right to act, and the panel's opener and closer registrations.
 - `pageDriver.ts` composes agent actions from driver steps. `pageActions.ts` holds the self-contained scripts those steps evaluate inside a page.
-- `annotationOverlay.ts`, `annotationSession.ts`, `annotationPrompt.ts`, `annotationScreenshot.ts`, `overlayTheme.ts` and `previewFrameHost.ts` own annotation: the overlay injected into a page, one session from overlay to screenshot, the prompt the agent reads, the image drawn on the capture, theme resolution for the overlay, and the parent half of the preview-frame bridge.
+- `annotationOverlay.ts`, `annotationSession.ts`, `annotationPrompt.ts`, `annotationScreenshot.ts`, `overlayTheme.ts` and `previewFrameHost.ts` own annotation: the overlay injected into a page, one session from overlay to screenshot, the prompt the agent reads, the image drawn on the capture, theme resolution for the overlay, and the parent half of the preview-frame bridge. `annotationScreenshotStore.ts` keeps each annotation's screenshot where every window of the app and a reload can read it; `hooks/useAnnotationScreenshots.ts` puts it into the composer that shows the draft.
 - `devServers.ts`, `announcedServers.ts`, `hiddenDevServers.ts`, `devServerWait.ts`, `devTunnel.ts` and `mobileDevTunnel.ts` own dev-server discovery, the wait for a server that is starting, and tunnelling a remote loopback server into a local origin.
 - `crashRecovery.ts`, `liveTabs.ts`, `history.ts`, `url.ts`, `viewport.ts`, `uploads.ts` and `hostCapability.ts` own one policy each.
 
@@ -29,7 +29,10 @@ This folder is the UI half of the in-app browser and of agent browser control. T
 - Session-to-tab memory is module state only. After a reload a session falls back to its newest registered tab.
 - A dev-server wait retries only a loopback address with a connection-stage error. A tab restored from saved state never retries, and a tab nobody watches holds its retry without loading a page in the background.
 - Dev-server wait keys carry the directory, because tab ids repeat across projects as `browser:<url>`.
-- Announcements carry the base path of an app; discovery carries the ports that actually listen. When discovery is available it decides which servers exist, and an announcement supplies the path for its port. When discovery returns nothing, announcements stand alone.
+- A link opened in a new panel tab (user, background or agent tab) sends the opening page's referrer, under that page's referrer policy, on the tab's first load. The referrer is kept in memory for the tab the link created and dropped when the tab mounts. A link to an address that already has a tab reveals that tab; when that tab is still blank or failed and loads the address again, that load sends the link's referrer under the link's policy, and a tab that shows a page is not reloaded. The referrer is not kept for that tab, a restored tab never gets one, and opening the address any other way drops one a never-mounted tab left behind. An open-tab event without a referrer, from an older desktop shell, opens the tab without one.
+- A tab opened from a link has one history entry once its first load commits or fails, so Back never returns to the blank page it attached at. That first commit or failure also restarts the dev-server wait, as a load someone asked for does, so settling on the blank page first does not end the wait for a local dev server's gateway.
+- Announcements carry the base path of an app; discovery carries the ports that actually listen. When discovery is available it decides which servers exist, and an announcement supplies the path for its port. Without an announcement, the address a running project action opened for that port (the one set in the action, or one found in its output) replaces the `localhost` address discovery builds. Only actions on the same network count: the host's folders share one set of ports, and each space has its own. When discovery returns nothing, announcements stand alone.
+- On a remote web instance a listed server is unreachable only when its address is a loopback one. An address the action named, such as `http://dev-host:3101/`, stays clickable.
 - A tunnel failure is reported. The original loopback URL is never loaded as a fallback.
 - A crash recovery policy allows a bounded number of reloads within a window. Once the attempts are spent, the panel reports the crash.
 - Viewport scaling changes only how the page is drawn. The page lays out at the chosen size.
@@ -60,6 +63,10 @@ The body is prompt content the agent reads, so it stays English whatever the UI 
 ### Why the screenshot shows the whole visible page with marks on top
 
 A crop around each target answers what the element looks like and loses where it is and what sits next to it, which is the more useful half of pointing at something. The marks are drawn on the full capture instead.
+
+### Why an annotation's screenshot is stored in IndexedDB under its draft and not only attached
+
+The inline-comment draft is shared by every window, but an attached file lives in one window's memory, so an annotation filed from another window (a context panel in its own window) or before a reload reached the composer with its prompt saying a screenshot is attached and no image. The bytes go to IndexedDB, keyed by the draft's id, before the draft is added, so a window that sees the draft can already read them; localStorage was rejected because a screenshot is large and every write there reaches every window as a `storage` event. Each composer brings a missing screenshot back from the store and keeps one attached locally stored, which also covers a failed send that restores its drafts. A record goes when its draft leaves the store or loses its screenshot, in whichever window that happens, and a window that held the file drops it too; records without a draft older than a minute are pruned at startup, since the draft is added only after the record is written.
 
 ### Why the screenshot scales by the measured capture ratio
 
@@ -161,6 +168,16 @@ The wait gives the client that holds the tab time to claim it. Without it, a cli
 
 A tab opened with an address makes its first load on purpose. The key is dropped once the tab has mounted, so a later remount of the same tab counts as a restore and does not retry.
 
+### Why a tab opened from a link loads after `dom-ready`
+
+Every other tab is created with its final URL in `src`: a hidden view loses an imperative navigation, and a changed `src` is not reliably honoured. `src` cannot carry a referrer policy, though, and a view without `src` never attaches. So `hooks/useBrowserTabReferrer.ts` attaches a tab opened from a link at `about:blank` and calls `loadURL` with `httpReferrer` once the guest fires `dom-ready`. Chromium still sends `Sec-Fetch-Site: none` for that load; the panel does not rewrite fetch-metadata headers.
+
+The blank history entry is cleared on the first main-frame `did-navigate`, or on the first main-frame `did-fail-load` other than `ERR_ABORTED`, because an error page commits without `did-navigate`. `ERR_ABORTED` means another navigation took over, and that navigation's commit clears it instead. A link that turns into a download starts a navigation and stops loading without a commit; the tab then stays at the blank page and behaves like an empty tab, with no history clearing or dev-server rearm waiting for a later address. A guest that crashes before the first page also stops loading without a commit, and only `render-process-gone` after it tells the two apart. Crash recovery reloads the blank page; that blank commit does not count, and its `dom-ready` asks for the address again with the referrer. Electron reports a crash's `did-stop-loading` before `render-process-gone`, so the hook asks `isCrashed()` when loading stops: a load that stopped in a living guest was handed off (a download), and a later crash of the idle blank page does not ask for the address again, so the download is fetched once. The listeners capture, so the history is one entry long by the time the navigation hook reads it for the same event.
+
+### Why the tab a link opened is found by comparing tab ids
+
+The panel store's open actions return nothing for user tabs, and the tab a link opens is the one that did not exist before the call. Comparing the directory's tab ids around the call finds it without a new store contract, and finds nothing when the link only revealed an existing tab. For the same reason the link's referrer reaches an existing tab's load request through `openWithBrowserTabLinkReferrer`, which holds it for the duration of the synchronous open call, instead of a referrer option on every open action.
+
 ### Why a stopped mobile tunnel listener needs no explicit stop
 
 iOS reclaims the listening sockets of a suspended app, so the listener can be gone without a stop event. A generation counter makes an open that started before a close-all give up, and the last bytes queued for the native socket are written before the connection closes.
@@ -205,6 +222,10 @@ A start script can bring its servers up in the background and exit before they l
 
 An announcement knows the base path an app is served under, which a listening socket cannot reveal. A listening port is ground truth, while a terminal can wrap a line and turn half a URL into a plausible address on a port where nothing runs.
 
+### Why a project action's address comes from its terminal tab and not from the server
+
+The server builds every address as `http://localhost:<port>/`, because a listening socket does not say which name reaches it. A project action can be set to open another address, and that address lives in the user's project actions, which the discovery route does not read. The action's terminal tab already keeps the address it opened, and the list reads it only while that run is active, so no second copy can outlive the run.
+
 ### Why announced servers are kept in memory only
 
 They describe one run of one command. A stored copy is the kind of stale address that sends the panel to the wrong page.
@@ -212,6 +233,10 @@ They describe one run of one command. A stored copy is the kind of stale address
 ### Why the server list is ordered around the panel's folder
 
 Discovery lists everything listening on the machine, and most of it belongs to the OS or other apps. The folder a process runs in separates the user's dev servers from that noise, and the panel's own folder comes first. A server whose folder is unknown stays in, and so does one that announced itself.
+
+### Why a port that serves no web page is listed only on request
+
+Windows discovery (`netstat`) reports no folder, so the folder test above cannot separate anything there, and the list used to be every listening port. The server asks each port for its root page (`packages/web/server/lib/dev-servers`): one that answered with something else is set aside behind "show hidden ports", next to the ones started outside every project. A port that has not answered yet, or a server too old to ask, stays in the list, as does an announced server, so a slow first compile never hides the app being started. A page's title and favicon name the row, and the port stays beside them.
 
 ### Why a failed tunnel is reported and the original URL is not loaded
 
@@ -252,6 +277,10 @@ Agent tabs run unthrottled, so one left behind by a finished session keeps a bus
 ### Why schemeless input defaults to `https:` except on loopback
 
 Dev servers overwhelmingly speak plain HTTP. Defaulting `localhost:5173` to HTTPS turns the most common address in the panel into a connection error.
+
+### Why typed text that is no address becomes a Google search
+
+The address bar is the panel's only input, so text such as `react hooks` is a search. Text counts as an address when its host could be a site: a dotted name, an IP, a loopback name or any name with an explicit port. A bare word is a search, and so is any text with a space. An explicit scheme other than http(s), with or without `//`, still gives a blank page. In the iframe runtime the frame loads the search with `igu=1`, the flag Google needs before it allows framing; the address bar shows the plain search address.
 
 ### Why retry uses a wider localhost test than the tunnel
 

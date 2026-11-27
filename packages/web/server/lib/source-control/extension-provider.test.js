@@ -228,6 +228,27 @@ describe('an extension provider', () => {
     expect(calls.at(-1).input).not.toHaveProperty('session');
   });
 
+  it('tells the service which people a picker asks for, and nothing more than reviewers by default', async () => {
+    const session = await connect();
+    service = async ({ input }) => ok(input.role === 'assignee' ? [USER] : []);
+    await expect(provider.resources.listReviewerCandidates({ session, ...readInput({ project, role: 'assignee' }) })).resolves.toEqual([USER]);
+    await expect(provider.resources.listReviewerCandidates({ session, ...readInput({ project }) })).resolves.toEqual([]);
+    expect(calls.at(-1).input).not.toHaveProperty('role');
+  });
+
+  it('keeps an issue and a change request when one of their cross-references is malformed', async () => {
+    const session = await connect();
+    const link = { kind: 'issue', number: 5, url: 'https://forge.example/mona/teapot/issues/5', createdAt: '2026-11-12T16:47:27Z' };
+    const references = [{ ...link, kind: 'discussion' }, { ...link, url: 'javascript:alert(1)' }, link];
+    service = async () => ok({ number: 1, title: 'Teapot', references });
+    await expect(provider.resources.getIssue({ session, ...readInput({ number: 1, includeReferences: true }) }))
+      .resolves.toEqual({ number: 1, title: 'Teapot', references: [link] });
+    expect(calls.at(-1).input).toMatchObject({ includeReferences: true });
+    service = async () => ok({ changeRequest: { number: 2 }, references: references.slice(0, 2) });
+    await expect(provider.resources.changeRequestContext({ session, ...readInput({ number: 2, includeReferences: true }) }))
+      .resolves.toEqual({ changeRequest: { number: 2 } });
+  });
+
   it.each([
     ['a body that is not JSON', { raw: 'nope' }],
     ['a non-200 answer', { status: 500, raw: '{}' }],
@@ -343,6 +364,38 @@ describe('an extension provider', () => {
       await expect(provider.mutations.resolveTarget({
         session, context, kind: 'change-request-merge', input: {}, replayOf: { target: { ...target, headSha: 'c'.repeat(40) } },
       })).rejects.toMatchObject({ status: 409, code: 'SOURCE_CONTROL_MUTATION_CONFLICT' });
+    });
+  });
+
+  describe('branch writes', () => {
+    const context = {
+      provider: 'ext-forge', instance: INSTANCE, repositoryId: 'r', bindingRevision: 1, primaryRemote: 'origin',
+      directory: '/repo', target: { project: { owner: 'mona', name: 'teapot' }, number: 2 },
+    };
+    const target = { repositoryId: 'r', bindingRevision: 1, primaryRemote: 'origin', project, number: 2, head: 'feature', base: 'main', headSha: SHA };
+    const declaring = (features) => buildExtensionDescriptor({ guestId: 'forge', guest, contribution: {
+      ...contribution, presentation: { ...contribution.presentation, features: { ...contribution.presentation?.features, ...features } },
+    } });
+
+    it('has no base, update-branch or rebase route unless the manifest declares it', () => {
+      expect(provider.mutations.routes).not.toContain('/pr/base');
+      expect(provider.mutations.routes).not.toContain('/pr/update-branch');
+      expect(provider.mutations.routes).not.toContain('/pr/rebase');
+      setup(declaring({ baseChange: true, updateBranch: true, rebase: true }));
+      expect(provider.mutations.routes).toEqual(expect.arrayContaining(['/pr/base', '/pr/update-branch', '/pr/rebase']));
+    });
+
+    it('refuses a head that moved since the reader saw it before the write is forwarded', async () => {
+      setup(declaring({ updateBranch: true }));
+      const session = await connect();
+      service = async () => ok({ providerTarget: {}, target: { ...target, headSha: 'c'.repeat(40) } });
+      await expect(provider.mutations.resolveTarget({ session, context, kind: 'change-request-update-branch', input: { expectedHeadSha: SHA } }))
+        .rejects.toMatchObject({ status: 409, code: 'SOURCE_CONTROL_MUTATION_TARGET_MISMATCH' });
+      expect(calls.map((call) => call.method)).not.toContain('mutation.perform');
+
+      service = async () => ok({ providerTarget: {}, target });
+      await expect(provider.mutations.resolveTarget({ session, context, kind: 'change-request-update-branch', input: { expectedHeadSha: SHA } }))
+        .resolves.toMatchObject({ target });
     });
   });
 

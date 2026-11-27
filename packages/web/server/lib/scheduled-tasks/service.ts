@@ -2,10 +2,12 @@ import { asNonEmptyString, isBoolean, isString } from '../shared/guards.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { OpenChamberControlError } from '../openchamber-control/error.js';
+import { directoryReachability } from '../directory-reachability/index.js';
 import { discoverLoopFiles, loopFingerprint, parseLoopDefinition, setLoopFileEnabled } from './loops.js';
 import type { resolvePrimaryWorktreeRoot as resolveGitWorktreeRoot } from '../git/service.js';
 import type { ScheduledTask, ScheduledTaskInput, ScheduledTaskStore, SessionProject } from '../projects/contracts.js';
 import type { createProjectConfigRuntime } from '../projects/project-config.js';
+import { assertTaskTextWithinLimits } from '../projects/task-text-limits.js';
 import type { createChatsScope } from './chats-scope.js';
 import type { createScheduledTasksRuntime, ScheduledTaskRunResult } from './runtime.js';
 
@@ -167,6 +169,7 @@ export const createScheduledTaskService = (dependencies: ScheduledTaskServiceDep
     const task = tasks.find((entry) => entry?.id === normalizedTaskID) || null;
     if (!task) throw new OpenChamberControlError('Task not found', 404);
     if (!hasLoopFile(task)) throw new OpenChamberControlError('Task is not managed by a loop file', 400);
+    await directoryReachability.assertReachable(path.dirname(task.loopFile));
     if (!fs.existsSync(task.loopFile)) throw new OpenChamberControlError('Loop file not found', 404);
     return { id, task };
   };
@@ -208,6 +211,11 @@ export const createScheduledTaskService = (dependencies: ScheduledTaskServiceDep
     if (!isTaskInput(taskInput)) {
       throw new OpenChamberControlError('task payload is required', 400);
     }
+    try {
+      assertTaskTextWithinLimits(taskInput);
+    } catch (error) {
+      throw new OpenChamberControlError(error instanceof Error ? error.message : 'Task text is too long', 400);
+    }
     let upserted;
     const previous = taskInput.id ? (await projectConfigRuntime.listScheduledTasks(id)).find((task) => task.id === taskInput.id) : null;
     let targetDirectory;
@@ -240,6 +248,7 @@ export const createScheduledTaskService = (dependencies: ScheduledTaskServiceDep
     if (!normalizedTaskID) throw new OpenChamberControlError('taskId is required', 400);
     const current = await projectConfigRuntime.listScheduledTasks(id);
     const existing = current.find((task) => task.id === normalizedTaskID) || null;
+    if (existing?.loopFile) await directoryReachability.assertReachable(path.dirname(existing.loopFile));
     if (existing?.loopFile && fs.existsSync(existing.loopFile)) {
       throw new OpenChamberControlError(
         'Loop task is managed by its .agents/loops markdown file; delete the file to remove the task',
@@ -284,6 +293,8 @@ export const createScheduledTaskService = (dependencies: ScheduledTaskServiceDep
       return result.task;
     }
     if (enabled === task.enabled) return task;
+    await directoryReachability.assertReachable(path.dirname(task.loopFile));
+    if (enabled) await directoryReachability.assertReachable(project.path);
     if (enabled && isRepositoryLoop(project.path, task.loopFile)) {
       throw new OpenChamberControlError(`"${task.name}" comes from this repository. Enable it in Scheduled tasks.`, 409);
     }

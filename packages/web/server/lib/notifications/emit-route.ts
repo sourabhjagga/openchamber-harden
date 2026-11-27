@@ -1,8 +1,10 @@
 import { z } from 'zod';
 import type { NotificationPayload } from './contracts.js';
+import type { PluginNotice } from './plugin-push.js';
+import { hasErrorMessage } from './inputs.js';
 import type { Application, ExpressFactory, Request, RequestHandler } from '../shared/http-contracts.js';
 
-const NOTIFICATION_EMIT_PATH = '/api/notifications/emit';
+export const NOTIFICATION_EMIT_PATH = '/api/notifications/emit';
 
 const RATE_WINDOW_MS = 10_000;
 const RATE_MAX_PER_WINDOW = 10;
@@ -22,6 +24,7 @@ interface PluginNotificationDependencies {
   readSettingsFromDiskMigrated: () => Promise<{ nativeNotificationsEnabled?: boolean; notificationMode?: string }>;
   emitDesktopNotification: (payload: NotificationPayload) => boolean;
   broadcastUiNotification: (payload: NotificationPayload, options: { desktopNotificationDelivered: boolean }) => void;
+  pushPluginNotification: (notice: PluginNotice) => Promise<void>;
   now?: () => number;
 }
 
@@ -30,6 +33,7 @@ export const createPluginNotificationEmitter = (dependencies: PluginNotification
     readSettingsFromDiskMigrated,
     emitDesktopNotification,
     broadcastUiNotification,
+    pushPluginNotification,
     now = Date.now,
   } = dependencies;
 
@@ -61,10 +65,6 @@ export const createPluginNotificationEmitter = (dependencies: PluginNotification
     }
 
     const settings = await readSettingsFromDiskMigrated();
-    if (settings.nativeNotificationsEnabled === false) {
-      return { status: 200, body: { delivered: false, reason: 'notifications-disabled' } };
-    }
-
     const payload = {
       title: parsed.data.title ?? 'OpenChamber',
       body: parsed.data.body,
@@ -75,6 +75,12 @@ export const createPluginNotificationEmitter = (dependencies: PluginNotification
       requireHidden: true,
       showWhenFocused: parsed.data.showWhenFocused === true || settings.notificationMode === 'always',
     };
+    pushPluginNotification(payload).catch((error) => {
+      console.warn('[Notification] plugin push failed:', hasErrorMessage(error) ? error.message : error);
+    });
+    if (settings.nativeNotificationsEnabled === false) {
+      return { status: 200, body: { delivered: false, reason: 'notifications-disabled' } };
+    }
     const desktopNotificationDelivered = emitDesktopNotification(payload) === true;
     broadcastUiNotification(payload, { desktopNotificationDelivered });
     return { status: 200, body: { delivered: true } };
@@ -108,8 +114,11 @@ export const registerNotificationEmitRoutes = (app: Pick<Application, 'post'>, d
         isAgentToolRequestAuthorized(req) ? respond(req, res, next) : next()
       ));
     },
-    registerApiRoute: () => {
-      app.post(NOTIFICATION_EMIT_PATH, jsonBody, respond);
+    registerApiRoute: (apiAuth: RequestHandler) => {
+      if (!apiAuth) {
+        throw new TypeError('registerApiRoute needs the API auth middleware');
+      }
+      app.post(NOTIFICATION_EMIT_PATH, jsonBody, apiAuth, respond);
     },
   };
 };

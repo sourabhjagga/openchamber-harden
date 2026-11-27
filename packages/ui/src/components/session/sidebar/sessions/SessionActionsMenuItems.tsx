@@ -18,6 +18,8 @@ import { useMultiRunMemberIds } from '@/lib/multirun/useMultiRuns';
 import type { Session } from '@/lib/opencode/model';
 import { getSessionPinList } from '@/lib/sessionPins';
 import { isOperatorChildSession } from '@/lib/sessionOperatorChild';
+import { isLeadSession } from '@/lib/sessionLead';
+import { setSessionLead } from '@/sync/session-lead';
 import { takeOverSession } from '@/sync/session-take-over';
 import { formatShortcutForDisplay, getEffectiveShortcutCombo } from '@/lib/shortcuts';
 import { DEFAULT_PIN_LIST } from '@/lib/sidebarSections';
@@ -51,11 +53,13 @@ import { normalizePath } from '../utils';
 import { getWorkFolderScope } from './sessionFolderIdentity';
 import { canShowSessionWorktreeMenu, getSessionWorktreeMenuDisabled } from './sessionNodeItemUtils';
 import { collectSessionMoveDescendants } from './sessionSubtreeActions';
+import { HandToLeadMenu } from './HandToLeadMenu';
+import { TrackBlockedByPinItem } from './TrackBlockedByPinItem';
 
 type SessionMenuWork = {
   inWork: boolean;
   toggle: () => void;
-};
+} | 'blocked-by-pin';
 
 export type SessionMenuFolders = {
   ownerKey: string | null;
@@ -138,6 +142,12 @@ export function SessionActionsMenuItems({
     void takeOverSession(session.id, directory).catch(() => toast.error(t('sessions.sidebar.session.takeOver.failed')));
   };
 
+  const isLead = isLeadSession(session);
+  const canLead = !isVSCode && !archived && !isSubtaskSession && !isOperatorChildSession(session);
+  const toggleLead = () => {
+    void setSessionLead(session.id, directory, !isLead).catch(() => toast.error(t('sessions.sidebar.session.lead.failed')));
+  };
+
   const copySessionId = () => {
     void copyTextToClipboard(session.id)
       .then((result) => {
@@ -149,7 +159,8 @@ export function SessionActionsMenuItems({
   };
 
   const loadExportRecords = useSessionMessageRecordsForExport();
-  const guestActionEntries = useGuestActions();
+  const projectPath = useProjectsStore((state) => state.projects.find((entry) => entry.id === projectId)?.path ?? null);
+  const guestActionEntries = useGuestActions([directory, projectPath]);
   const guestSessionActionEntries = React.useMemo(() => guestSessionActions(guestActionEntries), [guestActionEntries]);
   const runGuestAction = (entry: GuestActionEntry) => {
     void runGuestSessionAction({
@@ -487,7 +498,7 @@ export function SessionActionsMenuItems({
       <SessionAiRenameMenuItem sessionID={session.id} directory={directory} open={open} Item={Item} />
       <Separator />
 
-      {work ? (
+      {work === 'blocked-by-pin' ? <TrackBlockedByPinItem Item={Item} touch={touch} /> : work ? (
         <SessionMenuItemHint hint={work.inWork ? t('sessions.sidebar.session.menuHint.markDone') : t('sessions.sidebar.session.menuHint.track')}>
           <Item onClick={work.toggle} className="[&>svg]:me-1">
             <Icon name={work.inWork ? 'check' : 'eye'} className="me-1 h-4 w-4" />
@@ -503,6 +514,15 @@ export function SessionActionsMenuItems({
           </Item>
         </SessionMenuItemHint>
       ) : null}
+      {canLead ? (
+        <SessionMenuItemHint hint={isLead ? t('sessions.sidebar.session.menuHint.stopLead') : t('sessions.sidebar.session.menuHint.makeLead')}>
+          <Item onClick={toggleLead} className="[&>svg]:me-1">
+            <Icon name="lead" className="me-1 h-4 w-4" />
+            {isLead ? t('sessions.sidebar.session.menu.stopLead') : t('sessions.sidebar.session.menu.makeLead')}
+          </Item>
+        </SessionMenuItemHint>
+      ) : null}
+      {open && canLead && !isLead ? <HandToLeadMenu session={session} projectId={projectId} slots={slots} /> : null}
       <PinToMenu
         slots={slots}
         current={pinned ? getSessionPinList(session) ?? DEFAULT_PIN_LIST : null}

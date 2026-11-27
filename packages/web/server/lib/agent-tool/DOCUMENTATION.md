@@ -70,9 +70,9 @@ the user can want independently:
   plugin sends the call id (`context.id`) with the callback so the server can
   find the waiting call when the chat answers it, and copies the answer into
   the call's metadata (`metadata.openchamber.answer`), so every client shows
-  the page as answered. The waiting callback sends Bun's `timeout: false`,
-  since Bun's fetch otherwise ends a request with no response after about six
-  minutes. While the call waits, OpenCode holds any chat message
+  the page as answered. The route keeps the response of a long call alive
+  (*Why a long call's response starts before its result*), and the waiting
+  callback also sends Bun's `timeout: false`. While the call waits, OpenCode holds any chat message
   for that session until the call returns, so the plugin registers a
   `session.prompt` hook: the user's prompt for the session aborts the
   waiting call, which returns `{ answered: false, reason: "chat" }`, and the
@@ -121,7 +121,9 @@ the user can want independently:
   Mode, like render: the chat draws the images in place of the call's row from
   its stored result, which an `execute` script would hide.
 - `openchamber_secret` — `secret.run`, `secret.request` and `secret.forget`.
-  `secret.run` asks OpenCode's shell permission for its command line in the
+  Its description and parameters live in `secret-tool.ts`, under names of
+  their own, since `label` means something else in the web tool. `secret.run`
+  asks OpenCode's shell permission for its command line in the
   plugin, before the call reaches the server: `ctx.permission.assert` with
   action `shell`, the line `secretRunCommandLine` draws as the resource and
   `<program> *` as the pattern to save, so the session's shell rules apply as
@@ -134,8 +136,9 @@ the user can want independently:
   reported, so no payload field can reach another session's remembered values.
   `secret.request` is a
   card where the user types one secret the agent asked for (`label`, `reason`,
-  optional `placeholder`). Both wait, with the same plugin machinery as a page
-  with `awaitAnswer` (call id, `timeout: false`, the `session.prompt` hook
+  optional `placeholder`). Both wait, and so does a `secret.forget` with
+  `saved: true`, which the user confirms on a card, with the same plugin machinery as a page
+  with `awaitAnswer` (call id, the kept-alive response, `timeout: false`, the `session.prompt` hook
   that ends the wait when the user writes in the chat and leaves it running
   for an agent's or a queued prompt, the inbox events for the user's prompt
   moved to steer, and the inbox check
@@ -170,6 +173,18 @@ the user can want independently:
   control route refuses `terminal.*`. VS Code has no such tool, since the
   plugin is not injected there. It sits behind Code Mode like usage, and its catalog line says to
   read it when the answer is in a terminal the user is looking at.
+- `openchamber_actions` — `actions.list`, `actions.run`, `actions.logs` and
+  `actions.stop`, the project's actions the actions menu runs
+  (`../openchamber-control/project-actions.js`). Off by default: enabled only
+  while `agentActionsToolEnabled` is `true`, and the actions read the setting
+  on every call and refuse while it is not. The runtime builds that module from
+  its `projectActions` dependency and calls it itself, outside the control
+  service. A run is the same command terminal the menu starts, marked with the
+  session OpenCode reported, so the actions take that session like secrets do
+  and never a payload's `contextSessionId`. Its description and inputs live in
+  `actions-tool.ts`.
+  Behind Code Mode; the session context tells an agent about the tool only in a
+  project that has actions (`../session-knowledge/`).
 - `openchamber_workflow` — `workflow.*`, scripts that fan a large task out to
   many agents, run by OpenChamber (`../workflows/DOCUMENTATION.md`). Off by
   default: enabled only while `agentWorkflowToolEnabled` is `true`, and the
@@ -279,7 +294,13 @@ metadata and failure handling identical, which is what the caller depends on.
    authenticated HTTP adapter, so Goal Mode ordering, CLI wait behavior,
    result delivery, partial-failure reporting, and scheduled-task contracts
    have one owner.
-6. Each action definition owns a short presentation title and a separate
+6. While the `openchamber` tool is on, the plugin also hooks OpenCode's
+   `compaction` and asks `POST /api/openchamber/agent-tool/lead-compaction`
+   (same address and token, route in `../session-lead/server.js`) whether this
+   compaction is a lead's sleep compaction. A summary in the answer becomes the
+   compaction's result and OpenCode makes no model call; no summary, or any
+   failure to ask, leaves the compaction to the model.
+7. Each action definition owns a short presentation title and a separate
    agent-facing description. The generated schema uses the description to state
    required inputs or one non-obvious behavior, while completed calls use the
    short title in native tool metadata.
@@ -419,6 +440,29 @@ first thing (2026-10-02). The tool descriptions carried a second copy of each
 trigger, which cost about 2,000 characters per request and pushed two of them
 past the 2048-character cut.
 
+### Why the place to save a plan is in the catalog line, the description and a note after the reminder
+
+OpenCode's Plan mode reminder names `~/.opencode/plan` as the only place for
+plan files, and the Project knowledge panel does not read it. An agent asked to
+save a plan followed the reminder with its file tools and never opened the
+knowledge tool's description (#7465). So the destination sits in the tool's
+`CODE_MODE_CATALOG_LINES` entry, in view before a tool is chosen and shared by
+the managed plugin and the bridge for an external OpenCode. The description
+repeats it for an agent without `execute`, which sees no catalog. The catalog
+alone was not enough: the reminder says "write them only in", and
+`glm-5.3-flash` still wrote a file in two of five saves. So both plugins' session
+`context`, `compaction` and `generate` hooks put a short note after each Plan mode reminder in the request
+(eight of eight saves went to Project knowledge, and eight of eight requests for
+a file to the folder). In the system prompt the same note missed one of eight.
+The note follows reminders in history whichever agent runs now, so leaving Plan
+mode keeps the cached prefix, and OpenCode's compaction and `generate` requests,
+which reuse a turn's cached prefix, carry the same note. All of it leaves Plan mode's folder to a user who
+asks for a file, and goes when the tool is off. The reminder itself stays as
+OpenCode writes it: OpenCode finds it in the history by its exact text and
+appends another when it is gone. The note matches only the reminder's opening
+line, in `<system-update>` or, before OpenCode 2.4, `<system-reminder>`; should
+that change, the catalog line remains.
+
 ### Why the terminal is its own tool, off by default
 
 A terminal is the one surface here whose content the user did not write for the
@@ -433,6 +477,34 @@ It sits behind Code Mode like usage: two actions with a short result are worth
 one namespace line in the catalog, and the catalog line says when to read it —
 the answer is in a terminal the user is looking at — so an agent does not
 sample the panel on every task.
+
+### Why project actions are their own tool, off by default
+
+Running an action starts a process on the user's machine, often a server that
+binds a port, so it is a trade the user switches on, the same as the terminal
+reader; inside `openchamber` it would arrive with a tool that is on by default.
+A run the agent starts belongs to the agent: the user's own run of that action
+is never replaced or stopped, a run call while it goes answers with whose run
+it is, and `actions.stop` refuses any run another session or the user started.
+The rules sit in the service, so the description only states them.
+
+### Why a long call's response starts before its result
+
+A call that waits for the user, or runs a command for up to ten minutes, has no
+result for longer than `fetch` allows. The bundled OpenCode runs on Node, whose
+`fetch` ignores Bun's `timeout: false` and ends a request after five minutes
+without response headers, or without a body chunk after that: the card closed
+on the user and the agent got "fetch failed". So after `keepAliveMs` the route
+sends the headers and then one space per interval, which JSON allows before the
+result; the plugin trims it. `Cache-Control: no-transform` keeps the
+compression middleware from holding the spaces back. Every action gets it, so a
+new slow one needs nothing. It lives in the server because the generated plugin
+imports nothing, and raising Node's limit takes undici's own dispatcher.
+
+A waiting call whose connection still breaks (OpenChamber stopped or crashed
+while an external OpenCode went on) answers with the tool's connection-lost
+note in place of the raw fetch error, which an agent read as a reason to ask
+again.
 
 ## Security invariants
 
@@ -462,10 +534,13 @@ sample the panel on every task.
   tool cannot delete.
 - A cancelled turn aborts the session's in-flight actions. OpenCode 2 gives a
   plugin tool no abort signal and the plugin's request stays open, so the
-  server tracks in-flight actions per session and `abortSession(sessionID)` is
-  called from the event dispatch in `server/index.js` when the stream reports
-  `session.idle` with `aborted: true`; the abort signal then reaches the
-  shared service as before. A dropped HTTP request still aborts as well.
+  server tracks in-flight actions per session and the event dispatch in
+  `server/runtime.ts` hands every session event to `processSessionEvent`, which
+  aborts them when the stream reports `session.idle` with `aborted: true`; the
+  abort signal then reaches the shared service as before. A dropped HTTP request
+  still aborts as well. The same function releases a session's answer waits on
+  `session.idle` and `session.error`, and stops its project action runs on
+  `session.archived` and `session.deleted`.
 - A call the user stops ends as a stopped call: when `context.signal` has
   aborted, the generated `execute` rethrows instead of returning an `ok:false`
   envelope. Since OpenCode 2.3.0 a tool that reads its signal stops
@@ -523,7 +598,8 @@ the existing trimming, case folding and IPv4-mapped IPv6 handling. Its callers
 are this folder's runtime and `../git/repository-credential-runtime.js`; imports
 keep their `.js` specifiers.
 
-`runtime.ts` owns the callback envelope, plugin options, dependency contract
+`answer-wait-plugin.ts` holds the plugin source of a call that waits for the user,
+`keep-alive.ts` the kept-alive response. `runtime.ts` owns the callback envelope, plugin options, dependency contract
 and result envelope. Action fields remain unchecked until their owning service
 validates them. `AgentToolInput` extends the control service's `ControlInput`
 with the adapter and tool-specific fields. Execution options and successful

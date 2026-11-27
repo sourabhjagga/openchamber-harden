@@ -4,7 +4,7 @@
 
 `packages/web/src/api` is the browser runtime's wire layer between `@openchamber/ui` and an OpenChamber server. It owns the HTTP routes, the zod parsers that turn server answers into the UI's neutral API types, and the compatibility adapters for older servers. It does not own UI state or domain presentation.
 
-Every provider read and mutation goes through `/api/source-control/<provider>/...` (`source-control-providers.ts`), and every tracker call through `/api/tracker/<provider>/...`, except the legacy fallbacks described below. `packages/ui` never names a provider or a wire shape.
+Every provider read and mutation goes through `/api/source-control/<provider>/...` (`source-control-providers.ts`), and every tracker call through `/api/tracker/<provider>/...`, except the legacy fallbacks described below. `packages/ui` never names a provider or a wire shape. `source-control.ts` keeps the shared request, mutation and receipt parsing; `source-control-branch-writes.ts` holds the base, update-branch and rebase writes.
 
 Reference-picker reads cover searched lists, an item's detail, and listed change-request statuses. Discussions are read where `features.discussions` says the provider keeps them, and each read exists only where the provider's descriptor offers it (`features.referenceSearch`, `referenceDetail`, `listStatuses`, `referencesAcross`).
 
@@ -50,6 +50,10 @@ The wire answer is cached per runtime key because the adapter outlives a runtime
 ### Why a notification suppresses the foreground copy when background push is active
 
 Background push is the delivery channel when the web/PWA client is not focused. The main notification toggle and templates stay enabled, but a hidden page with an active push subscription does not also show the same foreground notification. Installed PWAs differ here: some expose `Notification.permission` yet only allow notifications through an active service worker registration.
+
+### Why tagged notifications request renotify
+
+A session keeps the same notification tag across turns so its latest notification replaces the old one. Tagged notifications set `renotify` so a later turn alerts again when the old notification is still present. Untagged notifications omit it because browsers reject `renotify: true` without a nonempty tag. The short delivery-deduplication window still suppresses duplicate copies of the same event.
 
 ### Why the legacy Linear adapter mirrors the server's descriptor
 

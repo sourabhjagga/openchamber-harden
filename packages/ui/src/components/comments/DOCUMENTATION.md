@@ -2,8 +2,9 @@
 
 ## Ownership
 
-This module owns comment fields, cards, selection placement and the controller
-that connects file and diff comments to composer drafts. Draft persistence
+This module owns comment fields, cards, selection placement, the controller
+that connects file and diff comments to composer drafts, and reopening what a
+comment was written on (`useOpenCommentSource`). Draft persistence
 belongs to the stores; prompt editing and submission belong to the
 [composer](../chat/composer/DOCUMENTATION.md). Review state and submission belong
 to [review](../review/DOCUMENTATION.md).
@@ -18,6 +19,12 @@ to [review](../review/DOCUMENTATION.md).
   so parent selection clearing cannot change the comment's destination.
 - Drafts match their diff origin as well as their path. A pull request's lines
   and the working file's lines can differ at the same path.
+- A comparison comment reopens in its diff, never the file on disk:
+  `useOpenCommentSource` hands commit, branch and change-request origins to the
+  git tab (`openCommentLocation`) or the phone's Changes as one
+  `CommentLocationRequest` (`lib/commentLocation.ts`). A working-tree comment
+  opens the file; a turn comment opens its turn's diff. A runtime that cannot
+  show the place offers no opener for it.
 - `lineSource` returns the same object for unchanged content and null while
   lines are unavailable or a range has no single line source. `contentVersion`
   changes with that content. Effects read current host callbacks because hosts
@@ -48,6 +55,22 @@ to [review](../review/DOCUMENTATION.md).
 - The click dispatched in the mouseup task after a drag counts as its release,
   even over the code or outside the gutter. Hosts must not clear selection as
   though that click starts an unrelated outside interaction.
+- A code editor's selection is offered for a comment only while it is one
+  non-empty range in an editor the user works in; several ranges keep plain
+  editing. The quote is the selected text of the editor's current document,
+  unsaved edits and whitespace included, and a range that stops at the start
+  of a line ends on the line before. The quote is captured when the field
+  opens, and a new file or host scope closes the menu. While the field is
+  open, edits to the document move only where the quote is drawn, and a
+  refresh that replaces the whole document finds the quoted text again, the
+  copy nearest its old place; once the quoted text is gone, the field keeps
+  its last place and no highlight.
+- Pressing the open field's suggestion list or its editor's scrollbar keeps the
+  field open; any other press outside the field closes it.
+- A selection whose ends are both off screen still offers Comment, anchored
+  at the top of the screen.
+- The open comment field is placed by its own measured size inside the
+  window, so an anchor near an edge keeps the textarea and Attach on screen.
 
 ## Decisions
 
@@ -63,6 +86,33 @@ DOM uses the composer editor so comments render prompt syntax consistently.
 Markdown markers interrupt rendered-text matches, so preview mapping tries
 shorter anchors. A multiline fragment needs both ends located; a partial match
 omits the range because a single-line range would misidentify the quoted code.
+
+### Why code selections read the editor state and not the browser selection
+
+The editor state holds exact positions, so a repeated fragment gets the lines
+it was selected on, with no text matching. The browser selection misses lines
+outside the rendered viewport and is empty where the editor draws its own
+selection.
+
+### Why the code selection menu reads a store and not the editor host's state
+
+The editor reports every selection change, many per drag. Its extension writes
+to a store that only the menu subscribes to, so a drag re-renders the menu
+alone; state in the host would re-render the whole files view each time. The
+menu is keyed by the host's scope, and its unsubscribe closes the store, so a
+hidden editor or an unmounted host leaves no menu or
+document listener behind.
+
+### Why only touch editors get a highlight overlay
+
+The desktop editor draws its own selection and keeps it visible after focus
+moves into the comment field. A touch editor uses the native selection, which
+the field's focus clears, so the menu marks the quoted text itself.
+
+### Why several selections get no Comment and not a joined quote
+
+Joining ranges would quote the code between them or drop some of the selected
+fragments, and the quote must be exactly what was selected.
 
 ### Why mobile highlights share the popup layer and not a body-level overlay
 
@@ -104,3 +154,32 @@ hardware and desktop input retain their modifier semantics.
 Pierre keys annotations by index, so inserting a transient field in the middle
 rebuilds every later annotation. The open field stays after saved annotations
 to preserve their identity.
+
+### Why a comparison comment reopens in its diff and not in the file
+
+A comment on a commit, a branch comparison or a change request names lines of a
+version that is published or historical, so the file on disk is a different
+version and may not have those lines at all. `useOpenCommentSource` therefore
+sends the three origins to the comparison's diff; only a comment on uncommitted
+changes or a file quote opens a file. Always opening the file was rejected as
+wrong rather than imprecise: it would show text the comment never quoted. A turn
+comment goes through the turn's own diff, never a branch comparison, so it
+cannot relabel "Last turn"; without a recorded turn it has no opener.
+
+### Why the request carries the whole comparison
+
+The request names the comparison itself (the change request and its revision,
+the commit, or the branch and the base it was read against) instead of the
+opener selecting it first. In Electron the git tab can live in a detached
+panel window; `openCommentLocation` is a routed action, so the comparison and
+the line reach that window together, and the surface that takes the request
+opens the comparison there. A branch jump shows the recorded base only while
+the person stays on it and never writes it as the branch's saved base.
+
+### Why the surface decides whether the opener exists
+
+`canOpen` asks about the pair (comment, current runtime), not the comment alone:
+VS Code's editor shows files, so a comparison comment there would land on
+another version; the branch scope compares the checkout, so a branch comment
+needs that branch checked out; the mini chat has no viewer. The opener is only
+offered where opening it cannot lie.

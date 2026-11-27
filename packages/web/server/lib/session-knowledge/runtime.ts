@@ -10,10 +10,13 @@ import type {
   MemoryIndexMeasurement,
   MemoryTitle,
   SessionKnowledgeDependencies,
+  SessionMetadata,
   SessionPins,
 } from './contracts.js';
 import { hasMessage, isNonEmptyString, isOpenChamberMetadata, isSessionMetadata, isStoredPins } from './guards.js';
 import { UI_BLOCKS_GUIDANCE } from './ui-blocks-guidance.js';
+import { LEAD_GUIDANCE, leadBriefEntry } from '../session-lead/guidance.js';
+import { readLead } from '../session-lead/metadata.js';
 
 const PINS_METADATA_KEY = 'project_context_pins';
 
@@ -24,7 +27,17 @@ export const KNOWLEDGE_ENTRY_KEYS = {
   guidance: 'openchamber.guidance',
   responseStyle: 'openchamber.response-style',
   extensions: 'openchamber.extensions',
+  lead: 'openchamber.lead',
+  leadBrief: 'openchamber.lead-brief',
 } as const;
+
+const TOOL_ENTRY_KEYS = [
+  KNOWLEDGE_ENTRY_KEYS.memory,
+  KNOWLEDGE_ENTRY_KEYS.guidance,
+  KNOWLEDGE_ENTRY_KEYS.checkout,
+  KNOWLEDGE_ENTRY_KEYS.lead,
+  KNOWLEDGE_ENTRY_KEYS.leadBrief,
+] as const;
 
 const KNOWLEDGE_MAX_LENGTH = 8000;
 
@@ -67,24 +80,27 @@ const MEMORY_SAVE_GUIDANCE = 'The openchamber_memory tool keeps memory across se
   + ' mention the save there briefly: the app shows only the text after a turn\'s last'
   + ' tool call as the reply.';
 
-export const SESSION_LINK_GUIDANCE = "Link to this session with session.link (tools.openchamber inside a Code Mode execute script),"
+export const SESSION_LINK_GUIDANCE = "Link to this session with session.link (tools.openchamber inside a Code Mode execute script; if execute is unavailable, call openchamber directly),"
   + " as soon as you know it, each issue or pull or merge request the user gives you to"
   + " work on, fix, investigate or review, that you open for this work, or that the work"
   + " resolves. One merely mentioned in passing stays unlinked. The reply need not say you linked it.";
 
-export const WORK_NAME_GUIDANCE = "Name the task with work.name (tools.openchamber inside execute) as soon as it is clear what"
+export const WORK_NAME_GUIDANCE = "Name the task with work.name (tools.openchamber inside execute; if execute is unavailable, call openchamber directly) as soon as it is clear what"
   + " the task is: at most 4 words naming the task itself, such as \"Login timeout fix\" or \"Sidebar task rows\","
   + " never a step of it. Write it in the language of the user's latest message, even when you work in"
   + " English: \"Таймаут входу\" for a user who writes Ukrainian. A branch name stays in English. Rename it only when the work"
   + " becomes a different task; finishing a step, fixing something on the way or a follow-up within the"
   + " same task is no reason. A name the user gave stays.";
 
-export const DISPATCH_GUIDANCE = "To hand work to another session, call tools.openchamber inside execute:"
+export const DISPATCH_GUIDANCE = "To hand work to another session, call tools.openchamber inside execute; if execute is unavailable, call openchamber directly:"
   + " session.create starts a new session, session.send gives a task to an existing one (session.list finds it by title)."
   + " A session the user wants for themselves, to follow and talk to, is theirs: create it without ownWork. A session you start"
   + " to get part of the work done and collect its answer, also when the user told you to hand that work off, takes"
   + " ownWork: true: it nests under you, the user does not talk to it, and its answer comes back to you. Smaller pieces"
   + " of your own task go to your subagent tool.";
+
+export const WAKE_REPLY_GUIDANCE = "When a background result or another session wakes you, the chat folds your earlier replies to the same user message into one line each."
+  + " So the reply you end such a turn with repeats what still waits on the user: an unanswered question, a decision, a step only they can take.";
 
 export const directToolsGuidance = (names: string[]) => (names.length === 1
   ? `${names[0]} is a direct tool call: never call it from inside a Code Mode execute script, where it does not exist.`
@@ -184,9 +200,9 @@ export const WORKFLOW_GUIDANCE = 'The openchamber_workflow tool runs a script th
   + ' Start one when the user asks for a workflow.'
   + ' When the task in front of you has many similar independent pieces (a review per file, an audit across many routes, a migration of many files)'
   + ' or needs results cross-checked at that scale, say so and offer a workflow; never start one unasked.'
-  + ' A single feature, a few steps or a short loop over files you can do yourself never gets one.'
+  + ' A single feature, a few steps or a short loop over files never gets one.'
   + ' Every agent runs on your own model unless the script names another, and dozens of agents on a top model cost many times what a cheap one does.'
-  + ' So when you propose a workflow, give each phase a model in the same message (look them up with models.list, tools.openchamber inside execute, when you have it):'
+  + ' So when you propose a workflow, give each phase a model in the same message (look them up with models.list when you have the openchamber tool: tools.openchamber inside execute, or call openchamber directly if execute is unavailable):'
   + ' a cheap one for reading and checking against a fixed list, a strong one where a phase weighs judgement or writes what lands.'
   + ' Start the run once the user agrees to the models.'
   + ' When the user lets runs start without approval in Settings, workflow.run starts the run at once instead of showing it for approval, so agree on the plan and the models in the chat first all the same.';
@@ -194,32 +210,38 @@ export const WORKFLOW_GUIDANCE = 'The openchamber_workflow tool runs a script th
 export const SECRET_REQUEST_GUIDANCE = "The openchamber_secret tool asks the user for a secret (API key, token, password) on a private card in the chat."
   + " Whenever you need one, call it: never ask for a secret in the chat or tell the user to paste one there.";
 
+export const PROJECT_ACTIONS_GUIDANCE = "This project has actions, the commands the user saved to run it, such as its dev server."
+  + " When you need the app running, list them with actions.list and start one with actions.run (tools.openchamber_actions inside execute; if execute is unavailable, call openchamber_actions directly)"
+  + " instead of starting it yourself in a shell: the user sees your run in the actions menu and does not start a second copy.";
+
 const directToolNames = ({ rendering, secrets, workflows }: Pick<GuidanceOptions, 'rendering' | 'secrets' | 'workflows'>) => [
   rendering ? 'openchamber_render' : '',
   secrets ? 'openchamber_secret' : '',
   workflows ? 'openchamber_workflow' : '',
 ].filter(Boolean);
 
-const buildGuidance = ({ linking, naming, rendering, secrets, workflows }: GuidanceOptions) => {
+const buildGuidance = ({ linking, naming, rendering, secrets, workflows, projectActions, lead = false }: GuidanceOptions) => {
   const directTools = directToolNames({ rendering, secrets, workflows });
   return [
     linking ? SESSION_LINK_GUIDANCE : '',
     linking && naming ? WORK_NAME_GUIDANCE : '',
-    linking ? DISPATCH_GUIDANCE : '',
+    linking && !lead ? DISPATCH_GUIDANCE : '',
+    linking && !lead ? WAKE_REPLY_GUIDANCE : '',
     rendering ? UI_BLOCKS_GUIDANCE : '',
     rendering ? RENDER_PAGE_GUIDANCE : '',
     rendering ? REPLY_COMMAND_GUIDANCE : '',
     secrets ? SECRET_REQUEST_GUIDANCE : '',
-    workflows ? WORKFLOW_GUIDANCE : '',
+    workflows && !lead ? WORKFLOW_GUIDANCE : '',
+    projectActions ? PROJECT_ACTIONS_GUIDANCE : '',
     directTools.length > 0 ? directToolsGuidance(directTools) : '',
   ].filter(Boolean).join('\n\n');
 };
 
-export const buildKnowledgeEntries = ({ notes, plans, memory, linking = false, naming = false, rendering = false, secrets = false, workflows = false, checkout = null, responseStyleInstruction, extensions }: KnowledgeInput) => {
+export const buildKnowledgeEntries = ({ notes, plans, memory, linking = false, naming = false, rendering = false, secrets = false, workflows = false, projectActions = false, checkout = null, responseStyleInstruction, extensions, lead }: KnowledgeInput) => {
   const entries: KnowledgeEntries = {
     [KNOWLEDGE_ENTRY_KEYS.pinned]: truncate(buildPinnedBlock({ notes, plans })),
     [KNOWLEDGE_ENTRY_KEYS.memory]: truncate(buildMemoryBlock(memory)),
-    [KNOWLEDGE_ENTRY_KEYS.guidance]: buildGuidance({ linking, naming, rendering, secrets, workflows }),
+    [KNOWLEDGE_ENTRY_KEYS.guidance]: buildGuidance({ linking, naming, rendering, secrets, workflows, projectActions, lead: linking && Boolean(lead) }),
   };
   if (responseStyleInstruction !== undefined) {
     entries[KNOWLEDGE_ENTRY_KEYS.responseStyle] = (responseStyleInstruction ?? '').trim();
@@ -227,6 +249,13 @@ export const buildKnowledgeEntries = ({ notes, plans, memory, linking = false, n
   if (extensions !== undefined) entries[KNOWLEDGE_ENTRY_KEYS.extensions] = truncate(extensions);
   if (!linking) entries[KNOWLEDGE_ENTRY_KEYS.checkout] = '';
   else if (checkout) entries[KNOWLEDGE_ENTRY_KEYS.checkout] = describeCheckout(checkout);
+  if (!linking || lead === null) {
+    entries[KNOWLEDGE_ENTRY_KEYS.lead] = '';
+    entries[KNOWLEDGE_ENTRY_KEYS.leadBrief] = '';
+  } else if (lead) {
+    entries[KNOWLEDGE_ENTRY_KEYS.lead] = LEAD_GUIDANCE;
+    if (lead.brief !== undefined) entries[KNOWLEDGE_ENTRY_KEYS.leadBrief] = leadBriefEntry(lead.brief);
+  }
   return entries;
 };
 
@@ -236,6 +265,7 @@ export const createSessionKnowledgeRuntime = (dependencies: SessionKnowledgeDepe
     agentMemoryRuntime,
     resolveProjectId,
     isAgentMemoryEnabled,
+    isToolHost = async () => true,
     isMemoryToolAvailable,
     isSessionLinkingAvailable = null,
     isWorkNamingAvailable = async () => false,
@@ -244,7 +274,9 @@ export const createSessionKnowledgeRuntime = (dependencies: SessionKnowledgeDepe
     isPageRenderingAvailable = async () => false,
     isSecretRequestAvailable = async () => false,
     isWorkflowAvailable = async () => false,
+    hasProjectActions = async () => false,
     readExtensionInstructions = async () => '',
+    readLeadBrief = null,
     readSessionMetadata = null,
     persistSessionMetadata = null,
     instructionEntries = null,
@@ -302,10 +334,13 @@ export const createSessionKnowledgeRuntime = (dependencies: SessionKnowledgeDepe
       }
     }
 
+    const toolHost = await Promise.resolve(isToolHost(directory)).catch(() => null);
+    const hasTools = toolHost === true;
+
     let memory: MemoryIndex = { global: [], project: [], enabled: false, complete: false };
-    const memoryEnabled = isMemoryToolAvailable
+    const memoryEnabled = hasTools && (isMemoryToolAvailable
       ? await isMemoryToolAvailable().catch(() => false)
-      : true;
+      : true);
     if (memoryEnabled) {
       try {
         const stored = await agentMemoryRuntime.readAll(projectId || null);
@@ -321,7 +356,7 @@ export const createSessionKnowledgeRuntime = (dependencies: SessionKnowledgeDepe
       }
     }
 
-    const linking = isSessionLinkingAvailable
+    const linking = hasTools && isSessionLinkingAvailable
       ? await Promise.resolve(isSessionLinkingAvailable()).catch(() => false)
       : false;
     const naming = linking && Boolean(directory)
@@ -334,11 +369,12 @@ export const createSessionKnowledgeRuntime = (dependencies: SessionKnowledgeDepe
       : false;
     const checkout = branch !== null ? { directory, branch, placeholder } : null;
 
-    const rendering = await Promise.resolve(isPageRenderingAvailable()).catch(() => false);
-    const secrets = await Promise.resolve(isSecretRequestAvailable()).catch(() => false);
-    const workflows = await Promise.resolve(isWorkflowAvailable()).catch(() => false);
+    const rendering = hasTools && await Promise.resolve(isPageRenderingAvailable()).catch(() => false);
+    const secrets = hasTools && await Promise.resolve(isSecretRequestAvailable()).catch(() => false);
+    const workflows = hasTools && await Promise.resolve(isWorkflowAvailable()).catch(() => false);
+    const projectActions = hasTools && Boolean(directory) && await Promise.resolve(hasProjectActions(directory)).catch(() => false);
 
-    return { notes, plans, memory, linking, naming, rendering, secrets, workflows, checkout };
+    return { notes, plans, memory, linking, naming, rendering, secrets, workflows, projectActions, checkout, toolHost };
   };
 
   const collectSummary = async (directory: string, pins: SessionPins = { notes: [], plans: [] }): Promise<KnowledgeSummary> => {
@@ -389,11 +425,16 @@ export const createSessionKnowledgeRuntime = (dependencies: SessionKnowledgeDepe
     if (!instructionEntries || !sessionId) return false;
     try {
       const session = await readStoredSession(sessionId).catch(() => null);
-      const entries = buildKnowledgeEntries({
-        ...await collect(directory, readPins(session)),
+      const { toolHost, ...collected } = await collect(directory, readPins(session));
+      const entries: Partial<KnowledgeEntries> = buildKnowledgeEntries({
+        ...collected,
         responseStyleInstruction,
         extensions: await readExtensionInstructions(directory).catch(() => null) ?? undefined,
+        lead: await readLeadContext(sessionId, session),
       });
+      if (toolHost === null) {
+        for (const key of TOOL_ENTRY_KEYS) delete entries[key];
+      }
       const writes = await Promise.allSettled(Object.entries(entries).map(([key, text]) => (text
         ? instructionEntries.put(sessionId, directory, key, text)
         : instructionEntries.remove(sessionId, directory, key))));
@@ -404,6 +445,19 @@ export const createSessionKnowledgeRuntime = (dependencies: SessionKnowledgeDepe
       console.warn('[session-knowledge] sync failed:', (hasMessage(error) ? error.message : undefined) || error);
       return false;
     }
+  };
+
+  const readLeadContext = async (sessionId: string, session: { metadata: SessionMetadata | undefined } | null): Promise<KnowledgeInput['lead'] | undefined> => {
+    if (!session) return undefined;
+    if (!readLead(session.metadata)) return null;
+    if (!readLeadBrief) return { brief: undefined };
+    return { brief: await readLeadBrief(sessionId).catch(() => undefined) };
+  };
+
+  const syncLeadBrief = async (sessionId: string, directory: string, brief: string) => {
+    if (!instructionEntries) return false;
+    await instructionEntries.put(sessionId, directory, KNOWLEDGE_ENTRY_KEYS.leadBrief, leadBriefEntry(brief));
+    return true;
   };
 
   const syncTails = new Map<string, Promise<boolean>>();
@@ -437,6 +491,7 @@ export const createSessionKnowledgeRuntime = (dependencies: SessionKnowledgeDepe
     collectSummary,
     collectSummaryForSession,
     sync,
+    syncLeadBrief,
     readPins,
     setPin,
   };

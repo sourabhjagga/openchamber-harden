@@ -1,4 +1,5 @@
-import type { ControlOptions, SessionActionResult, TextMessage } from './service.js';
+import type { ControlOptions, SessionActionResult } from './service.js';
+import type { TextMessage } from './session-text-messages.js';
 import type { JsonValue } from '../shared/json-values.js';
 
 export type { SessionMetadata as StoredSessionMetadata } from '../openchamber-sessions/session-metadata-store.js';
@@ -65,6 +66,16 @@ export interface ControlInput {
   withStatus?: unknown;
   inWork?: unknown;
   busy?: unknown;
+  mine?: unknown;
+  leads?: unknown;
+  brief?: unknown;
+  edits?: unknown;
+  strands?: unknown;
+  needsYou?: unknown;
+  now?: unknown;
+  news?: unknown;
+  suggestions?: unknown;
+  leadId?: unknown;
   all?: unknown;
   children?: unknown;
   query?: unknown;
@@ -103,6 +114,7 @@ export interface ControlInput {
   placeholder?: unknown;
   program?: unknown;
   inputs?: unknown;
+  saved?: unknown;
   projectId?: unknown;
   directory?: unknown;
   kind?: unknown;

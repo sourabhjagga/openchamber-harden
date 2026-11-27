@@ -1,4 +1,6 @@
+import { directoryGate } from '../directory-reachability/gate.js';
 import { registerNotificationEmitRoutes } from '../notifications/emit-route.js';
+import { registerFreePortRoute } from './free-port-route.js';
 import { registerHttpResponseDiagnostics } from './core-routes.js';
 import type {
   AuthAndAccessDependencies,
@@ -47,6 +49,7 @@ type BaseRoutesOptions =
     sessionRuntime: Required<SessionSnapshots>;
     agentToolRuntime: AgentTool;
     limitFailoverRuntime: Pick<ReturnType<typeof createLimitFailoverRuntime>, 'registerRoutes'> | null;
+    registerExternalBridgeRoutes?: (app: Application) => void;
     pluginNotificationEmitter: Parameters<typeof registerNotificationEmitRoutes>[1]['emitter'];
   };
 
@@ -93,7 +96,7 @@ export const createBootstrapRuntime = (dependencies: BootstrapDependencies) => {
       ensureGlobalWatcherStarted,
       getOrCreateVapidKeys,
       getUiSessionTokenFromRequest,
-      writeSettingsToDisk,
+      updateSettingsFromDisk,
       addOrUpdatePushSubscription,
       removePushSubscription,
       addOrUpdateApnsToken,
@@ -120,6 +123,7 @@ export const createBootstrapRuntime = (dependencies: BootstrapDependencies) => {
       isLocalOnlyPushRequest,
       agentToolRuntime,
       limitFailoverRuntime,
+      registerExternalBridgeRoutes,
       pluginNotificationEmitter,
       desktopUpdater,
       getOpenCodeCompatibility,
@@ -165,7 +169,7 @@ export const createBootstrapRuntime = (dependencies: BootstrapDependencies) => {
     });
     notificationEmitRoutes.registerPluginRoute();
 
-    registerAuthAndAccessRoutes(app, {
+    const { requireApiAuth } = registerAuthAndAccessRoutes(app, {
       express,
       tunnelAuthController,
       uiAuthController,
@@ -181,8 +185,11 @@ export const createBootstrapRuntime = (dependencies: BootstrapDependencies) => {
       readSettingsFromDiskMigrated,
       normalizeTunnelSessionTtlMs,
     });
+    app.use('/api', directoryGate);
 
-    notificationEmitRoutes.registerApiRoute();
+    notificationEmitRoutes.registerApiRoute(requireApiAuth);
+
+    registerFreePortRoute({ app, requireAuth: requireApiAuth });
 
     registerTtsRoutes(app, { sayTTSCapability });
 
@@ -192,8 +199,7 @@ export const createBootstrapRuntime = (dependencies: BootstrapDependencies) => {
       ensureGlobalWatcherStarted,
       getOrCreateVapidKeys,
       getUiSessionTokenFromRequest,
-      readSettingsFromDiskMigrated,
-      writeSettingsToDisk,
+      updateSettingsFromDisk,
       addOrUpdatePushSubscription,
       removePushSubscription,
       addOrUpdateApnsToken,
@@ -230,6 +236,8 @@ export const createBootstrapRuntime = (dependencies: BootstrapDependencies) => {
       desktopUpdater,
       getOpenCodeCompatibility,
     });
+
+    registerExternalBridgeRoutes?.(app);
 
     return {
       uiAuthController,

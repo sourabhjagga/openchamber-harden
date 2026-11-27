@@ -17,6 +17,10 @@ published pull request snapshots, comment origins and shared diff search.
 - Review controls scope model and language choices to a review. A model selected
   in the blocker saves a walkthrough-task override and clears the previous
   model's level, preserving the models used for commit messages and recaps.
+  It also drops the review's own model choice, which outranks the saved one and
+  would keep the review blocked.
+- A `context-too-small` generation error without sizes is the provider's own
+  refusal. Its text names no sizes, and readiness sizes never stand in for them.
 - Reopened reviews describe the result on screen. An explicit selection takes
   precedence over the generated result's model or language, which takes
   precedence over request defaults. Without a walkthrough model override,
@@ -45,6 +49,12 @@ published pull request snapshots, comment origins and shared diff search.
 - Search parses patches only while needed by an open find bar. Layout changes
   rebuild matching, and a match in the uncovered tail opens it before scrolling
   because its viewers remain unmounted while collapsed.
+- Export is available only while the panel shows the walkthrough: not behind a
+  blocker or the generation stages, even when the store still holds a result. The header's download
+  menu folds into More at narrow widths, and the phone offers the same choices
+  in its options sheet. The chat's `saveFile` hands the file to the runtime's
+  download or share path. Dismissal stays silent; save errors show a toast and
+  there is no success toast, since a download cannot report completion.
 
 ## Decisions
 

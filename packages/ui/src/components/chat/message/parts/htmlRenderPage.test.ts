@@ -30,7 +30,23 @@ const BODY = '<p>Use <strong>bold</strong> text here.</p><p>fix it now</p><p>the
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 260));
 
-const mountPage = (answerState?: HtmlRenderAnswerState, body = BODY) => {
+// Timers the page script schedules run only when the test moves the clock.
+type ManualClock = ReturnType<typeof manualClock>;
+const manualClock = () => {
+    let now = 0;
+    const due: { at: number; run: () => void }[] = [];
+    return {
+        setTimeout: (run: () => void, delay = 0) => due.push({ at: now + delay, run }),
+        advance: (ms: number) => {
+            now += ms;
+            for (let next = due.findIndex((timer) => timer.at <= now); next !== -1; next = due.findIndex((timer) => timer.at <= now)) {
+                due.splice(next, 1)[0].run();
+            }
+        },
+    };
+};
+
+const mountPage = (answerState?: HtmlRenderAnswerState, body = BODY, clock?: ManualClock) => {
     const win = new Window({ url: 'http://localhost' });
     // What the page posted, as the host reads it, and as JSON.
     const reports: FrameReport[] = [];
@@ -73,7 +89,7 @@ const mountPage = (answerState?: HtmlRenderAnswerState, body = BODY) => {
         ResizeObserver: win.ResizeObserver,
         getComputedStyle: win.getComputedStyle.bind(win),
         requestAnimationFrame: win.requestAnimationFrame.bind(win),
-        setTimeout: win.setTimeout.bind(win),
+        setTimeout: clock ? clock.setTimeout : win.setTimeout.bind(win),
         clearTimeout: win.clearTimeout.bind(win),
         URL: win.URL,
     };
@@ -174,6 +190,159 @@ describe('the page bootstrap', () => {
 
         expect(page.win.getSelection().rangeCount).toBe(0);
         expect(page.reports.slice(before).filter((message) => message?.kind === 'selection')).toEqual([]);
+    });
+
+    test('editor focus and repeated clicks dismiss sibling menus without reporting or clearing editor text', async () => {
+        const editable = mountPage(undefined, '<div contenteditable="true">editable text</div>');
+        const field = editable.win.document.querySelector('div');
+        if (!field) throw new Error('missing editable field');
+        field.focus();
+        expect(editable.reports.filter((message) => message?.kind === 'selection').at(-1))
+            .toMatchObject({ text: '', dismiss: true });
+        editable.select('editable text');
+        await settle();
+        const beforeClick = editable.reports.length;
+        field.dispatchEvent(new editable.win.MouseEvent('mouseup', { bubbles: true }));
+        await settle();
+        expect(editable.reports.slice(beforeClick).filter((message) => message?.kind === 'selection'))
+            .toEqual([{ kind: 'selection', text: '', rect: { top: 0, left: 0, width: 0, height: 0 }, dismiss: true }]);
+        expect(editable.win.getSelection().toString()).toBe('editable text');
+
+        const beforeClear = editable.reports.length;
+        editable.send(htmlRenderClearSelectionMessage());
+        editable.win.document.dispatchEvent(new editable.win.Event('selectionchange'));
+        await settle();
+        expect(editable.reports.slice(beforeClear).filter((message) => message?.kind === 'selection')).toEqual([]);
+        expect(editable.win.getSelection().toString()).toBe('editable text');
+    });
+
+    test('leaves editable selections to the page and preserves them on host clear', async () => {
+        const editable = mountPage(undefined, '<div contenteditable="true">editable text</div>');
+        const field = editable.win.document.querySelector('div');
+        if (!field) throw new Error('missing editable field');
+        field.focus();
+        editable.select('editable text');
+        await settle();
+
+        expect(editable.reports.filter((message) => message?.kind === 'selection'))
+            .toEqual([{ kind: 'selection', text: '', rect: { top: 0, left: 0, width: 0, height: 0 }, dismiss: true }]);
+        editable.send(htmlRenderClearSelectionMessage());
+        expect(editable.win.getSelection().toString()).toBe('editable text');
+    });
+
+    for (const tag of ['input', 'textarea']) {
+        test(`clears the previous page report when an ${tag} takes focus`, async () => {
+            const editable = mountPage(undefined, `<p>page text</p><${tag}></${tag}>`);
+            editable.select('page text');
+            await settle();
+            const field = editable.win.document.querySelector(tag);
+            if (!(field instanceof editable.win.HTMLElement)) throw new Error('missing text control');
+            field.focus();
+            editable.win.document.dispatchEvent(new editable.win.Event('selectionchange'));
+            await settle();
+
+            const reports = editable.reports.filter((message) => message?.kind === 'selection');
+            expect(reports.at(-1)).toMatchObject({ kind: 'selection', text: '' });
+            editable.send(htmlRenderClearSelectionMessage());
+            expect(editable.win.getSelection().toString()).toBe('page text');
+        });
+    }
+
+    for (const type of ['checkbox', 'radio']) {
+        test(`keeps the page report when a ${type} takes focus, while a text input still dismisses`, async () => {
+            const editable = mountPage(undefined, `<p>page text</p><input type="${type}"><input type="text">`);
+            editable.select('page text');
+            await settle();
+            const before = editable.reports.length;
+            const control = editable.win.document.querySelector(`input[type="${type}"]`);
+            if (!(control instanceof editable.win.HTMLElement)) throw new Error('missing control');
+            control.focus();
+            control.dispatchEvent(new editable.win.MouseEvent('mouseup', { bubbles: true }));
+            await settle();
+
+            const reports = editable.reports.slice(before).filter((message) => message?.kind === 'selection');
+            expect(reports.every((message) => message?.kind === 'selection' && message.text === 'page text' && !message.dismiss)).toBe(true);
+            editable.send(htmlRenderClearSelectionMessage());
+            expect(editable.win.getSelection().rangeCount).toBe(0);
+
+            editable.select('page text');
+            await settle();
+            const field = editable.win.document.querySelector('input[type="text"]');
+            if (!(field instanceof editable.win.HTMLElement)) throw new Error('missing text input');
+            field.focus();
+            expect(editable.reports.filter((message) => message?.kind === 'selection').at(-1))
+                .toMatchObject({ text: '', dismiss: true });
+        });
+    }
+
+    test('a checkbox inside editable content is not an editor', async () => {
+        const editable = mountPage(undefined, '<p>page text</p><div contenteditable="true"><input type="checkbox"></div>');
+        const control = editable.win.document.querySelector('input');
+        if (!control) throw new Error('missing checkbox');
+        // Chromium reports a control inside an editable ancestor as editable.
+        Object.defineProperty(control, 'isContentEditable', { value: true, configurable: true });
+        editable.select('page text');
+        await settle();
+        const before = editable.reports.length;
+        control.focus();
+        await settle();
+
+        expect(editable.reports.slice(before).filter((message) => message?.kind === 'selection' && message.dismiss)).toEqual([]);
+        editable.send(htmlRenderClearSelectionMessage());
+        expect(editable.win.getSelection().rangeCount).toBe(0);
+    });
+
+    test('dismisses when focus moves to an editor within the same open shadow root', () => {
+        const editable = mountPage(undefined, '<p>page text</p><div id="host"></div>');
+        const host = editable.win.document.getElementById('host');
+        if (!host) throw new Error('missing shadow host');
+        const root = host.attachShadow({ mode: 'open' });
+        const button = editable.win.document.createElement('button');
+        const field = editable.win.document.createElement('input');
+        root.append(button, field);
+
+        button.focus();
+        field.focus();
+        const before = editable.reports.length;
+        // A browser stops this focusin at the root: both ends retarget to the host.
+        field.dispatchEvent(new editable.win.FocusEvent('focusin', { bubbles: true, composed: false }));
+
+        expect(editable.reports.slice(before).filter((message) => message?.kind === 'selection').at(-1))
+            .toMatchObject({ text: '', dismiss: true });
+    });
+
+    test('leaves selections alone when an editor in nested open shadow roots takes focus', async () => {
+        const editable = mountPage(undefined, '<p>page text</p><div id="host"></div>');
+        const host = editable.win.document.getElementById('host');
+        if (!host) throw new Error('missing shadow host');
+        const outer = host.attachShadow({ mode: 'open' });
+        const innerHost = editable.win.document.createElement('div');
+        outer.append(innerHost);
+        const inner = innerHost.attachShadow({ mode: 'open' });
+        const field = editable.win.document.createElement('div');
+        field.contentEditable = 'true';
+        field.textContent = 'editable text';
+        inner.append(field);
+
+        editable.select('page text');
+        await settle();
+        field.focus();
+        expect(editable.win.document.activeElement).toBe(host);
+        expect(outer.activeElement).toBe(innerHost);
+        expect(inner.activeElement).toBe(field);
+        editable.win.document.dispatchEvent(new editable.win.Event('selectionchange'));
+        await settle();
+
+        expect(editable.reports.filter((message) => message?.kind === 'selection').at(-1))
+            .toMatchObject({ kind: 'selection', text: '' });
+        const range = editable.win.document.createRange();
+        range.selectNodeContents(field);
+        const selection = editable.win.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+        expect(selection.toString()).toBe('editable text');
+        editable.send(htmlRenderClearSelectionMessage());
+        expect(selection.toString()).toBe('editable text');
     });
 
     test('passes Escape on only while a reported selection stands and the page left the key alone', async () => {
@@ -578,5 +747,72 @@ describe('a page that waits for an answer', () => {
         const page = mountPage({ waiting: true, answer: null });
         expect(page.win.document.querySelector('[data-oc-decline]')).toBeNull();
         expect(page.reports.some((report) => report?.kind === 'decline-placed' && !report.placed)).toBe(true);
+    });
+});
+
+describe('a page whose own script throws', () => {
+    const scriptErrors = (page: ReturnType<typeof mountPage>) => page.reports.filter((report) => report?.kind === 'script-error');
+    const mount = (body: string) => {
+        const clock = manualClock();
+        return { page: mountPage({ waiting: true, answer: null }, body, clock), clock };
+    };
+    const throwInPage = (page: ReturnType<typeof mountPage>, message: string) => {
+        page.win.dispatchEvent(new page.win.ErrorEvent('error', { message }));
+    };
+    const load = (page: ReturnType<typeof mountPage>, clock: ManualClock) => {
+        page.win.dispatchEvent(new page.win.Event('load'));
+        clock.advance(0);
+    };
+    // Past the short wait a page gets to draw a late control.
+    const drawWait = 400;
+    const failure = 'Uncaught InvalidCharacterError: The string to be decoded is not correctly encoded.';
+
+    test('tells the host what it threw when it loads with nothing to answer with, and again when the host waits', () => {
+        const { page, clock } = mount('<main id="app"></main>');
+        throwInPage(page, failure);
+        load(page, clock);
+        clock.advance(drawWait - 1);
+        expect(scriptErrors(page)).toEqual([]);
+        clock.advance(1);
+        expect(scriptErrors(page)).toEqual([{ kind: 'script-error', errors: [failure] }]);
+
+        page.send(htmlRenderAnswerStateMessage({ waiting: false, answer: null }));
+        page.send(htmlRenderAnswerStateMessage({ waiting: true, answer: null }));
+        expect(scriptErrors(page)).toHaveLength(2);
+    });
+
+    for (const [control, body] of [
+        ['a button', '<button class="oc-button">Send</button>'],
+        ['an option tile', '<div class="oc-option">Red</div>'],
+        ['a link', '<a href="https://example.com">Open</a>'],
+    ]) {
+        test(`says nothing when it still shows ${control} to answer with`, () => {
+            const { page, clock } = mount(body);
+            throwInPage(page, 'Uncaught ReferenceError: chart is not defined');
+            load(page, clock);
+            clock.advance(drawWait);
+
+            expect(scriptErrors(page)).toEqual([]);
+        });
+    }
+
+    test('says nothing when its script draws a button shortly after it loads', () => {
+        const { page, clock } = mount('<main id="app"></main>');
+        throwInPage(page, 'Uncaught ReferenceError: chart is not defined');
+        load(page, clock);
+        clock.advance(drawWait / 2);
+        page.win.document.getElementById('app')?.append(page.win.document.createElement('button'));
+        clock.advance(drawWait);
+
+        expect(scriptErrors(page)).toEqual([]);
+    });
+
+    test('says nothing about a throw after it loaded, as in a click handler', () => {
+        const { page, clock } = mount('<main id="app"></main>');
+        load(page, clock);
+        throwInPage(page, 'Uncaught Error: first click fails');
+        clock.advance(drawWait);
+
+        expect(scriptErrors(page)).toEqual([]);
     });
 });

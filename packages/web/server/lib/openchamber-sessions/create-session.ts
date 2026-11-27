@@ -5,11 +5,13 @@ import type { OpenCodeClient, SessionCreateInput } from '@opencode/client';
 
 export const OPERATOR_CHILD_NOTE_SOURCE = 'openchamber-operator-child';
 
-const OPERATOR_CHILD_DENIED_RULES = ['question', 'openchamber_secret'].map((action) => ({ action, resource: '*', effect: 'deny' as const }));
+export const OPERATOR_CHILD_DENIED_RULES = ['question', 'openchamber_secret'].map((action) => ({ action, resource: '*', effect: 'deny' as const }));
 
 const OPERATOR_CHILD_NOTE = [
   'The user does not interact with this session. Another agent started it as part of its own work, and your final answer goes to that agent, not to the user.',
   'Nobody answers questions here. When you need a decision, state the question in plain text in your answer and end your turn: do not use tools that wait for an answer, and do not draw openui-lang blocks with buttons or choices.',
+  'When an action is refused, do not get it done another way: say in your answer what was refused and why the work needs it.',
+  'What you start must wake you: run a long command as a background command of your shell tool, or use wait.start. A process you detach yourself (nohup, &, tmux) wakes nobody when it ends. Before your final answer, stop what you started and no longer need: an answer waits while your own work runs.',
 ].join('\n\n');
 
 export const withoutOperatorChildDenials = (permissions: SessionCreateInput['permissions']) => {
@@ -19,7 +21,7 @@ export const withoutOperatorChildDenials = (permissions: SessionCreateInput['per
   )));
 };
 
-const operatorChildMetadata = (parentSessionId: string) => ({ kind: OPERATOR_CHILD_KIND, parentID: parentSessionId });
+export const operatorChildMetadata = (parentSessionId: string) => ({ kind: OPERATOR_CHILD_KIND, parentID: parentSessionId });
 
 interface CreateSessionOptions {
   client: OpenCodeClient;
@@ -28,13 +30,19 @@ interface CreateSessionOptions {
   titleByUser?: boolean;
   startedByExtension?: string | null;
   operatorParentId?: string | null;
+  model?: { providerID: string; modelID: string } | null;
+  variant?: string | null;
 }
 
 type MutableCreateInput = { -readonly [Key in keyof SessionCreateInput]: SessionCreateInput[Key] };
 type SessionMetadata = NonNullable<SessionCreateInput['metadata']>;
 
-export const createSession = async ({ client, directory, title, titleByUser = false, startedByExtension = null, operatorParentId = null }: CreateSessionOptions) => {
+export const createSession = async ({ client, directory, title, titleByUser = false, startedByExtension = null, operatorParentId = null, model, variant }: CreateSessionOptions) => {
   const input: MutableCreateInput = { location: { directory } };
+  if (model) {
+    const selectedModel = { providerID: model.providerID, id: model.modelID };
+    input.model = variant ? { ...selectedModel, variant } : selectedModel;
+  }
   const openchamberMetadata: { -readonly [Key in keyof SessionMetadata]: SessionMetadata[Key] } = operatorParentId ? operatorChildMetadata(operatorParentId) : {};
   if (title) {
     input.title = title;
@@ -50,7 +58,7 @@ export const createSession = async ({ client, directory, title, titleByUser = fa
   return sessionID;
 };
 
-const admitOperatorChildNote = async (client: OpenCodeClient, sessionID: string, parentSessionId: string) => {
+export const admitOperatorChildNote = async (client: OpenCodeClient, sessionID: string, parentSessionId: string) => {
   try {
     await client.session.synthetic({
       sessionID,

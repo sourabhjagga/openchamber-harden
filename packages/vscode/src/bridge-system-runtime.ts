@@ -3,7 +3,8 @@ import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { randomUUID } from 'crypto';
-import { getProviderSources, getStoredProviderConfig, readConfig, upsertProviderConfig } from './opencodeConfig';
+import { getProviderSources, getStoredProviderConfig, readConfig, readConfigLayers, upsertProviderConfig } from './opencodeConfig';
+import { readInheritedProviderCanonical } from '../../web/server/lib/opencode/inherited-canonical.js';
 import { getProviderAuth } from './opencodeAuth';
 import { OpenCode } from '@opencode/client';
 import { asSessionId, asSessionIdList, asSessionMetadata, asTimestamp, parseJson, type JsonValue, type SessionArchiveOnOpenCode, type SessionMetadataOnOpenCode, type SessionStateStore } from './openchamberSessionState';
@@ -15,11 +16,18 @@ import { sessionNotificationSchema } from './sessionNotifications';
 import { getOpenCodeUpgradeStatus, upgradeManagedOpenCode } from './opencode-upgrade-runtime';
 import { normalizeWindowsDriveLetter, pathsEqualWithNormalizedDriveLetter } from './pathUtils';
 import { resolveWorkspaceFolders } from './workspaceResolver';
-import { isFileDeletionPatch, reconstructOriginalContentFromPatch } from './patchReconstruction';
+import { fileSidesFromFullPatch, isFileDeletionPatch, reconstructOriginalContentFromPatch } from './patchReconstruction';
 import type { BridgeContext, BridgeResponse } from './bridge';
 import { ENTERPRISE_MODE_ERROR, isEnterpriseMode, publicEnterprisePolicy } from '../../web/server/lib/enterprise-mode.js';
 import { discoverProviderModels } from './model-discovery';
 import { openCodeTrust } from './opencodeTrust';
+import {
+  ALLOWED_VSCODE_COMMANDS,
+  allowedVSCodeCommandSchema,
+  commandEnvelopeSchema,
+  decideExternalUrl,
+  externalUrlPayloadSchema,
+} from './bridge-vscode-policy';
 
 const readStoredProviderBaseURL = (providerID: string): string | undefined => {
   const provider = readConfig().provider;
@@ -136,8 +144,7 @@ const ensureVirtualDiffProviderRegistered = (ctx?: BridgeContext): void => {
     VIRTUAL_DIFF_SCHEME,
     {
       provideTextDocumentContent: (uri: vscode.Uri) => {
-        const key = new URLSearchParams(uri.query).get('key') || '';
-        return virtualDiffContents.get(key) ?? '';
+        return virtualDiffContents.get(uri.query) ?? '';
       },
     },
   );
@@ -147,9 +154,10 @@ const ensureVirtualDiffProviderRegistered = (ctx?: BridgeContext): void => {
   }
 };
 
-const createVirtualOriginalDiffUri = (modifiedPath: string, content: string): vscode.Uri => {
+const createVirtualOriginalDiffUri = (modifiedPath: string, content: string, commentPath?: string): vscode.Uri => {
   const key = `${Date.now()}-${++virtualDiffCounter}`;
-  virtualDiffContents.set(key, content);
+  const query = JSON.stringify(commentPath ? { key, path: commentPath } : { key });
+  virtualDiffContents.set(query, content);
 
   if (virtualDiffContents.size > 100) {
     const firstKey = virtualDiffContents.keys().next().value;
@@ -161,7 +169,7 @@ const createVirtualOriginalDiffUri = (modifiedPath: string, content: string): vs
   return vscode.Uri.from({
     scheme: VIRTUAL_DIFF_SCHEME,
     path: `/${path.basename(modifiedPath) || 'original'}`,
-    query: `key=${encodeURIComponent(key)}`,
+    query,
   });
 };
 
@@ -338,27 +346,35 @@ export async function handleSystemBridgeMessage(
     }
 
     case 'editor:openDiff': {
-      const { original, modified, label, line, patch } = payload as {
+      const { original, modified, label, line, patch, snapshot } = payload as {
         original: string;
         modified: string;
         label?: string;
         line?: number;
         patch?: string;
+        snapshot?: boolean;
       };
       try {
         let modifiedUri = vscode.Uri.file(modified);
         const patchText = typeof patch === 'string' && patch.trim().length > 0 ? patch : undefined;
-        const deleted = patchText !== undefined && isFileDeletionPatch(patchText)
-          && !(await vscode.workspace.fs.stat(modifiedUri).then(() => true, () => false));
-        const modifiedText = deleted ? '' : (await vscode.workspace.openTextDocument(modifiedUri)).getText();
+        const sides = snapshot === true && patchText !== undefined ? fileSidesFromFullPatch(patchText) : null;
         let originalUri = original ? vscode.Uri.file(original) : modifiedUri;
 
-        if (patchText !== undefined) {
-          const originalContent = reconstructOriginalContentFromPatch(modifiedText, patchText);
-          if (typeof originalContent === 'string') {
-            ensureVirtualDiffProviderRegistered(ctx);
-            originalUri = createVirtualOriginalDiffUri(modified, originalContent);
-            if (deleted) modifiedUri = createVirtualOriginalDiffUri(modified, '');
+        if (sides) {
+          ensureVirtualDiffProviderRegistered(ctx);
+          originalUri = createVirtualOriginalDiffUri(modified, sides.original, modified);
+          modifiedUri = createVirtualOriginalDiffUri(modified, sides.modified, modified);
+        } else {
+          const deleted = patchText !== undefined && isFileDeletionPatch(patchText)
+            && !(await vscode.workspace.fs.stat(modifiedUri).then(() => true, () => false));
+          const modifiedText = deleted ? '' : (await vscode.workspace.openTextDocument(modifiedUri)).getText();
+          if (patchText !== undefined) {
+            const originalContent = reconstructOriginalContentFromPatch(modifiedText, patchText);
+            if (typeof originalContent === 'string') {
+              ensureVirtualDiffProviderRegistered(ctx);
+              originalUri = createVirtualOriginalDiffUri(modified, originalContent);
+              if (deleted) modifiedUri = createVirtualOriginalDiffUri(modified, '');
+            }
           }
         }
 
@@ -419,13 +435,19 @@ export async function handleSystemBridgeMessage(
       }
     }
 
-    case 'api:sessions/metadata:set': {
-      const body = (payload || {}) as { sessionId?: JsonValue; patch?: JsonValue };
+    case 'api:sessions/metadata:set':
+    case 'api:sessions/metadata:compare-and-set': {
+      const body = (payload || {}) as { sessionId?: JsonValue; patch?: JsonValue; expected?: JsonValue };
       const sessionId = asSessionId(body.sessionId);
       if (!sessionId) return { id, type, success: false, error: 'a session id is required' };
       const patch = asSessionMetadata(body.patch);
       if (!patch) return { id, type, success: false, error: 'patch must be an object' };
       try {
+        if (type === 'api:sessions/metadata:compare-and-set') {
+          const expected = asSessionMetadata(body.expected);
+          if (!expected) return { id, type, success: false, error: 'expected must be an object' };
+          return { id, type, success: true, data: await deps.sessionState.compareAndSetMetadata(sessionId, expected, patch, sessionMetadataOnOpenCode(ctx?.manager)) };
+        }
         return { id, type, success: true, data: { metadata: await deps.sessionState.setMetadata(sessionId, patch, sessionMetadataOnOpenCode(ctx?.manager)) } };
       } catch (error) {
         return { id, type, success: false, error: error instanceof Error ? error.message : String(error) };
@@ -444,7 +466,8 @@ export async function handleSystemBridgeMessage(
         const sources = getProviderSources(providerId, workingDirectory);
         sources.auth.exists = Boolean(await getProviderAuth(providerId));
         const config = getStoredProviderConfig(providerId, workingDirectory);
-        return { id, type, success: true, data: { providerId, sources, config } };
+        const inheritedCanonical = readInheritedProviderCanonical(readConfigLayers(workingDirectory), providerId);
+        return { id, type, success: true, data: { providerId, sources, config, inheritedCanonical } };
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
         return { id, type, success: false, error: errorMessage };
@@ -646,12 +669,19 @@ export async function handleSystemBridgeMessage(
     }
 
     case 'vscode:command': {
-      const { command, args } = (payload || {}) as { command?: string; args?: unknown[] };
-      if (!command) {
+      const envelope = commandEnvelopeSchema.safeParse(payload);
+      if (!envelope.success || envelope.data.command.trim().length === 0) {
         return { id, type, success: false, error: 'Command is required' };
       }
+      if (!ALLOWED_VSCODE_COMMANDS.has(envelope.data.command)) {
+        return { id, type, success: false, error: `Command is not allowed: ${envelope.data.command}` };
+      }
+      const parsed = allowedVSCodeCommandSchema.safeParse(payload);
+      if (!parsed.success) {
+        return { id, type, success: false, error: `Invalid arguments for command: ${envelope.data.command}` };
+      }
       try {
-        const result = await vscode.commands.executeCommand(command, ...(args || []));
+        const result = await vscode.commands.executeCommand(parsed.data.command, ...parsed.data.args);
         return { id, type, success: true, data: { result } };
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
@@ -660,13 +690,32 @@ export async function handleSystemBridgeMessage(
     }
 
     case 'vscode:openExternalUrl': {
-      const { url } = (payload || {}) as { url?: string };
-      const target = typeof url === 'string' ? url.trim() : '';
-      if (!target) {
+      const parsedPayload = externalUrlPayloadSchema.safeParse(payload);
+      if (!parsedPayload.success) {
         return { id, type, success: false, error: 'URL is required' };
       }
+      const decision = decideExternalUrl(parsedPayload.data.url, vscode.env.uriScheme);
+      if (decision.action === 'refuse') {
+        return { id, type, success: false, error: decision.error };
+      }
       try {
-        await vscode.env.openExternal(vscode.Uri.parse(target));
+        const uri = vscode.Uri.parse(decision.url, true);
+        if (uri.scheme.toLowerCase() !== decision.scheme) {
+          return { id, type, success: false, error: 'URL scheme cannot be opened externally' };
+        }
+        if (decision.action === 'confirm') {
+          const deliveredUrl = encodeURI(uri.toString(true));
+          const open = vscode.l10n.t('Open');
+          const choice = await vscode.window.showWarningMessage(
+            vscode.l10n.t('Open this link in another app?'),
+            { modal: true, detail: vscode.l10n.t('The link uses {0}:// and opens whichever app handles it.\n\n{1}', decision.scheme, deliveredUrl) },
+            open,
+          );
+          if (choice !== open) {
+            return { id, type, success: true, data: { opened: false } };
+          }
+        }
+        await vscode.env.openExternal(uri);
         return { id, type, success: true, data: { opened: true } };
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);

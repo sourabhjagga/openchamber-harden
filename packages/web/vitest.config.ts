@@ -21,6 +21,7 @@ export default defineConfig({
   test: {
     maxWorkers,
     include: [...configDefaults.include, '../ui/src/**/*.vitest.tsx'],
+    exclude: [...configDefaults.exclude, 'opencode-server/**/*.test.mjs'],
     testTimeout: 30_000,
     hookTimeout: 30_000,
     setupFiles: ['./test/isolated-data-dir.ts', './test/loopback-supertest.js'],
@@ -32,7 +33,6 @@ export default defineConfig({
       OPENCHAMBER_JEV_API_KEY: '',
       OPENCODE_DISABLE_CLAUDE_CODE: '',
       OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: '',
-      OPENCODE_DISABLE_EXTERNAL_SKILLS: '',
     },
   },
 });

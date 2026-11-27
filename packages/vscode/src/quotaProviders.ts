@@ -1,8 +1,8 @@
 import { z } from 'zod';
-import { OPENCODE_CONFIG_DIR, OPENCODE_DATA_DIR } from './opencodeConfigPaths';
+import { OPENCODE_CONFIG_DIR } from './opencodeConfigPaths';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fetchOpenCodeGoUsage, OPENCODE_GO_KEY_EXPIRED, type OpenCodeGoApiKeyCredential, type OpenCodeGoConsoleCredential } from './opencodeGoQuota';
+import { fetchOpenCodeGoUsage, isOpenCodeGoKeyRefusal, OPENCODE_GO_KEY_EXPIRED, type OpenCodeGoApiKeyCredential, type OpenCodeGoConsoleCredential } from './opencodeGoQuota';
 import { fetchOpenCodeZenUsage, type OpenCodeZenCredential } from '../../web/server/lib/quota/providers/opencode-zen.js';
 import { fetchMistralUsage } from '../../web/server/lib/quota/providers/mistral-billing.js';
 import { deleteLegacyOllamaCloudCredential, deleteLegacyOpenCodeGoCredential, readCredential } from './quotaCredentials';
@@ -10,11 +10,10 @@ import { readOpenCodeCredentials } from './opencodeAuth';
 import { readConfig } from './opencodeConfig';
 import { isRecord, toProviderEntity } from './opencode-config-v2';
 import { fetchExeDevUsage } from './exeDevQuota';
-import { refreshGoogleAccessToken } from '../../web/server/lib/quota/providers/google/oauth.js';
 import { readConsoleBudgets, withConsoleBudgets, type ConsoleBudgets } from '../../web/server/lib/quota/console-budgets.js';
-import { antigravityHeaders, warnIfGeminiGroupMissing } from '../../web/server/lib/quota/providers/antigravity/client.js';
 import { miniMaxStatusError } from '../../web/server/lib/quota/providers/minimax-status.js';
 import { readCodexCliLogin, signInEmailOf } from '../../web/server/lib/quota/providers/codex-cli.js';
+import { isUsageTimeout, requestCodexUsage, requestUsageWithDeadline, type UsageResponse } from './usageRequest';
 import { formatCredits } from '../../web/server/lib/quota/utils/formatters.js';
 import { fetchCursorSummaryWindow } from '../../web/server/lib/quota/providers/cursor-summary.js';
 
@@ -36,8 +35,9 @@ type UsageWindow = {
   resetAtFormatted: string | null;
   resetAfterFormatted: string | null;
   valueLabel?: string | null;
-  value?: { kind: 'requests'; count: number } | { kind: 'spend'; spent: number; limit: number | null };
+  value?: { kind: 'requests'; count: number } | { kind: 'spend'; spent: number | null; limit: number | null };
   creditsUsed?: number;
+  credits?: { used: number; limit: number; remaining?: number };
   giftReset?: UsageWindowGiftReset | null;
 };
 
@@ -75,23 +75,6 @@ type OpenAiUsagePayload = {
   };
 };
 
-type GoogleModelsPayload = {
-  models?: Record<string, {
-    quotaInfo?: {
-      remainingFraction?: number;
-      resetTime?: string;
-    };
-  }>;
-};
-
-type GoogleQuotaBucketsPayload = {
-  buckets?: Array<{
-    modelId?: string;
-    remainingFraction?: number;
-    resetTime?: string;
-  }>;
-};
-
 type ZaiLimit = {
   type?: string;
   number?: number;
@@ -108,7 +91,7 @@ const formatZaiCreditAmount = (value: number): string => {
   return `${Math.round(value / 100) / 10}k`;
 };
 
-const formatZaiCreditValueLabel = (limit: ZaiLimit): string | null => {
+const formatZaiCreditValueLabel = (limit: ZaiLimit | ZhipuaiLimit): string | null => {
   const used = toNumber(limit.currentValue);
   const total = toNumber(limit.usage);
   if (used === null || total === null) return null;
@@ -165,16 +148,12 @@ type ZhipuaiPayload = {
   };
 };
 
-const formatZhipuaiCreditAmount = (value: number): string => {
-  if (value < 1000) return value.toLocaleString('en-US');
-  return `${Math.round(value / 100) / 10}k`;
-};
-
-const formatZhipuaiCreditValueLabel = (limit: ZhipuaiLimit): string | null => {
+const zaiCreditAmounts = (limit: ZaiLimit | ZhipuaiLimit): UsageWindow['credits'] => {
   const used = toNumber(limit.currentValue);
   const total = toNumber(limit.usage);
-  if (used === null || total === null) return null;
-  return `${formatZhipuaiCreditAmount(used)} / ${formatZhipuaiCreditAmount(total)} credits`;
+  const remaining = toNumber(limit.remaining);
+  if (used === null || total === null || used < 0 || total <= 0) return undefined;
+  return remaining === null || remaining < 0 ? { used, limit: total } : { used, limit: total, remaining };
 };
 
 const resolveZhipuaiUsedPercent = (limit: ZhipuaiLimit): number | null => {
@@ -277,80 +256,9 @@ type XaiAuthEntry = Record<string, unknown> & {
   expires?: unknown;
 };
 
-const ANTIGRAVITY_ACCOUNTS_PATHS = [
-  path.join(OPENCODE_CONFIG_DIR, 'antigravity-accounts.json'),
-  path.join(OPENCODE_DATA_DIR, 'antigravity-accounts.json'),
-];
-
-const DEFAULT_PROJECT_ID = 'rising-fact-p41fc';
-const GOOGLE_FIVE_HOUR_WINDOW_SECONDS = 5 * 60 * 60;
-const GOOGLE_DAILY_WINDOW_SECONDS = 24 * 60 * 60;
-const GOOGLE_WEEKLY_WINDOW_SECONDS = 7 * 24 * 60 * 60;
-const GOOGLE_PRIMARY_ENDPOINT = 'https://cloudcode-pa.googleapis.com';
-
-const GOOGLE_ENDPOINTS = [
-  'https://daily-cloudcode-pa.sandbox.googleapis.com',
-  'https://autopush-cloudcode-pa.sandbox.googleapis.com',
-  GOOGLE_PRIMARY_ENDPOINT,
-];
-
-const ANTIGRAVITY_ENDPOINTS = [
-  'https://daily-cloudcode-pa.googleapis.com',
-  'https://daily-cloudcode-pa.sandbox.googleapis.com',
-  GOOGLE_PRIMARY_ENDPOINT,
-];
-
-const GOOGLE_HEADERS = {
-  'User-Agent': 'antigravity/1.11.5 windows/amd64',
-  'X-Goog-Api-Client': 'google-cloud-sdk vscode_cloudshelleditor/0.1',
-  'Client-Metadata':
-    '{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}',
-};
-
-const resolveGoogleWindow = (sourceId: GoogleAuthSource['sourceId'], resetAt: number | null) => {
-  if (sourceId === 'gemini') {
-    return { label: 'daily', seconds: GOOGLE_DAILY_WINDOW_SECONDS } as const;
-  }
-
-  if (sourceId === 'antigravity') {
-    const remainingSeconds = typeof resetAt === 'number'
-      ? Math.max(0, Math.round((resetAt - Date.now()) / 1000))
-      : null;
-
-    if (remainingSeconds !== null && remainingSeconds > 36 * 60 * 60) {
-      return { label: 'weekly', seconds: GOOGLE_WEEKLY_WINDOW_SECONDS } as const;
-    }
-
-    if (remainingSeconds !== null && remainingSeconds > 10 * 60 * 60) {
-      return { label: 'daily', seconds: GOOGLE_DAILY_WINDOW_SECONDS } as const;
-    }
-
-    return { label: '5h', seconds: GOOGLE_FIVE_HOUR_WINDOW_SECONDS } as const;
-  }
-
-  return { label: 'daily', seconds: GOOGLE_DAILY_WINDOW_SECONDS } as const;
-};
-
 const ZAI_TOKEN_WINDOW_SECONDS: Record<number, number> = {
   3: 60 * 60,
   6: 7 * 24 * 60 * 60,
-};
-
-const readJsonFile = (filePath: string): Record<string, unknown> | null => {
-  if (!fs.existsSync(filePath)) {
-    return null;
-  }
-  try {
-    const raw = fs.readFileSync(filePath, 'utf8');
-    const trimmed = raw.trim();
-    if (!trimmed) return null;
-    const parsed = JSON.parse(trimmed);
-    if (!parsed || typeof parsed !== 'object') return null;
-    return parsed as Record<string, unknown>;
-  } catch (error) {
-    console.warn(`Failed to read JSON file: ${filePath}`, error);
-    return null;
-  }
 };
 
 const getAuthEntry = (auth: AuthFile, aliases: string[]) => {
@@ -386,20 +294,6 @@ const asNonEmptyString = (value: unknown): string | null => {
 const ollamaApiKeyFrom = (entry: ReturnType<typeof normalizeAuthEntry>): string | null =>
   asNonEmptyString(entry?.key) ?? asNonEmptyString(entry?.token);
 
-const parseGoogleRefreshToken = (rawRefreshToken: unknown) => {
-  const refreshToken = asNonEmptyString(rawRefreshToken);
-  if (!refreshToken) {
-    return { refreshToken: null, projectId: null, managedProjectId: null };
-  }
-
-  const [rawToken = '', rawProject = '', rawManagedProject = ''] = refreshToken.split('|');
-  return {
-    refreshToken: asNonEmptyString(rawToken),
-    projectId: asNonEmptyString(rawProject),
-    managedProjectId: asNonEmptyString(rawManagedProject),
-  };
-};
-
 const toNumber = (value: unknown): number | null => {
   if (typeof value === 'number' && Number.isFinite(value)) {
     return value;
@@ -432,17 +326,14 @@ const openCodeGoConsoleCredential = (auth: AuthFile): OpenCodeGoConsoleCredentia
   const orgID = asNonEmptyString(entry.orgID);
   if (!accessToken || entry.server !== CONSOLE_SERVER || !orgID || !CONSOLE_ORGANIZATION_ID_PATTERN.test(orgID)) return null;
   const expires = toNumber(entry.expires);
-  return { accessToken, orgID, expires };
+  return { accessToken, orgID, expires, label: asNonEmptyString(entry.label) };
 };
 
-const openCodeGoApiKey = (auth: AuthFile): OpenCodeGoApiKeyCredential | null => {
-  const own = normalizeAuthEntry(getAuthEntry(auth, ['opencode-go']));
-  const ownKey = asNonEmptyString(own?.key) ?? asNonEmptyString(own?.token);
-  if (ownKey) return { apiKey: ownKey, consoleKey: false };
-  const consoleEntry = normalizeAuthEntry(getAuthEntry(auth, ['opencode']));
-  if (!consoleEntry || consoleEntry.type === 'oauth') return null;
-  const consoleKey = asNonEmptyString(consoleEntry.key) ?? asNonEmptyString(consoleEntry.token);
-  return consoleKey ? { apiKey: consoleKey, consoleKey: true } : null;
+const openCodeGoKey = (auth: AuthFile, integrationID: 'opencode' | 'opencode-go'): OpenCodeGoApiKeyCredential | null => {
+  const entry = normalizeAuthEntry(getAuthEntry(auth, [integrationID]));
+  if (!entry || entry.type === 'oauth') return null;
+  const apiKey = asNonEmptyString(entry.key) ?? asNonEmptyString(entry.token);
+  return apiKey ? { apiKey, consoleKey: integrationID === 'opencode', label: asNonEmptyString(entry.label) } : null;
 };
 
 const openCodeZenCredential = (auth: AuthFile): OpenCodeZenCredential | null => {
@@ -487,10 +378,10 @@ const calculateResetAfterSeconds = (resetAt: number | null) => {
   return delta < 0 ? 0 : delta;
 };
 
-const toUsageWindow = (data: { usedPercent: number | null; windowSeconds: number | null; resetAt: number | null; valueLabel?: string | null; creditsUsed?: number }) => {
+const toUsageWindow = (data: { usedPercent: number | null; windowSeconds: number | null; resetAt: number | null; valueLabel?: string | null; value?: UsageWindow['value']; creditsUsed?: number; credits?: UsageWindow['credits'] }) => {
   const resetAfterSeconds = calculateResetAfterSeconds(data.resetAt);
   const resetFormatted = data.resetAt ? formatResetTime(data.resetAt) : null;
-  return {
+  const window: UsageWindow = {
     usedPercent: data.usedPercent,
     remainingPercent: data.usedPercent !== null ? Math.max(0, 100 - data.usedPercent) : null,
     windowSeconds: data.windowSeconds ?? null,
@@ -500,7 +391,10 @@ const toUsageWindow = (data: { usedPercent: number | null; windowSeconds: number
     resetAfterFormatted: resetFormatted,
     ...(data.valueLabel ? { valueLabel: data.valueLabel } : {}),
     ...(data.creditsUsed !== undefined ? { creditsUsed: data.creditsUsed } : {}),
-  } satisfies UsageWindow;
+  };
+  if (data.value) window.value = data.value;
+  if (data.credits) window.credits = data.credits;
+  return window;
 };
 
 const buildResult = (data: {
@@ -814,7 +708,7 @@ const collectKimiApiKeys = (auth: AuthFile): { apiKey: string; endpoint: string 
 export const listConfiguredQuotaProviders = async () => {
   const auth = await readOpenCodeCredentials();
   const configured = new Set<string>();
-  if (openCodeGoApiKey(auth) || openCodeGoConsoleCredential(auth)) configured.add('opencode-go');
+  if (openCodeGoKey(auth, 'opencode-go') || openCodeGoKey(auth, 'opencode') || openCodeGoConsoleCredential(auth)) configured.add('opencode-go');
   if (openCodeZenCredential(auth)) configured.add('opencode');
   if (readCredential('cursor')) configured.add('cursor');
   if (readCredential('exe-dev')) configured.add('exe-dev');
@@ -834,12 +728,6 @@ export const listConfiguredQuotaProviders = async () => {
     configured.add('codex');
   }
 
-  if (resolveGeminiCliAuth(auth)) {
-    configured.add('google');
-  }
-  if (resolveAntigravityAuth()) {
-    configured.add('antigravity');
-  }
 
   const zaiAuth = normalizeAuthEntry(getAuthEntry(auth, ['zai-coding-plan', 'zai', 'z.ai']));
   if (zaiAuth && ((zaiAuth as Record<string, unknown>).key || (zaiAuth as Record<string, unknown>).token)) {
@@ -930,21 +818,10 @@ export const listConfiguredQuotaProviders = async () => {
   return Array.from(configured);
 };
 
-const CODEX_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage';
 const codexErrorBodySchema = z.object({ error: z.object({ type: z.string() }) });
 
-const requestCodexUsage = (accessToken: string, accountId: string | null | undefined): Promise<Response> => fetch(CODEX_USAGE_URL, {
-  method: 'GET',
-  redirect: 'error',
-  headers: {
-    Authorization: `Bearer ${accessToken}`,
-    'Content-Type': 'application/json',
-    ...(accountId ? { 'ChatGPT-Account-Id': accountId } : {}),
-  },
-});
-
 // SAFETY: every field of the payload is read through toNumber/toTimestamp/asNonEmptyString, so a shape other than the one asserted yields no window rather than a wrong one.
-const codexUsagePayloadOf = (response: Response) => response.json() as Promise<OpenAiUsagePayload>;
+const codexUsagePayloadOf = (response: UsageResponse) => response.json() as Promise<OpenAiUsagePayload>;
 
 const codexUsageResult = (payload: OpenAiUsagePayload, accountLabel: string | null = null): ProviderResult => buildResult({
   providerId: 'codex',
@@ -963,10 +840,15 @@ const codexFailure = (error: string, configured = true): ProviderResult => build
   error,
 });
 
+const unlessTimedOut = (error: Error): null => {
+  if (isUsageTimeout(error)) throw error;
+  return null;
+};
+
 const codexUsageFromCli = async (): Promise<ProviderResult | null> => {
   const login = readCodexCliLogin();
   if (!login) return null;
-  const response = await requestCodexUsage(login.accessToken, login.accountId).catch(() => null);
+  const response = await requestCodexUsage(login.accessToken, login.accountId).catch(unlessTimedOut);
   if (!response?.ok) return null;
   const payload = await codexUsagePayloadOf(response);
   return codexUsageResult(payload, asNonEmptyString(payload?.email) ?? signInEmailOf(login.accessToken));
@@ -985,13 +867,14 @@ const fetchCodexQuota = async (): Promise<ProviderResult> => {
     if (response.ok) return codexUsageResult(await codexUsagePayloadOf(response));
     if (response.status !== 401) return codexFailure(`API error: ${response.status}`);
 
-    const body = codexErrorBodySchema.safeParse(await response.json().catch(() => null));
+    const body = codexErrorBodySchema.safeParse(await response.json().catch(unlessTimedOut));
     if (!body.success || body.data.error.type !== 'rejected_by_access_enforcement') {
       return codexFailure('Session expired \u2014 please re-authenticate with OpenAI');
     }
     return await codexUsageFromCli()
       ?? codexFailure('OpenAI shows usage for Sign in with ChatGPT only at chatgpt.com/settings/usage. The legacy Codex sign-ins show it here.');
   } catch (error) {
+    if (isUsageTimeout(error)) return codexFailure('Request timed out');
     return codexFailure(error instanceof Error ? error.message : 'Request failed');
   }
 };
@@ -1053,500 +936,13 @@ const codexUsageWindowsOf = (payload: OpenAiUsagePayload) => {
   return windows;
 };
 
-type GoogleAuthSource = {
-  sourceId: 'gemini' | 'antigravity';
-  sourceLabel: string;
-  accessToken?: string;
-  refreshToken?: string;
-  expires?: number;
-  projectId?: string;
-  email?: string;
-};
-
-const resolveGeminiCliAuth = (auth: AuthFile): GoogleAuthSource | null => {
-  const entry = normalizeAuthEntry(getAuthEntry(auth, ['google', 'google.oauth'])) as Record<string, unknown> | null;
-  const entryObject = asObject(entry);
-  if (!entryObject) {
-    return null;
-  }
-
-  const oauthObject = asObject(entryObject.oauth) ?? entryObject;
-  const accessToken = asNonEmptyString(oauthObject.access) ?? asNonEmptyString(oauthObject.token);
-  const refreshParts = parseGoogleRefreshToken(oauthObject.refresh);
-
-  if (!accessToken && !refreshParts.refreshToken) {
-    return null;
-  }
-
-  return {
-    sourceId: 'gemini',
-    sourceLabel: 'Gemini',
-    accessToken: accessToken ?? undefined,
-    refreshToken: refreshParts.refreshToken ?? undefined,
-    projectId: (refreshParts.projectId ?? refreshParts.managedProjectId) ?? undefined,
-    expires: toTimestamp(oauthObject.expires) ?? undefined,
-  };
-};
-
-const resolveAntigravityAuth = (): GoogleAuthSource | null => {
-  for (const filePath of ANTIGRAVITY_ACCOUNTS_PATHS) {
-    const data = readJsonFile(filePath);
-    const accounts = data?.accounts;
-    if (Array.isArray(accounts) && accounts.length > 0) {
-      const index = typeof (data as Record<string, unknown>)?.activeIndex === 'number'
-        ? (data as Record<string, unknown>).activeIndex as number
-        : 0;
-      const account = (accounts[index] as Record<string, unknown> | undefined) ?? (accounts[0] as Record<string, unknown> | undefined);
-      if (account?.refreshToken) {
-        const refreshParts = parseGoogleRefreshToken(account.refreshToken);
-        return {
-          sourceId: 'antigravity',
-          sourceLabel: 'Antigravity',
-          refreshToken: refreshParts.refreshToken ?? undefined,
-          projectId: asNonEmptyString(account.projectId)
-            ?? asNonEmptyString(account.managedProjectId)
-            ?? refreshParts.projectId
-            ?? refreshParts.managedProjectId
-            ?? undefined,
-          email: asNonEmptyString(account.email) ?? undefined,
-        };
-      }
-    }
-  }
-
-  return null;
-};
-
-const resolveGoogleAuthSources = (auth: AuthFile): GoogleAuthSource[] => {
-  const sources: GoogleAuthSource[] = [];
-
-  const geminiAuth = resolveGeminiCliAuth(auth);
-  if (geminiAuth) {
-    sources.push(geminiAuth);
-  }
-
-  return sources;
-};
-
-const fetchGoogleQuotaBuckets = async (accessToken: string, projectId?: string) => {
-  const body = projectId ? { project: projectId } : {};
-  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-  const timeout = controller ? setTimeout(() => controller.abort(), 15000) : null;
-  try {
-    const response = await fetch(`${GOOGLE_PRIMARY_ENDPOINT}/v1internal:retrieveUserQuota`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-      signal: controller?.signal,
-    });
-
-    if (!response.ok) {
-      return null;
-    }
-
-    return await response.json() as GoogleQuotaBucketsPayload;
-  } catch {
-    return null;
-  } finally {
-    if (timeout) {
-      clearTimeout(timeout);
-    }
-  }
-};
-
-const fetchGoogleModels = async (
-  accessToken: string,
-  projectId?: string,
-  endpoints: readonly string[] = GOOGLE_ENDPOINTS,
-  clientHeaders: Record<string, string> = GOOGLE_HEADERS,
-) => {
-  const body = projectId ? { project: projectId } : {};
-
-  for (const endpoint of endpoints) {
-    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-    const timeout = controller ? setTimeout(() => controller.abort(), 15000) : null;
-    try {
-      const response = await fetch(`${endpoint}/v1internal:fetchAvailableModels`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-          ...clientHeaders,
-        },
-        body: JSON.stringify(body),
-        signal: controller?.signal,
-      });
-
-      if (response.ok) {
-        return await response.json() as Record<string, unknown>;
-      }
-    } catch {
-      // fall through
-    } finally {
-      if (timeout) {
-        clearTimeout(timeout);
-      }
-    }
-  }
-
-  return null;
-};
-
-const fetchGoogleQuota = async (): Promise<ProviderResult> => {
-  const authSources = resolveGoogleAuthSources(await readOpenCodeCredentials());
-  if (!authSources.length) {
-    return buildResult({
-      providerId: 'google',
-      providerName: 'Google',
-      ok: false,
-      configured: false,
-      error: 'Not configured',
-    });
-  }
-
-  const models: Record<string, ProviderUsage> = {};
-  const sourceErrors: string[] = [];
-
-  for (const source of authSources) {
-    const now = Date.now();
-    let accessToken = source.accessToken;
-
-    if (!accessToken || (typeof source.expires === 'number' && source.expires <= now)) {
-      if (!source.refreshToken) {
-        sourceErrors.push(`${source.sourceLabel}: Missing refresh token`);
-        continue;
-      }
-      const result = await refreshGoogleAccessToken(source.refreshToken, 'gemini', { fallbackToAntigravity: true });
-      if (!result.ok) {
-        sourceErrors.push(`${source.sourceLabel}: Failed to refresh OAuth token`);
-        continue;
-      }
-      accessToken = result.accessToken;
-    }
-
-    const projectId = source.projectId ?? DEFAULT_PROJECT_ID;
-    let mergedAnyModel = false;
-
-    if (source.sourceId === 'gemini') {
-      const quotaPayload = await fetchGoogleQuotaBuckets(accessToken, projectId);
-      const buckets = Array.isArray(quotaPayload?.buckets) ? quotaPayload.buckets : [];
-
-      for (const bucket of buckets) {
-        const modelId = asNonEmptyString(bucket.modelId);
-        if (!modelId) {
-          continue;
-        }
-
-        const scopedName = modelId.startsWith(`${source.sourceId}/`)
-          ? modelId
-          : `${source.sourceId}/${modelId}`;
-
-        const remainingFraction = toNumber(bucket.remainingFraction);
-        const remainingPercent = remainingFraction !== null
-          ? Math.round(remainingFraction * 100)
-          : null;
-        const usedPercent = remainingPercent !== null ? Math.max(0, 100 - remainingPercent) : null;
-        const resetAt = toTimestamp(bucket.resetTime);
-        const window = resolveGoogleWindow(source.sourceId, resetAt);
-
-        models[scopedName] = {
-          windows: {
-            [window.label]: toUsageWindow({
-              usedPercent,
-              windowSeconds: window.seconds,
-              resetAt,
-            }),
-          },
-        };
-        mergedAnyModel = true;
-      }
-    }
-
-    const payload = await fetchGoogleModels(accessToken, projectId);
-    if (payload && typeof payload === 'object') {
-      const payloadModels = (payload as GoogleModelsPayload).models ?? {};
-      for (const [modelName, modelData] of Object.entries(payloadModels)) {
-        const scopedName = modelName.startsWith(`${source.sourceId}/`)
-          ? modelName
-          : `${source.sourceId}/${modelName}`;
-        const quotaInfo = modelData?.quotaInfo;
-        const remainingFraction = quotaInfo?.remainingFraction;
-        const remainingPercent = typeof remainingFraction === 'number'
-          ? Math.round(remainingFraction * 100)
-          : null;
-        const usedPercent = remainingPercent !== null ? Math.max(0, 100 - remainingPercent) : null;
-        const resetAt = quotaInfo?.resetTime
-          ? new Date(quotaInfo.resetTime).getTime()
-          : null;
-        const window = resolveGoogleWindow(source.sourceId, resetAt);
-        models[scopedName] = {
-          windows: {
-            [window.label]: toUsageWindow({
-              usedPercent,
-              windowSeconds: window.seconds,
-              resetAt,
-            }),
-          },
-        };
-        mergedAnyModel = true;
-      }
-    }
-
-    if (!mergedAnyModel) {
-      sourceErrors.push(`${source.sourceLabel}: Failed to fetch models`);
-    }
-  }
-
-  if (!Object.keys(models).length) {
-    return buildResult({
-      providerId: 'google',
-      providerName: 'Google',
-      ok: false,
-      configured: true,
-      error: sourceErrors[0] ?? 'Failed to fetch models',
-    });
-  }
-
-  return buildResult({
-    providerId: 'google',
-    providerName: 'Google',
-    ok: true,
-    configured: true,
-    usage: {
-      windows: {},
-      models: Object.keys(models).length ? models : undefined,
-    },
-  });
-};
-
-type QuotaSummaryBucketPayload = {
-  bucketId?: string;
-  window?: string;
-  remainingFraction?: number;
-  resetTime?: string;
-  displayName?: string;
-};
-
-type QuotaSummaryGroupPayload = {
-  displayName?: string;
-  buckets?: QuotaSummaryBucketPayload[];
-};
-
-type QuotaSummaryPayload = {
-  groups?: QuotaSummaryGroupPayload[];
-};
-
-const fetchAntigravityQuotaSummary = async (accessToken: string, projectId?: string): Promise<QuotaSummaryPayload | null> => {
-  const body = projectId ? { project: projectId } : {};
-
-  for (const endpoint of ANTIGRAVITY_ENDPOINTS) {
-    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-    const timeout = controller ? setTimeout(() => controller.abort(), 15000) : null;
-    try {
-      const response = await fetch(`${endpoint}/v1internal:retrieveUserQuotaSummary`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-          ...antigravityHeaders(),
-        },
-        body: JSON.stringify(body),
-        signal: controller?.signal,
-      });
-
-      if (response.ok) {
-        return await response.json() as QuotaSummaryPayload;
-      }
-    } catch {
-      // fall through
-    } finally {
-      if (timeout) {
-        clearTimeout(timeout);
-      }
-    }
-  }
-
-  return null;
-};
-
-const fetchAntigravityQuota = async (): Promise<ProviderResult> => {
-  const auth = resolveAntigravityAuth();
-  if (!auth || !auth.refreshToken) {
-    return buildResult({
-      providerId: 'antigravity',
-      providerName: 'Antigravity',
-      ok: false,
-      configured: false,
-      error: 'Not configured',
-    });
-  }
-
-  const result = await refreshGoogleAccessToken(auth.refreshToken, 'antigravity');
-  const accessToken = result.ok ? result.accessToken : null;
-  if (!accessToken) {
-    return buildResult({
-      providerId: 'antigravity',
-      providerName: 'Antigravity',
-      ok: false,
-      configured: true,
-      error: 'Failed to refresh Antigravity token',
-    });
-  }
-
-  const projectId = auth.projectId ?? DEFAULT_PROJECT_ID;
-
-  const [summaryPayload, rawModelsPayload] = await Promise.all([
-    fetchAntigravityQuotaSummary(accessToken, projectId),
-    fetchGoogleModels(accessToken, projectId, ANTIGRAVITY_ENDPOINTS, antigravityHeaders()),
-  ]);
-
-  warnIfGeminiGroupMissing(summaryPayload);
-
-  const modelGroupWindows: Array<{
-    groupType: 'gemini' | '3p';
-    windows: Record<string, UsageWindow>;
-    bucket5h?: { remainingFraction: number };
-    bucketWeekly?: { remainingFraction: number };
-  }> = [];
-
-  const groups = summaryPayload?.groups ?? [];
-  for (const group of groups) {
-    const groupName = (group.displayName ?? '').toLowerCase();
-    const is3p = groupName.includes('claude') || groupName.includes('gpt') || groupName.includes('3p');
-    const groupType: 'gemini' | '3p' = is3p ? '3p' : 'gemini';
-
-    const windows: Record<string, UsageWindow> = {};
-    let bucket5h: { remainingFraction: number } | undefined;
-    let bucketWeekly: { remainingFraction: number } | undefined;
-
-    for (const b of group.buckets ?? []) {
-      const remainingFraction = toNumber(b.remainingFraction);
-      const remainingPercent = remainingFraction !== null ? Math.round(remainingFraction * 100) : null;
-      const usedPercent = remainingPercent !== null ? Math.max(0, 100 - remainingPercent) : null;
-      const resetAt = toTimestamp(b.resetTime);
-      const windowStr = (b.window ?? b.bucketId ?? '').toLowerCase();
-
-      let label = '5h';
-      let seconds = GOOGLE_FIVE_HOUR_WINDOW_SECONDS;
-
-      if (windowStr.includes('week') || windowStr.includes('7d')) {
-        label = 'weekly';
-        seconds = GOOGLE_WEEKLY_WINDOW_SECONDS;
-        bucketWeekly = { remainingFraction: remainingFraction ?? 1 };
-      } else if (windowStr.includes('day') || windowStr.includes('daily')) {
-        label = 'daily';
-        seconds = GOOGLE_DAILY_WINDOW_SECONDS;
-      } else {
-        label = '5h';
-        seconds = GOOGLE_FIVE_HOUR_WINDOW_SECONDS;
-        bucket5h = { remainingFraction: remainingFraction ?? 1 };
-      }
-
-      windows[label] = toUsageWindow({
-        usedPercent,
-        windowSeconds: seconds,
-        resetAt,
-      });
-    }
-
-    modelGroupWindows.push({
-      groupType,
-      windows,
-      bucket5h,
-      bucketWeekly,
-    });
-  }
-
-  const models: Record<string, ProviderUsage> = {};
-  const rawModels = (rawModelsPayload as GoogleModelsPayload)?.models ?? {};
-
-  for (const [modelName, modelData] of Object.entries(rawModels)) {
-    const name = asNonEmptyString(modelName);
-    if (!name) continue;
-
-    const lowerName = name.toLowerCase();
-    const is3p = lowerName.includes('claude') || lowerName.includes('gpt');
-    const matchedGroup = modelGroupWindows.find((g) => is3p ? g.groupType === '3p' : g.groupType === 'gemini');
-
-    if (matchedGroup && Object.keys(matchedGroup.windows).length > 0) {
-      const isWeeklyConstrained = matchedGroup.bucketWeekly
-        && (matchedGroup.bucketWeekly.remainingFraction <= 0.001
-          || (matchedGroup.bucket5h && matchedGroup.bucketWeekly.remainingFraction < matchedGroup.bucket5h.remainingFraction));
-
-      const reorderedWindows: Record<string, UsageWindow> = {};
-      if (isWeeklyConstrained && matchedGroup.windows.weekly) {
-        reorderedWindows.weekly = matchedGroup.windows.weekly;
-        if (matchedGroup.windows['5h']) {
-          reorderedWindows['5h'] = matchedGroup.windows['5h'];
-        }
-      } else {
-        if (matchedGroup.windows['5h']) {
-          reorderedWindows['5h'] = matchedGroup.windows['5h'];
-        }
-        if (matchedGroup.windows.weekly) {
-          reorderedWindows.weekly = matchedGroup.windows.weekly;
-        }
-      }
-
-      for (const [wLabel, wData] of Object.entries(matchedGroup.windows)) {
-        if (!reorderedWindows[wLabel]) {
-          reorderedWindows[wLabel] = wData;
-        }
-      }
-
-      models[name] = { windows: reorderedWindows };
-    } else {
-      const quotaInfo = modelData?.quotaInfo;
-      const remainingFraction = quotaInfo?.remainingFraction;
-      const remainingPercent = typeof remainingFraction === 'number' ? Math.round(remainingFraction * 100) : null;
-      const usedPercent = remainingPercent !== null ? Math.max(0, 100 - remainingPercent) : null;
-      const resetAt = quotaInfo?.resetTime ? new Date(quotaInfo.resetTime).getTime() : null;
-      const window = resolveGoogleWindow('antigravity', resetAt);
-
-      models[name] = {
-        windows: {
-          [window.label]: toUsageWindow({
-            usedPercent,
-            windowSeconds: window.seconds,
-            resetAt,
-          }),
-        },
-      };
-    }
-  }
-
-  if (!Object.keys(models).length) {
-    return buildResult({
-      providerId: 'antigravity',
-      providerName: 'Antigravity',
-      ok: false,
-      configured: true,
-      error: 'Failed to fetch Antigravity quota',
-    });
-  }
-
-  return buildResult({
-    providerId: 'antigravity',
-    providerName: 'Antigravity',
-    ok: true,
-    configured: true,
-    usage: {
-      windows: {},
-      models: Object.keys(models).length ? models : undefined,
-    },
-  });
-};
-
 const CLAUDE_DEFAULT_COOLDOWN_MS = 5 * 60 * 1000;
 const CLAUDE_MAX_COOLDOWN_MS = 60 * 60 * 1000;
 let claudeCredentialFingerprint: string | null = null;
 let claudeCachedUsage: ProviderUsage | null = null;
 let claudeCooldownUntil = 0;
 
-const claudeCooldownFromResponse = (response: Response): number => {
+const claudeCooldownFromResponse = (response: UsageResponse): number => {
   const raw = response.headers.get('retry-after');
   const seconds = raw ? Number(raw) : Number.NaN;
   if (Number.isFinite(seconds) && seconds >= 0) {
@@ -1681,7 +1077,7 @@ const fetchClaudeQuota = async (): Promise<ProviderResult> => {
   if (Date.now() < claudeCooldownUntil) return buildClaudeRateLimitResult();
 
   try {
-    const response = await fetch('https://api.anthropic.com/api/oauth/usage', {
+    const response = await requestUsageWithDeadline('https://api.anthropic.com/api/oauth/usage', {
       method: 'GET',
       headers: {
         Authorization: `Bearer ${accessToken}`,
@@ -1735,12 +1131,13 @@ const fetchClaudeQuota = async (): Promise<ProviderResult> => {
       usage,
     });
   } catch (error) {
+    const timedOut = isUsageTimeout(error);
     return buildResult({
       providerId: 'claude',
       providerName: 'Claude',
       ok: false,
       configured: true,
-      error: error instanceof Error ? error.message : 'Request failed',
+      error: timedOut ? 'Request timed out' : (error instanceof Error ? error.message : 'Request failed'),
     });
   }
 };
@@ -1837,10 +1234,8 @@ const buildCopilotWindows = (payload: CopilotUserPayload) => {
       ? null
       : `${formatCopilotCredits(used)} / ${formatCopilotCredits(entitlement)} used`;
     windows[label] = toUsageWindow({
-      usedPercent,
-      windowSeconds: null,
-      resetAt,
-      valueLabel,
+      usedPercent, windowSeconds: null, resetAt, valueLabel,
+      credits: used === null || entitlement === null ? undefined : { used, limit: entitlement },
     });
   };
 
@@ -2577,6 +1972,8 @@ const isOpenRouterPeriod = (value: unknown): value is OpenRouterPeriod => (
   typeof value === 'string' && Object.prototype.hasOwnProperty.call(PERIOD_SECONDS, value)
 );
 
+const openRouterSpendWindow = (spent: number | null) => toUsageWindow({ usedPercent: null, windowSeconds: null, resetAt: null, value: { kind: 'spend', spent, limit: null } });
+
 const OPENROUTER_API_BASE = 'https://openrouter.ai/api/v1';
 
 const resolveOpenRouterConfigBase = (): string | null => {
@@ -2657,47 +2054,27 @@ const fetchOpenRouterQuota = async (): Promise<ProviderResult> => {
       });
     }
 
-    const limit = toNumber(data.limit);
-    const limitRemaining = toNumber(data.limit_remaining);
-    if (limit !== null && limitRemaining === null) {
-      return buildResult({
-        providerId: 'openrouter',
-        providerName: 'OpenRouter',
-        ok: false,
-        configured: true,
-        error: 'No quota data in response',
-      });
-    }
+    const toAmount = (value: unknown) => (String(value).trim() === '' ? null : toNumber(value));
+    const toSpendAmount = (value: unknown) => {
+      const amount = toAmount(value);
+      return amount !== null && amount >= 0 ? amount : null;
+    };
+    const limit = toAmount(data.limit);
+    const limitRemaining = toAmount(data.limit_remaining);
+    const usageMonthly = toSpendAmount(data.usage_monthly);
+    const byokMonthly = toSpendAmount(data.byok_usage_monthly);
 
-    const usageMonthly = toNumber(data.usage_monthly);
-    if (limit === null && usageMonthly === null) {
-      return buildResult({
-        providerId: 'openrouter',
-        providerName: 'OpenRouter',
-        ok: false,
-        configured: true,
-        error: 'No quota data in response',
-      });
+    if ((limit === null || limitRemaining === null) && usageMonthly === null && byokMonthly === null) {
+      return buildResult({ providerId: 'openrouter', providerName: 'OpenRouter', ok: false, configured: true, error: 'No quota data in response' });
     }
 
     const nowMs = Date.now();
-    let windowKey: string;
-    let windowSeconds: number | null;
-    let resetAt: number | null;
-    let usedPercent: number | null;
-    let valueLabel: string;
+    const windows: Record<string, ReturnType<typeof toUsageWindow>> = {};
 
-    if (limit === null) {
-      windowKey = 'monthly';
-      windowSeconds = PERIOD_SECONDS.monthly;
-      resetAt = openRouterResetAt('monthly', nowMs);
-      usedPercent = null;
-      valueLabel = `$${formatMoney(usageMonthly)} spent`;
-    } else {
-      const used = Math.max(0, limit - (limitRemaining ?? 0));
-      const percent = limit > 0 ? (used / limit) * 100 : null;
-      usedPercent = percent === null ? null : Math.min(100, percent);
-      valueLabel = `$${formatMoney(used)} / $${formatMoney(limit)}`;
+    if (limit !== null && (limitRemaining !== null || limit > 0)) {
+      let windowKey: string;
+      let windowSeconds: number | null;
+      let resetAt: number | null;
 
       if (isOpenRouterPeriod(data.limit_reset)) {
         windowKey = data.limit_reset;
@@ -2708,23 +2085,33 @@ const fetchOpenRouterQuota = async (): Promise<ProviderResult> => {
         windowSeconds = null;
         resetAt = null;
       }
+
+      const used = limitRemaining === null ? null : Math.max(0, limit - limitRemaining);
+      const percent = used !== null && limit > 0 ? Math.min(100, (used / limit) * 100) : null;
+      windows[windowKey] = toUsageWindow(used === null
+        ? { usedPercent: null, windowSeconds, resetAt, value: { kind: 'spend', spent: null, limit } }
+        : { usedPercent: percent, windowSeconds, resetAt, valueLabel: `$${formatMoney(used)} / $${formatMoney(limit)}` });
     }
+
+    windows.monthly_total = toUsageWindow({
+      usedPercent: null,
+      windowSeconds: PERIOD_SECONDS.monthly,
+      resetAt: openRouterResetAt('monthly', nowMs),
+      value: {
+        kind: 'spend',
+        spent: usageMonthly !== null && byokMonthly !== null ? usageMonthly + byokMonthly : null,
+        limit: null,
+      },
+    });
+    if (usageMonthly !== 0) windows.monthly_credits = openRouterSpendWindow(usageMonthly);
+    if (byokMonthly !== 0) windows.monthly_byok = openRouterSpendWindow(byokMonthly);
 
     return buildResult({
       providerId: 'openrouter',
       providerName: 'OpenRouter',
       ok: true,
       configured: true,
-      usage: {
-        windows: {
-          [windowKey]: toUsageWindow({
-            usedPercent,
-            windowSeconds,
-            resetAt,
-            valueLabel,
-          }),
-        },
-      },
+      usage: { windows },
     });
   } catch (error) {
     const isTimeout = error instanceof DOMException && (error.name === 'TimeoutError' || (error.name === 'AbortError' && timeoutSignal.aborted));
@@ -2884,6 +2271,7 @@ const fetchZaiQuota = async (): Promise<ProviderResult> => {
         windowSeconds,
         resetAt,
         valueLabel: formatZaiCreditValueLabel(limit),
+        credits: zaiCreditAmounts(limit),
       });
     }
 
@@ -3034,7 +2422,8 @@ const fetchZhipuaiCodingPlanQuota = async (): Promise<ProviderResult> => {
         usedPercent: resolveZhipuaiUsedPercent(limit),
         windowSeconds,
         resetAt,
-        valueLabel: formatZhipuaiCreditValueLabel(limit),
+        valueLabel: formatZaiCreditValueLabel(limit),
+        credits: zaiCreditAmounts(limit),
       });
     }
 
@@ -4156,20 +3545,21 @@ const fetchOpenCodeGoQuota = async (): Promise<ProviderResult> => {
   try {
     deleteLegacyOpenCodeGoCredential();
     const auth = await readOpenCodeCredentials();
-    const consoleCredential = openCodeGoConsoleCredential(auth);
-    const apiKey = openCodeGoApiKey(auth);
+    const consoleCredential = openCodeGoConsoleCredential(auth) ?? openCodeGoKey(auth, 'opencode');
+    const apiKey = openCodeGoKey(auth, 'opencode-go');
     let consoleFailure: Error | null = null;
     if (consoleCredential) {
       try {
-        return buildResult({ providerId, providerName: 'OpenCode Go', ok: true, configured: true, usage: { windows: await fetchOpenCodeGoUsage(consoleCredential) } });
+        return buildResult({ providerId, providerName: 'OpenCode Go', ok: true, configured: true, usage: { windows: await fetchOpenCodeGoUsage(consoleCredential) }, accountLabel: consoleCredential.label });
       } catch (consoleError) {
-        if (!apiKey) throw consoleError;
-        consoleFailure = consoleError instanceof Error ? consoleError : new Error('Request failed');
+        const consoleKey = 'apiKey' in consoleCredential;
+        if (!apiKey || (consoleKey && !isOpenCodeGoKeyRefusal(consoleError))) throw consoleError;
+        if (!consoleKey) consoleFailure = consoleError instanceof Error ? consoleError : new Error('Request failed');
       }
     }
     if (!apiKey) return buildResult({ providerId, providerName: 'OpenCode Go', ok: false, configured: false, error: 'Not configured' });
     try {
-      return buildResult({ providerId, providerName: 'OpenCode Go', ok: true, configured: true, usage: { windows: await fetchOpenCodeGoUsage(apiKey) } });
+      return buildResult({ providerId, providerName: 'OpenCode Go', ok: true, configured: true, usage: { windows: await fetchOpenCodeGoUsage(apiKey) }, accountLabel: apiKey.label });
     } catch (keyError) {
       throw consoleFailure && keyError instanceof Error && keyError.message === OPENCODE_GO_KEY_EXPIRED ? consoleFailure : keyError;
     }
@@ -4260,10 +3650,6 @@ const fetchQuotaForProviderUncoalesced = async (providerId: string): Promise<Pro
       return fetchCopilotQuota();
     case 'github-copilot-addon':
       return fetchCopilotAddonQuota();
-    case 'google':
-      return fetchGoogleQuota();
-    case 'antigravity':
-      return fetchAntigravityQuota();
     case 'kimi-for-coding':
       return fetchKimiQuota();
     case 'nano-gpt':

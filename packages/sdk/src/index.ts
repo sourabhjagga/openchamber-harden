@@ -1,7 +1,7 @@
 export { OPENCHAMBER_SDK_API_VERSION, OPENCHAMBER_SDK_CHANNEL, OPENCHAMBER_SDK_MANIFEST_API_VERSIONS } from './api-version.ts';
 export { GUEST_SCROLLBAR_CSS, GUEST_SCROLLBAR_SCRIPT } from './scrollbar-style.ts';
 export { guestFramePolicy } from './frame-policy.ts';
-export type { GuestLoadState, GuestProject, GuestWorktree, GuestSessionActivity, GuestSessionRecord, GuestSessionLink, GuestDirectoryCoverage, GuestProjectsSnapshot, GuestWorktreesSnapshot, GuestSessionsSnapshot, GuestWorkspaceSnapshot, GuestWorkspaceQuery, GuestWorkspaceSubscription, GuestWorkspaceUpdate, GuestStorageRequest, GuestStorageResult, GuestStorageOptions, GuestStorageScope, GuestSessionWorktree } from './workspace.ts';
+export type { GuestLoadState, GuestProject, GuestWorktree, GuestSessionActivity, GuestSessionRecord, GuestSessionLink, GuestSessionContext, GuestSessionTokenTotals, GuestDirectoryCoverage, GuestProjectsSnapshot, GuestWorktreesSnapshot, GuestSessionsSnapshot, GuestWorkspaceSnapshot, GuestWorkspaceQuery, GuestWorkspaceSubscription, GuestWorkspaceUpdate, GuestStorageRequest, GuestStorageResult, GuestStorageOptions, GuestStorageScope, GuestSessionWorktree } from './workspace.ts';
 export { GUEST_STORAGE_KEY_MAX, GUEST_STORAGE_KEYS_MAX, GUEST_STORAGE_VALUE_BYTES, GUEST_STORAGE_TOTAL_BYTES, GUEST_DEVICE_STORAGE_TOTAL_BYTES } from './workspace.ts';
 export type {
   GuestRunningShell,
@@ -165,9 +165,8 @@ export {
   GUEST_LINK_ACTIONS,
   GUEST_LINK_KEY,
   GUEST_LINK_KEYS_MAX,
-  buildLinkUrl,
-  isBuildableLinkTemplate,
 } from './manifest.ts';
+export { buildLinkUrl, isBuildableLinkTemplate, isWildcardLinkOrigin, linkOriginMatches, linkOriginValidator } from './links.ts';
 export {
   GUEST_SESSION_EVENT_TYPES,
   SESSION_EVENT_ERROR_MAX,
@@ -401,12 +400,12 @@ export {
   isGuestPopoverRequest,
 } from './popover.ts';
 export type { GuestPopoverAnchor, GuestPopoverClosedEvent, GuestPopoverContext, GuestPopoverRequest, GuestPopoverSide } from './popover.ts';
+export { GUEST_COMMIT_SHA, GUEST_WALKTHROUGH_BASE_MAX, isGuestCommitSha } from './navigation.ts';
+export type { OpenCommitRequest, OpenWalkthroughRequest } from './navigation.ts';
 export {
   clampAttachRequest,
   clampBadgeCount,
   clampFrameHeight,
-  isGuestCommitSha,
-  GUEST_COMMIT_SHA,
   clampPromptRequest,
   clampStartSessionRequest,
   guestFileScope,
@@ -449,11 +448,11 @@ export type {
   GuestBadgeMessage,
   GuestResizeMessage,
   GuestOpenCommitMessage,
+  GuestOpenWalkthroughMessage,
   GuestStatusControlsMessage,
   GuestPopoverAnchorMessage,
   GuestPopoverCloseMessage,
   GuestPopoverOpenMessage,
-  OpenCommitRequest,
   ResizeRequest,
   GuestItem,
   GuestItemRole,
@@ -725,7 +724,7 @@ export type {
   BrowserTypeParameters,
   BrowserViewportMode,
   BrowserViewportSummary,
-  SourceControlChangeRequestHead,
+  SourceControlChangeRequestContext, SourceControlChangeRequestHead,
   SourceControlChangeRequestSource,
   SourceControlForge,
   SourceControlForgeUser,
@@ -749,10 +748,10 @@ export type {
   SourceControlProviderResult,
   SourceControlProviderSession,
   SourceControlProviderUser,
-  SourceControlReconcileData,
+  SourceControlReconcileData, SourceControlReviewerState,
   SourceControlResourceMethod,
   SourceControlVerifyData,
-  SourceControlStatusData,
+  SourceControlStatusData, SourceControlReviewState, SourceControlReviewSummary,
   SourceControlStringForgeUser,
   GuestNotification,
   GuestNotificationKind,

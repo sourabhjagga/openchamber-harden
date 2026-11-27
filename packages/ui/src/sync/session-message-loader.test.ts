@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import type { MessagePage } from "@/lib/opencode/client"
 import { projectInboxMessage, type InboxMessageItem } from "@/lib/opencode/projection"
-import type { Message, Part, Session, UserMessage } from "@/lib/opencode/model"
+import { isWaitingSteer, type Message, type Part, type Session, type UserMessage } from "@/lib/opencode/model"
 import { ChildStoreManager } from "./child-store"
 import { SessionMessageLoader, type SessionMessagePageSource } from "./session-message-loader"
 import { olderMessagesCursor } from "@/lib/opencode/messageCursor"
@@ -26,7 +26,8 @@ const deferred = <T>() => {
 }
 
 const response = (items: ReturnType<typeof createRecord>[], cursor?: string): MessagePage => ({
-  items,
+  // Fixtures read oldest first; OpenCode's default message page is newest first.
+  items: [...items].reverse(),
   cursor: cursor ? { next: cursor } : {},
 })
 
@@ -64,6 +65,102 @@ const createLoader = (
 }
 
 describe("SessionMessageLoader", () => {
+  test("preserves server order through clock skew, older pages, refresh and optimistic sends", async () => {
+    const target = { directory: "/clock-skew", sessionID: "session-clock-skew" }
+    const older = createRecord(target.sessionID, "msg_ffffOlder", 50_000)
+    const first = createRecord(target.sessionID, "msg_ffffFirst", 100)
+    const skewed = createRecord(target.sessionID, "msg_ffffReply", 40_000, "assistant")
+    const second = createRecord(target.sessionID, "msg_0000Second", 200)
+    const tail = [...Array.from({ length: 8 }, (_, i) => createRecord(target.sessionID, `padding-${i}`, 60 + i)), first, skewed, second]
+    const tailIDs = tail.map((record) => record.info.id)
+    const { childStores, loader } = createLoader(async ({ cursor }) => cursor
+      ? response([older])
+      : response(tail, "older"))
+    const ids = () => childStores.getChild(target.directory)?.getState().message[target.sessionID].map((message) => message.id)
+
+    await loader.ensure(target)
+    expect(ids()).toEqual(tailIDs)
+    const optimistic = createRecord(target.sessionID, "msg_0000Optimistic", 300)
+    loader.optimisticAdd({ ...target, message: optimistic.info, parts: optimistic.parts })
+    await loader.loadOlder(target)
+    expect(ids()).toEqual([older.info.id, ...tailIDs, optimistic.info.id])
+    await loader.refreshTail(target, 20)
+    expect(ids()).toEqual([older.info.id, ...tailIDs, optimistic.info.id])
+    loader.dispose()
+    childStores.disposeAll()
+  })
+
+  test("refresh joins confirmed history when a pending inbox item was delivered while away", async () => {
+    const target = { directory: "/inbox-gap", sessionID: "session-inbox-gap" }
+    const history = createRecord(target.sessionID, "history", 1)
+    const pending = { ...createRecord(target.sessionID, "queued", 2), info: { id: "queued", sessionID: target.sessionID, role: "synthetic", text: "hello", pending: true, time: { created: 2 } } satisfies Message }
+    const delivered = { ...pending, info: { ...pending.info, pending: undefined, time: { created: 4 } } }
+    const fetched = createRecord(target.sessionID, "fetched", 5, "assistant")
+    const live = createRecord(target.sessionID, "live", 6)
+    const refresh = deferred<MessagePage>()
+    let calls = 0
+    const { childStores, loader } = createLoader(async ({ cursor }) => {
+      calls += 1
+      if (calls === 1) return response([history, pending])
+      if (cursor) return response([history])
+      return refresh.promise
+    })
+    await loader.ensure(target)
+    const loading = loader.refreshTail(target, 2)
+    const store = childStores.getChild(target.directory)!
+    store.setState({ message: { [target.sessionID]: [...store.getState().message[target.sessionID], live.info] } })
+    refresh.resolve(response([delivered, fetched], "history-cursor"))
+    await loading
+    expect(store.getState().message[target.sessionID].map((message) => message.id)).toEqual(["history", "queued", "fetched", "live"])
+    loader.dispose()
+    childStores.disposeAll()
+  })
+
+  for (const cursor of [undefined, "older"]) {
+    test(`a ${cursor ? "partial" : "complete"} refresh confirms an inbox prompt without moving it past its live reply`, async () => {
+      const target = { directory: "/first-delivery", sessionID: `session-first-delivery-${cursor ?? "complete"}` }
+      const prompt = createRecord(target.sessionID, "prompt", 2)
+      const queued = projectInboxMessage({ type: "user", payload: { text: "hello" } }, {
+        sessionID: target.sessionID, messageID: prompt.info.id, created: 1,
+      })!
+      const reply = createRecord(target.sessionID, "reply", 3, "assistant")
+      const older = cursor ? [createRecord(target.sessionID, "older-reply", 0, "assistant").info] : []
+      const page = deferred<MessagePage>()
+      const { childStores, loader } = createLoader(() => page.promise)
+      try {
+        const store = childStores.ensureChild(target.directory, { bootstrap: false })
+        store.setState({ message: { [target.sessionID]: [...older, queued.info] } })
+        const refreshing = loader.refreshTail(target, 100)
+        store.setState({ message: { [target.sessionID]: [...older, queued.info, reply.info] }, part: { reply: reply.parts } })
+        page.resolve(response([prompt], cursor))
+        await refreshing
+
+        expect(store.getState().message[target.sessionID]).toEqual([...older, prompt.info, reply.info])
+      } finally {
+        loader.dispose()
+        childStores.disposeAll()
+      }
+    })
+  }
+
+  test("initial history goes above a prompt sent while it loaded, even when an event already placed a fetched row", async () => {
+    const target = { directory: "/initial-optimistic", sessionID: "session-initial-optimistic" }
+    const history = [createRecord(target.sessionID, "first", 1), createRecord(target.sessionID, "reply", 2, "assistant")]
+    const pending = deferred<MessagePage>()
+    const { childStores, loader } = createLoader(() => pending.promise)
+    const loading = loader.ensure(target)
+    const prompt = createRecord(target.sessionID, "prompt", 3)
+    loader.optimisticAdd({ ...target, message: prompt.info, parts: prompt.parts })
+    const store = childStores.getChild(target.directory)!
+    // A delayed update for a row the history read also returns.
+    store.setState({ message: { [target.sessionID]: [...store.getState().message[target.sessionID], history[1].info] } })
+    pending.resolve(response(history))
+    await loading
+    expect(messageIDs(childStores, target)).toEqual(["first", "reply", "prompt"])
+    loader.dispose()
+    childStores.disposeAll()
+  })
+
   test("loads copied history when a fork notice arrived before navigation", async () => {
     const target = { directory: "/fork-repo", sessionID: "session-fork" }
     const prompt = createRecord(target.sessionID, "prompt", 1)
@@ -98,6 +195,24 @@ describe("SessionMessageLoader", () => {
     await loader.ensure(target, { reason: "reactive" })
     expect(calls).toBe(1)
     expect(loader.getSnapshot(target).status).toBe("ready")
+    loader.dispose()
+    childStores.disposeAll()
+  })
+
+  test("initial history completes parts received while the request was pending", async () => {
+    const pending = deferred<MessagePage>()
+    const { childStores, loader } = createLoader(() => pending.promise)
+    const target = { directory: "/initial-parts", sessionID: "session-initial-parts" }
+    const record = createRecord(target.sessionID, "reply", 100, "assistant")
+    const loading = loader.ensure(target)
+    const store = childStores.getChild(target.directory)!
+    store.setState({
+      message: { [target.sessionID]: [record.info] },
+      part: { [record.info.id]: [{ id: record.parts[0].id, messageID: record.info.id, sessionID: target.sessionID, type: "text", text: "hel" }] },
+    })
+    pending.resolve(response([record]))
+    await loading
+    expect(store.getState().part[record.info.id]).toEqual(record.parts)
     loader.dispose()
     childStores.disposeAll()
   })
@@ -289,8 +404,8 @@ describe("SessionMessageLoader", () => {
       const childStores = new ChildStoreManager()
       const sdk = {
         getSessionMessages: async (sessionID: string) => response([
-          createRecord(sessionID, "msg_000000000000Current", 200),
           createRecord(sessionID, "msg_ffffffffffffLegacy", 100),
+          createRecord(sessionID, "msg_000000000000Current", 200),
         ]),
       }
       const loader = new SessionMessageLoader(childStores, { sdk, runtimeKey })
@@ -820,6 +935,198 @@ describe("cached transcripts after a stream gap", () => {
     loader.dispose()
     childStores.disposeAll()
   })
+
+  // A prompt sent from this client long before the gap: OpenCode answered the
+  // send, and 400 records later the window no longer reaches it.
+  const sendThenOutgrowWindow = async (inbox: () => Promise<readonly InboxFixture[]>) => {
+    const target = { directory: "/repo", sessionID: "session-sent" }
+    const server = createHistoryServer(target.sessionID)
+    server.append(40, 4)
+    const { childStores, loader } = createLoader(server.getPage, inbox)
+    await loader.ensure(target)
+    const prompt = createRecord(target.sessionID, "msg_prompt", 50)
+    loader.optimisticAdd({ ...target, message: prompt.info, parts: prompt.parts })
+    loader.optimisticAdmit({ ...target, messageID: "msg_prompt" })
+    server.append(400, 10)
+    loader.markHistoryStale()
+    await loader.refreshTail(target, 30)
+    const ids = messageIDs(childStores, target)
+    loader.dispose()
+    childStores.disposeAll()
+    return { ids, window: server.records.slice(-(ids.length - 1)).map((record) => record.info.id) }
+  }
+
+  test("a delivered prompt does not return below a replacing window that no longer reaches it", async () => {
+    const { ids } = await sendThenOutgrowWindow(async () => [])
+    expect(ids).not.toContain("msg_prompt")
+  })
+
+  test("a prompt still queued in the inbox stays below a replacing window", async () => {
+    const { ids, window } = await sendThenOutgrowWindow(async () => [{
+      id: "msg_prompt", sessionID: "session-sent", time: { created: 50 }, delivery: "queue", type: "user", payload: { text: "hello" },
+    }])
+    expect(ids).toEqual([...window, "msg_prompt"])
+  })
+
+  test("a failed inbox read keeps the prompt, since it proves no delivery", async () => {
+    const { ids, window } = await sendThenOutgrowWindow(() => Promise.reject(new Error("inbox unavailable")))
+    expect(ids).toEqual([...window, "msg_prompt"])
+  })
+
+  test("loading older history keeps the shadow of a visible prompt whose echo was lost, so the tail still reconciles it", async () => {
+    const target = { directory: "/repo", sessionID: "session-lost-echo" }
+    const server = createHistoryServer(target.sessionID)
+    server.append(400, 10)
+    const { childStores, loader } = createLoader(server.getPage, async () => [])
+    await loader.ensure(target)
+    const prompt = createRecord(target.sessionID, "msg_prompt", 10_000)
+    loader.optimisticAdd({ ...target, message: prompt.info, parts: prompt.parts })
+    loader.optimisticAdmit({ ...target, messageID: "msg_prompt" })
+    server.records.push(createRecord(target.sessionID, "msg_prompt", 1_000))
+
+    await loader.loadOlder(target)
+    await loader.refreshTail(target, 30)
+
+    const messages = childStores.getChild(target.directory)?.getState().message[target.sessionID] ?? []
+    expect(messages.at(-1)).toMatchObject({ id: "msg_prompt", time: { created: 1_000 } })
+    loader.dispose()
+    childStores.disposeAll()
+  })
+
+  test("a replacing window decides by the read, not by clocks, and older history restores the skewed reply", async () => {
+    const target = { directory: "/repo", sessionID: "session-replace-skew" }
+    const server = createHistoryServer(target.sessionID)
+    server.append(40, 4)
+    // The cached tail is a reply stamped by a clock far ahead.
+    const skewed = server.records[39]
+    skewed.info = { ...skewed.info, time: { created: 1_000_000_000, completed: 1_000_000_000 } } as Message
+    let injectLive = false
+    const live = createRecord(target.sessionID, "msg_live", 5)
+    const { childStores, loader } = createLoader(async (request) => {
+      const page = await server.getPage(request)
+      if (injectLive && request.cursor === undefined) {
+        // A row whose clock runs behind arrives live while the window is read.
+        injectLive = false
+        server.records.push(live)
+        const store = childStores.getChild(target.directory)!
+        const current = store.getState()
+        store.setState({
+          message: { ...current.message, [target.sessionID]: [...current.message[target.sessionID], live.info] },
+          part: { ...current.part, [live.info.id]: live.parts },
+        })
+      }
+      return page
+    })
+    await loader.ensure(target)
+    server.append(400, 10)
+    loader.markHistoryStale()
+    injectLive = true
+    await loader.refreshTail(target, 30)
+
+    const ids = messageIDs(childStores, target)
+    expect(ids.includes(skewed.info.id)).toBe(false)
+    expect(ids.at(-1)).toBe(live.info.id)
+    expect(ids.slice(0, -1)).toEqual(server.records.slice(-ids.length, -1).map((record) => record.info.id))
+    expect(childStores.getChild(target.directory)?.getState().part[live.info.id]).toEqual(live.parts)
+
+    for (let reads = 0; !loader.getSnapshot(target).complete && reads < 20; reads += 1) await loader.loadOlder(target)
+    expect(messageIDs(childStores, target)).toEqual(server.records.map((record) => record.info.id))
+    loader.dispose()
+    childStores.disposeAll()
+  })
+
+  test("an older page goes above the window even when an event placed one of its rows at the tail", async () => {
+    const target = { directory: "/repo", sessionID: "session-older-anchor" }
+    const server = createHistoryServer(target.sessionID)
+    server.append(400, 10)
+    const { childStores, loader } = createLoader(server.getPage)
+    await loader.ensure(target, { reason: "navigation" })
+    const window = messageIDs(childStores, target)
+    // An update for a row behind the window arrives by event before its page is loaded.
+    const unloaded = server.records[server.records.length - window.length - 1]
+    const store = childStores.getChild(target.directory)!
+    const current = store.getState()
+    store.setState({ message: { ...current.message, [target.sessionID]: [...current.message[target.sessionID], unloaded.info] } })
+
+    await loader.loadOlder(target)
+    const ids = messageIDs(childStores, target)
+    expect(ids.slice(-window.length)).toEqual(window)
+    expect(ids.filter((id) => id === unloaded.info.id)).toHaveLength(1)
+    expect(ids).toEqual(server.records.slice(-ids.length).map((record) => record.info.id))
+    loader.dispose()
+    childStores.disposeAll()
+  })
+})
+
+describe("replacing windows and pending inbox items", () => {
+  test("a queued prompt delivered while the window is read stays with its reply", async () => {
+    const target = { directory: "/repo", sessionID: "session-replace-delivered" }
+    const server = createHistoryServer(target.sessionID)
+    server.append(40, 4)
+    let deliver = false
+    const { childStores, loader } = createLoader(async (request) => {
+      const page = await server.getPage(request)
+      if (deliver && request.cursor === undefined) {
+        // OpenCode delivers the prompt after this page was read and starts its reply.
+        deliver = false
+        const store = childStores.getChild(target.directory)!
+        const current = store.getState()
+        const messages = current.message[target.sessionID].filter((message) => message.id !== "queued")
+        const queued = current.message[target.sessionID].find((message) => message.id === "queued")!
+        store.setState({ message: { ...current.message, [target.sessionID]: [...messages, { ...queued, time: { created: 2_000 } }, createRecord(target.sessionID, "reply", 2_001, "assistant").info] } })
+      }
+      return page
+    })
+    await loader.ensure(target)
+    const store = childStores.getChild(target.directory)!
+    const queued = createRecord(target.sessionID, "queued", 1_000)
+    store.setState({
+      message: { ...store.getState().message, [target.sessionID]: [...store.getState().message[target.sessionID], queued.info] },
+      part: { ...store.getState().part, [queued.info.id]: queued.parts },
+    })
+    server.append(400, 10)
+    loader.markHistoryStale()
+    deliver = true
+    await loader.refreshTail(target, 30)
+
+    const ids = messageIDs(childStores, target)
+    expect(ids.slice(-2)).toEqual(["queued", "reply"])
+    expect(ids.slice(0, -2)).toEqual(server.records.slice(-(ids.length - 2)).map((record) => record.info.id))
+    expect(store.getState().part.queued).toEqual(queued.parts)
+    loader.dispose()
+    childStores.disposeAll()
+  })
+
+  test("an inbox item that history confirmed follows a replacing window like other history", async () => {
+    const target = { directory: "/repo", sessionID: "session-replace-seeded" }
+    const server = createHistoryServer(target.sessionID)
+    server.append(40, 4)
+    let inbox: InboxFixture[] = [{
+      id: "inbox_seeded",
+      sessionID: target.sessionID,
+      time: { created: 41 },
+      type: "user",
+      payload: { text: "steered", files: [], agents: [] },
+      delivery: "steer",
+    }]
+    const { childStores, loader } = createLoader(server.getPage, async () => inbox)
+    await loader.ensure(target, { reason: "navigation" })
+    expect(messageIDs(childStores, target).at(-1)).toBe("inbox_seeded")
+
+    // Delivered: it leaves the inbox and a history read returns it.
+    inbox = []
+    server.records.push(createRecord(target.sessionID, "inbox_seeded", 41))
+    await loader.refreshTail(target, 30)
+    server.append(400, 10)
+    loader.markHistoryStale()
+    await loader.refreshTail(target, 30)
+
+    const ids = messageIDs(childStores, target)
+    expect(ids).not.toContain("inbox_seeded")
+    expect(ids).toEqual(server.records.slice(-ids.length).map((record) => record.info.id))
+    loader.dispose()
+    childStores.disposeAll()
+  })
 })
 
 describe("cold history window", () => {
@@ -1135,6 +1442,69 @@ describe("SessionMessageLoader before OpenCode is ready", () => {
       childStores.disposeAll()
     })
 
+    test("a limited refresh leaves a trimmed, delivered prompt out of the tail", async () => {
+      const target = { directory: "/trim-delivered", sessionID: "session-trim-delivered" }
+      const server = createHistoryServer(target.sessionID)
+      const { childStores, loader } = createLoader(server.getPage, async () => [])
+      try {
+        await loader.ensure(target)
+        server.append(112, 2)
+        const first = server.records[0]
+        loader.optimisticAdd({ ...target, message: { ...first.info, time: { created: 0 } }, parts: first.parts })
+        const store = childStores.getChild(target.directory)!
+        store.setState({
+          message: { [target.sessionID]: server.records.map(({ info }) => info) },
+          part: Object.fromEntries(server.records.map(({ info, parts }) => [info.id, parts])),
+        })
+
+        expect(loader.trimHistory(target)).toBe(true)
+        expect(messageIDs(childStores, target)).not.toContain("msg_00000")
+        await loader.refreshTail(target, 100)
+
+        expect(loader.getSnapshot(target).status).toBe("ready")
+        expect(messageIDs(childStores, target).at(-1)).toBe("msg_00111")
+        expect(store.getState().part.msg_00000).toBeUndefined()
+      } finally {
+        loader.dispose()
+        childStores.disposeAll()
+      }
+    })
+
+    for (const enqueued of [false, true]) {
+      test(`a trim and a refresh keep a prompt ${enqueued ? "still in the inbox" : "not yet acknowledged"}`, async () => {
+        const target = { directory: "/trim-pending", sessionID: `session-trim-pending-${enqueued}` }
+        const server = createHistoryServer(target.sessionID)
+        const prompt = createRecord(target.sessionID, "msg_waiting", 0)
+        const pending: InboxFixture = {
+          id: prompt.info.id, sessionID: target.sessionID, type: "user", delivery: "queue",
+          time: { created: 1 }, payload: { text: "hello" },
+        }
+        const { childStores, loader } = createLoader(server.getPage, async () => failure(503, "inbox unavailable"))
+        try {
+          await loader.ensure(target)
+          loader.optimisticAdd({ ...target, message: prompt.info, parts: prompt.parts })
+          const queued = enqueued ? projectInboxMessage(pending, { sessionID: target.sessionID, messageID: pending.id, created: pending.time.created }) : null
+          server.append(112, 2)
+          const store = childStores.getChild(target.directory)!
+          store.setState({
+            message: { [target.sessionID]: [queued?.info ?? prompt.info, ...server.records.map(({ info }) => info)] },
+            part: { ...store.getState().part, msg_waiting: queued?.parts ?? prompt.parts },
+          })
+
+          expect(loader.trimHistory(target)).toBe(true)
+          expect(messageIDs(childStores, target)).toEqual(["msg_waiting", ...server.records.slice(-20).map(({ info }) => info.id)])
+          await loader.refreshTail(target, 100)
+
+          expect(loader.getSnapshot(target).status).toBe("ready")
+          expect(messageIDs(childStores, target).filter((id) => id === "msg_waiting")).toEqual(["msg_waiting"])
+          expect(store.getState().part.msg_waiting).toEqual(queued?.parts ?? prompt.parts)
+        } finally {
+          loader.dispose()
+          childStores.disposeAll()
+        }
+      })
+    }
+
     test("leaves a transcript within the cold window alone", async () => {
       const { childStores, loader, target, ids } = await openWith(10)
 
@@ -1192,6 +1562,59 @@ describe("SessionMessageLoader before OpenCode is ready", () => {
       expect(loader.getSnapshot(target).cursor).toBe(olderMessagesCursor("msg_0015_c"))
       loader.dispose()
       childStores.disposeAll()
+    })
+
+    // A prompt sent from this client, answered live, then ten turns later cut by the trim.
+    const sendThenTrim = async (inbox: readonly InboxFixture[]) => {
+      const records = conversation("session-a", 15)
+      let served = records.slice(0, 4)
+      const { childStores, loader } = createLoader(
+        async ({ cursor }) => cursor ? response(records.slice(6, 10)) : response(served, served.length > 4 ? "older" : undefined),
+        async () => inbox,
+      )
+      const target = { directory: `/repo-sent-${inbox.length}`, sessionID: "session-a" }
+      await loader.ensure(target, { reason: "navigation" })
+      const prompt = records[4]
+      loader.optimisticAdd({ ...target, message: prompt.info, parts: prompt.parts })
+      loader.optimisticAdmit({ ...target, messageID: prompt.info.id })
+      const store = childStores.getChild(target.directory)!
+      const live = records.slice(4).map((record) => ({ ...record, info: { ...record.info } }))
+      store.setState({
+        message: {
+          ...store.getState().message,
+          [target.sessionID]: [...records.slice(0, 4).map((record) => record.info), ...live.map((record) => record.info)],
+        },
+        part: { ...store.getState().part, ...Object.fromEntries(live.map((record) => [record.info.id, record.parts])) },
+      })
+      const ids = () => store.getState().message[target.sessionID].map((message) => message.id)
+      expect(loader.trimHistory(target)).toBe(true)
+      expect(ids()).not.toContain(prompt.info.id)
+      served = records.slice(-10)
+      const done = () => { loader.dispose(); childStores.disposeAll() }
+      return { loader, target, records, prompt: prompt.info.id, ids, done }
+    }
+
+    test("a trimmed prompt that was delivered does not return with the next tail refresh", async () => {
+      const { loader, target, records, ids, done } = await sendThenTrim([])
+      await loader.refreshTail(target, 30)
+      expect(ids()).toEqual(records.slice(10).map((record) => record.info.id))
+      done()
+    })
+
+    test("a trimmed prompt that was delivered does not return below an older page that stops short of it", async () => {
+      const { loader, target, records, ids, done } = await sendThenTrim([])
+      await loader.loadOlder(target)
+      expect(ids()).toEqual(records.slice(6).map((record) => record.info.id))
+      done()
+    })
+
+    test("a trimmed prompt still queued in the inbox comes back", async () => {
+      const { loader, target, prompt, ids, done } = await sendThenTrim([{
+        id: "msg_0002_u", sessionID: "session-a", time: { created: 5 }, delivery: "queue", type: "user", payload: { text: "hello" },
+      }])
+      await loader.refreshTail(target, 30)
+      expect(ids()).toContain(prompt)
+      done()
     })
 
     test("cuts nothing after a stream gap the transcript was not confirmed since", async () => {
@@ -1332,6 +1755,118 @@ describe("SessionMessageLoader before OpenCode is ready", () => {
     childStores.disposeAll()
   })
 
+  test("a prefetch holding a pending record reads history without the inbox, and the real open reconciles it", async () => {
+    const target = { directory: "/inbox-prefetch-pending", sessionID: "session-prefetch-pending" }
+    const record = createRecord(target.sessionID, "msg_history", 1)
+    const steer: InboxFixture = {
+      id: "msg_steer",
+      sessionID: target.sessionID,
+      time: { created: 2 },
+      type: "user",
+      payload: { text: "steered", files: [], agents: [] },
+      delivery: "steer",
+    }
+    const pendingRow = projectInboxMessage(steer, { sessionID: target.sessionID, messageID: steer.id, created: 2 })!
+    let inboxReads = 0
+    let pageReads = 0
+    const { childStores, loader } = createLoader(
+      async () => {
+        pageReads += 1
+        return response([record])
+      },
+      async () => {
+        inboxReads += 1
+        return [steer]
+      },
+    )
+    // A live enqueue reached the store before any history was loaded.
+    const store = childStores.ensureChild(target.directory, { bootstrap: false })
+    store.setState({
+      message: { ...store.getState().message, [target.sessionID]: [pendingRow.info] },
+      part: { ...store.getState().part, [steer.id]: pendingRow.parts ?? [] },
+    })
+
+    await loader.ensure(target, { reason: "prefetch" })
+    expect(pageReads).toBe(1)
+    expect(inboxReads).toBe(0)
+
+    await loader.ensure(target, { reason: "navigation" })
+    expect(inboxReads).toBeGreaterThan(0)
+    const held = store.getState().message[target.sessionID] ?? []
+    expect(held.map((message) => message.id)).toEqual(["msg_history", "msg_steer"])
+    expect(isWaitingSteer(held[1]!)).toBe(true)
+    loader.dispose()
+    childStores.disposeAll()
+  })
+
+  for (const { inbox, kept } of [
+    { inbox: "empty", kept: false },
+    { inbox: "failed", kept: true },
+  ] as const) test(`the real open after a prefetch settles a held steer the inbox no longer has (${inbox} inbox read)`, async () => {
+    const target = { directory: `/inbox-prefetch-cancelled-${inbox}`, sessionID: "session-prefetch-cancelled" }
+    const record = createRecord(target.sessionID, "msg_history", 1)
+    const steer: InboxFixture = {
+      id: "msg_steer",
+      sessionID: target.sessionID,
+      time: { created: 2 },
+      type: "user",
+      payload: { text: "steered", files: [], agents: [] },
+      delivery: "steer",
+    }
+    const pendingRow = projectInboxMessage(steer, { sessionID: target.sessionID, messageID: steer.id, created: 2 })!
+    let inboxReads = 0
+    const { childStores, loader } = createLoader(
+      async () => response([record]),
+      async () => {
+        inboxReads += 1
+        if (inbox === "failed") throw new Error("inbox unavailable")
+        return []
+      },
+    )
+    // The steer was cancelled in OpenCode and the cancel event was missed.
+    const store = childStores.ensureChild(target.directory, { bootstrap: false })
+    store.setState({
+      message: { ...store.getState().message, [target.sessionID]: [pendingRow.info] },
+      part: { ...store.getState().part, [steer.id]: pendingRow.parts ?? [] },
+    })
+
+    await loader.ensure(target, { reason: "prefetch" })
+    expect(inboxReads).toBe(0)
+    expect(store.getState().message[target.sessionID]?.map((message) => message.id)).toEqual(["msg_history", "msg_steer"])
+
+    await loader.ensure(target, { reason: "navigation" })
+    expect(inboxReads).toBeGreaterThan(0)
+    expect(store.getState().message[target.sessionID]?.map((message) => message.id))
+      .toEqual(kept ? ["msg_history", "msg_steer"] : ["msg_history"])
+    loader.dispose()
+    childStores.disposeAll()
+  })
+
+  test("a reload repaints a steer as waiting and an ordinary queued send as plain pending", async () => {
+    const target = { directory: "/inbox-reload", sessionID: "session-inbox-reload" }
+    const record = createRecord(target.sessionID, "msg_history", 1)
+    const item = (id: string, delivery: "steer" | "queue", created: number): InboxFixture => ({
+      id,
+      sessionID: target.sessionID,
+      time: { created },
+      type: "user",
+      payload: { text: id, files: [], agents: [] },
+      delivery,
+    })
+    const { childStores, loader } = createLoader(
+      async () => response([record]),
+      async () => [item("msg_steer", "steer", 2), item("msg_send", "queue", 3)],
+    )
+    await loader.ensure(target, { reason: "navigation" })
+    const held = childStores.getChild(target.directory)?.getState().message[target.sessionID] ?? []
+    const byID = new Map(held.map((message) => [message.id, message]))
+    expect(isWaitingSteer(byID.get("msg_steer")!)).toBe(true)
+    expect(byID.get("msg_send")).toMatchObject({ pending: true })
+    expect(isWaitingSteer(byID.get("msg_send")!)).toBe(false)
+    loader.dispose()
+    childStores.disposeAll()
+  })
+
   test("does not repaint an inbox item a live event already added", async () => {
     const record = createRecord("session-inbox-dedupe", "msg_history", 1)
     const pending: InboxFixture = {
@@ -1358,35 +1893,21 @@ describe("SessionMessageLoader before OpenCode is ready", () => {
     childStores.disposeAll()
   })
 
-  test("re-reads the inbox after a stream gap", async () => {
+  test("shows an inbox item enqueued during a stream gap", async () => {
     const record = createRecord("session-inbox-refresh", "msg_history", 1)
-    let inboxReads = 0
-    const { childStores, loader } = createLoader(
-      async () => response([record]),
-      async () => {
-        inboxReads += 1
-        return [
-          {
-            id: "inbox_refresh",
-            sessionID: "session-inbox-refresh",
-            time: { created: 2 },
-            type: "user",
-            payload: { text: "steered", files: [], agents: [] },
-            delivery: "steer",
-          },
-        ]
-      },
-    )
+    let inbox: InboxFixture[] = []
+    const { childStores, loader } = createLoader(async () => response([record]), async () => inbox)
     const target = { directory: "/inbox-refresh", sessionID: "session-inbox-refresh" }
 
     await loader.ensure(target, { reason: "navigation" })
-    expect(inboxReads).toBe(1)
-
+    inbox = [{
+      id: "inbox_refresh", sessionID: target.sessionID, time: { created: 2 }, type: "user",
+      payload: { text: "steered", files: [], agents: [] }, delivery: "steer",
+    }]
+    loader.markHistoryStale()
     await loader.refreshTail(target, 100)
 
-    expect(inboxReads).toBe(2)
-    const ids = childStores.getChild(target.directory)?.getState().message[target.sessionID]?.map((message) => message.id) ?? []
-    expect(ids).toContain("inbox_refresh")
+    expect(childStores.getChild(target.directory)?.getState().message[target.sessionID]?.map((message) => message.id)).toEqual(["msg_history", "inbox_refresh"])
     loader.dispose()
     childStores.disposeAll()
   })
@@ -1421,6 +1942,121 @@ describe("SessionMessageLoader before OpenCode is ready", () => {
     expect(inboxReads).toBe(1)
     const ids = childStores.getChild(target.directory)?.getState().message[target.sessionID]?.map((message) => message.id) ?? []
     expect(ids).toContain("inbox_promoted")
+    loader.dispose()
+    childStores.disposeAll()
+  })
+
+  test("upgrades an un-echoed non-pending optimistic message to pending when the inbox still holds it, without re-marking a delivered one", async () => {
+    const record = createRecord("session-inbox-upgrade", "msg_history", 1)
+    const pending: InboxFixture = {
+      id: "msg_upgrade",
+      sessionID: "session-inbox-upgrade",
+      time: { created: 5 },
+      type: "user",
+      payload: { text: "raced", files: [], agents: [] },
+      delivery: "steer",
+    }
+    const { childStores, loader } = createLoader(async () => response([record]), async () => [pending])
+    const target = { directory: "/inbox-upgrade", sessionID: "session-inbox-upgrade" }
+
+    loader.optimisticAdd({
+      ...target,
+      message: { id: pending.id, sessionID: target.sessionID, role: "user", time: { created: 5 } } satisfies UserMessage,
+      parts: [],
+    })
+    await loader.ensure(target, { reason: "navigation" })
+
+    const upgraded = childStores.getChild(target.directory)?.getState().message[target.sessionID]?.find((m) => m.id === pending.id)
+    expect(upgraded).toMatchObject({ id: pending.id, role: "user", pending: true })
+
+    // If a live delivery event clears pending before a stale inbox read completes, seeding does not re-mark it pending.
+    const store = childStores.getChild(target.directory)!
+    const delivered: UserMessage = { id: pending.id, sessionID: target.sessionID, role: "user", time: { created: 10 } }
+    store.setState({
+      message: {
+        ...store.getState().message,
+        [target.sessionID]: [record.info, delivered],
+      },
+    })
+    loader.markHistoryStale()
+    await loader.refreshTail(target, 30)
+
+    const afterRefresh = store.getState().message[target.sessionID]?.find((m) => m.id === pending.id)
+    expect(afterRefresh).toEqual(delivered)
+    loader.dispose()
+    childStores.disposeAll()
+  })
+
+  test("drops a pending user message whose cancel was missed on reconnect while keeping an in-flight un-admitted steered send", async () => {
+    const history = createRecord("session-cancel-reconnect", "msg_history", 1)
+    const cancelledPending: UserMessage = {
+      id: "msg_cancelled",
+      sessionID: "session-cancel-reconnect",
+      role: "user",
+      time: { created: 2 },
+      pending: true,
+    }
+    const inflightSteer: UserMessage = {
+      id: "msg_inflight",
+      sessionID: "session-cancel-reconnect",
+      role: "user",
+      time: { created: 3 },
+      pending: true,
+    }
+    let inbox: InboxFixture[] = []
+    let failInbox = false
+    const { childStores, loader } = createLoader(
+      async () => response([history]),
+      async () => {
+        if (failInbox) throw new Error("inbox offline")
+        return inbox
+      },
+    )
+    const target = { directory: "/cancel-reconnect", sessionID: "session-cancel-reconnect" }
+
+    await loader.ensure(target, { reason: "navigation" })
+    const store = childStores.getChild(target.directory)!
+    store.setState({
+      message: {
+        ...store.getState().message,
+        [target.sessionID]: [history.info, cancelledPending],
+      },
+      part: {
+        ...store.getState().part,
+        [cancelledPending.id]: [{ id: "prt_cancelled", sessionID: target.sessionID, messageID: cancelledPending.id, type: "text", text: "cancelled" }],
+      },
+    })
+    loader.optimisticAdd({
+      ...target,
+      message: inflightSteer,
+      parts: [{ id: "prt_inflight", sessionID: target.sessionID, messageID: inflightSteer.id, type: "text", text: "still sending" }],
+    })
+
+    // A failed inbox read proves nothing and keeps both pending prompts.
+    failInbox = true
+    loader.markHistoryStale()
+    await loader.refreshTail(target, 30)
+    expect(messageIDs(childStores, target)).toEqual(["msg_history", "msg_cancelled", "msg_inflight"])
+
+    // An authoritative empty inbox read drops the cancelled pending message and its parts, while keeping the un-admitted optimistic steer.
+    failInbox = false
+    inbox = []
+    loader.markHistoryStale()
+    await loader.refreshTail(target, 30)
+    expect(messageIDs(childStores, target)).toEqual(["msg_history", "msg_inflight"])
+    expect(store.getState().part[cancelledPending.id]).toBeUndefined()
+    expect(store.getState().message[target.sessionID]?.find((m) => m.id === inflightSteer.id)).toMatchObject({ pending: true })
+
+    // Initial/forced load also reconciles a missed cancel for a pre-existing live pending message.
+    store.setState({
+      message: {
+        ...store.getState().message,
+        [target.sessionID]: [history.info, cancelledPending, inflightSteer],
+      },
+    })
+    await loader.ensure(target, { force: true, reason: "navigation" })
+    expect(messageIDs(childStores, target)).toEqual(["msg_history", "msg_inflight"])
+
     loader.dispose()
     childStores.disposeAll()
   })

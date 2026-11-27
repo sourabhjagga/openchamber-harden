@@ -3,6 +3,7 @@ import type { OpenCodeClient, OpenCodeEvent } from "@opencode/client"
 import { z } from "zod"
 import { opencodeClient } from "@/lib/opencode/client"
 import { GLOBAL_EVENT_DIRECTORY, hostTurnStart, routeWireEvent, syncEventSessionID, type SyncEvent } from "@/lib/opencode/events"
+import { createTurnBoundaryOrder, wireEventSchema, type StaleWireEventCheck } from "@/lib/opencode/wire-admission"
 import type { Metadata } from "@/lib/opencode/model"
 import { getRuntimeUrlResolver } from "@/lib/runtime-url"
 import { clearRuntimeUrlAuthToken, refreshRuntimeUrlAuthToken } from "@/lib/runtime-auth"
@@ -10,6 +11,7 @@ import { useAuthSessionStore, waitForAuthSession } from "@/lib/runtime-auth-expi
 import { type RelayTunnelWebSocket } from "@/lib/relay/tunnel-client"
 import { openRuntimeWebSocket } from "@/lib/relay/runtime-socket"
 import { isVSCodeRuntime } from "@/lib/desktop"
+import { isServerOffline } from "@/lib/server-offline"
 import { spaceCreationStepSchema, spaceTaskTitleSchema, type SpaceTaskTitle } from "@/lib/spaces/spaces-api"
 import { workflowRunSchema } from "@/lib/workflows/model"
 import { syncDebug } from "./debug"
@@ -200,12 +202,6 @@ const openchamberLeftForUserSchema = z.object({
   }),
 })
 
-const wireEventSchema = z.object({
-  id: z.string(),
-  type: z.string(),
-  location: z.object({ directory: z.string() }).partial().optional(),
-})
-
 const payloadTypeSchema = z.object({ type: z.string() })
 
 const OPENCHAMBER_TYPE_PREFIX = "openchamber:"
@@ -284,12 +280,14 @@ function translateOpenchamberEvent(type: string, payload: unknown): SyncEvent | 
   }
 }
 
-function translateWirePayload(payload: unknown, frameDirectory: string | undefined): Array<{ directory: string; event: SyncEvent }> {
+function translateWirePayload(payload: unknown, frameDirectory: string | undefined, isStale?: StaleWireEventCheck): Array<{ directory: string; event: SyncEvent }> {
   if (!wireEventSchema.safeParse(payload).success) return []
   // SAFETY: the discriminator and location were validated above; the rest of
   // the shape is the server's generated contract, narrowed per `type` by the
   // translator.
-  const routed = routeWireEvent(payload as OpenCodeEvent)
+  const event = payload as OpenCodeEvent
+  if (isStale?.(event)) return []
+  const routed = routeWireEvent(event)
   if (!frameDirectory) return routed
   return routed.map((entry) => (entry.directory === GLOBAL_EVENT_DIRECTORY ? { ...entry, directory: frameDirectory } : entry))
 }
@@ -304,11 +302,11 @@ type ClassifiedStreamPayload =
 
 const NO_EVENTS: ClassifiedStreamPayload = { kind: "events", events: [] }
 
-export function classifyStreamPayload(payload: unknown, frameDirectory: string | undefined): ClassifiedStreamPayload {
+export function classifyStreamPayload(payload: unknown, frameDirectory: string | undefined, isStale?: StaleWireEventCheck): ClassifiedStreamPayload {
   const typed = payloadTypeSchema.safeParse(payload)
   if (!typed.success) return NO_EVENTS
   const { type } = typed.data
-  if (!type.startsWith(OPENCHAMBER_TYPE_PREFIX)) return { kind: "events", events: translateWirePayload(payload, frameDirectory) }
+  if (!type.startsWith(OPENCHAMBER_TYPE_PREFIX)) return { kind: "events", events: translateWirePayload(payload, frameDirectory, isStale) }
 
   switch (type) {
     case "openchamber:space-stream": {
@@ -334,7 +332,7 @@ export function classifyStreamPayload(payload: unknown, frameDirectory: string |
   }
   const bridged = translateOpenchamberEvent(type, payload)
   if (bridged) return { kind: "events", events: [{ directory: frameDirectory ?? GLOBAL_EVENT_DIRECTORY, event: bridged }] }
-  return { kind: "events", events: translateWirePayload(payload, frameDirectory) }
+  return { kind: "events", events: translateWirePayload(payload, frameDirectory, isStale) }
 }
 
 function buildGlobalEventWsUrl(lastEventId?: string): string {
@@ -439,6 +437,7 @@ export function createEventPipeline(input: EventPipelineInput): EventPipeline {
   let wsOpenFailuresSinceReady = 0
 
   const directories = new Map<string, DirectoryQueue>()
+  const isStaleTurnBoundary = createTurnBoundaryOrder(syncDebug.pipeline.staleTurnBoundary)
 
   const getOrCreateDir = (directory: string): DirectoryQueue => {
     let d = directories.get(directory)
@@ -501,9 +500,6 @@ export function createEventPipeline(input: EventPipelineInput): EventPipeline {
   const isAbortError = (error: unknown): boolean =>
     error instanceof DOMException && error.name === "AbortError" ||
     (typeof error === "object" && error !== null && (error as { name?: string }).name === "AbortError")
-
-  const isOffline = (): boolean =>
-    typeof navigator === "object" && navigator !== null && navigator.onLine === false
 
   const isHidden = (): boolean =>
     typeof document !== "undefined" && document.visibilityState !== "visible"
@@ -570,7 +566,7 @@ export function createEventPipeline(input: EventPipelineInput): EventPipeline {
 
   const computeRetryDelay = (failures: number): number => {
     if (failures <= 0) return 0
-    if (isOffline()) return RETRY_BACKOFF_CAP_HIDDEN_OR_OFFLINE_MS
+    if (isServerOffline()) return RETRY_BACKOFF_CAP_HIDDEN_OR_OFFLINE_MS
     const cap = isHidden() ? RETRY_BACKOFF_CAP_HIDDEN_OR_OFFLINE_MS : RETRY_BACKOFF_CAP_VISIBLE_MS
     const exponent = Math.min(failures - 1, RETRY_BACKOFF_MAX_EXPONENT)
     return Math.min(cap, RETRY_BACKOFF_BASE_MS * 2 ** exponent)
@@ -643,7 +639,7 @@ export function createEventPipeline(input: EventPipelineInput): EventPipeline {
   }
 
   const enqueuePayload = (payload: unknown, frameDirectory: string | undefined) => {
-    const classified = classifyStreamPayload(payload, frameDirectory)
+    const classified = classifyStreamPayload(payload, frameDirectory, isStaleTurnBoundary)
     if (classified.kind === "space-stream") {
       onSpaceStream?.(classified.properties)
       return
@@ -714,7 +710,7 @@ export function createEventPipeline(input: EventPipelineInput): EventPipeline {
 
   const wsOpenFailureFallsBack = (): boolean => {
     if (!wsEverReady) return true
-    if (isOffline()) return false
+    if (isServerOffline()) return false
     wsOpenFailuresSinceReady += 1
     return wsOpenFailuresSinceReady >= WS_PROVEN_OPEN_FAILURES_BEFORE_FALLBACK
   }

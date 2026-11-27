@@ -1,8 +1,10 @@
 import { readVoiceKey } from '../tts/voice-keys.js';
+import { approvedProviderKey } from '../tts/provider-keys.js';
 import { detectTextLanguage } from '../tts/language-detect.js';
 
 import { rm } from 'fs/promises';
 import path from 'path';
+import { z } from 'zod';
 
 import { DictationWorkerClient, WorkerBackedTranscriptionSession } from './local/worker-client.js';
 import { OpenAICompatibleTranscriptionSession } from './openai-compatible-session.js';
@@ -46,6 +48,8 @@ interface OpenAICompatibleWireConfig {
   model?: unknown;
   apiKey?: unknown;
   endpointPath?: unknown;
+  prompt?: unknown;
+  keyProvider?: unknown;
 }
 
 function hasConfigFields(value: unknown): value is OpenAICompatibleWireConfig {
@@ -121,11 +125,17 @@ export function createDictationService({ modelsDir }: { modelsDir: string }) {
     if (provider === 'openai-compatible') {
       const wireConfig = options.openaiCompatible;
       const config = hasConfigFields(wireConfig) ? wireConfig : {};
+      const promptOption = z.string().trim().min(1).safeParse(config.prompt);
+      const baseURL = z.string().safeParse(config.baseUrl).data;
+      const keyProvider = z.string().safeParse(config.keyProvider).data;
+      const apiKey = config.apiKey || readVoiceKey('stt');
       const session = new OpenAICompatibleTranscriptionSession({
         baseURL: config.baseUrl,
         model: config.model,
-        apiKey: config.apiKey || readVoiceKey('stt'),
+        apiKey,
+        resolveProviderKey: apiKey ? undefined : () => approvedProviderKey(keyProvider, baseURL),
         language: options.language || undefined,
+        prompt: promptOption.success ? promptOption.data : undefined,
         endpointPath: config.endpointPath,
       });
       try {

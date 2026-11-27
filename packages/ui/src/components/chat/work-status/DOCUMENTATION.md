@@ -47,6 +47,20 @@ own data fetching and reconciliation; the layout's right slot owns column width.
 - Cost formatting keeps 4 decimal places for budget comparisons and drops trailing
   zeros. Recursive cost walks guard against cycles in parent links, and the own
   cost is derived from total minus child costs so the displayed split adds up.
+- With session cost alerts on, the cost next to the context percentage turns
+  yellow at the warning amount and red at the critical one, over the same
+  rollup the breakdown tooltip shows. It is colored apart from the percentage
+  because spend and context fill are separate signals. Settings keep the
+  warning amount below the critical one (`lib/settings/DOCUMENTATION.md`).
+- The cost rollup walks the same tree as the cost alerts (`readSessionCostTree`
+  in `sync/session-event-router.ts`, over `sync/session-cost-tree.ts`): the
+  global list's active children with the spend still deferred for each record,
+  so a subagent in a folder no directory store holds counts in both, plus the
+  children only a mounted directory store holds while the global list lacks
+  them, so a subagent the list has not loaded counts in both too. The
+  directory-only part reads a per-folder index that a usage update reuses
+  (same ids and parents in the same order), so another session's spend never
+  rebuilds an index over every mounted session.
 - Context fill stays neutral below its warning band, because green denotes
   completion. A subagent cost split appears only when subagents exist, when it
   explains spend beyond the displayed session.
@@ -82,6 +96,12 @@ own data fetching and reconciliation; the layout's right slot owns column width.
 - Quota aliases identify the same billed account. `claude-agent` and
   `claude-code` use the Claude subscription reported by `claude`; `kilocode` and
   `kilo-code` use the Kilo Gateway account reported by `kilo`.
+- A compact usage summary prefers the provider's cap rows. When OpenRouter
+  reports a monthly total and no cap, the total is the summary, so monthly
+  spending cannot displace a lifetime or monthly cap. When the total is unknown
+  because one counter is unreadable, a readable counter is the summary under its
+  own label; the total is never replaced by a guess. Other providers keep the
+  generic shortest-window rule even when a window is named `monthly_total`.
 - Built-in section ids stay stable because saved order and visibility use them.
   Hidden-state checks test membership of available sections because stale ids
   from removed sections can inflate a count.
@@ -99,6 +119,15 @@ own data fetching and reconciliation; the layout's right slot owns column width.
   the transcript.
 
 ## Decisions
+
+### Why the monthly total is found by its window key and not by row order
+
+The Usage page shows the monthly total and its category rows beside a cap, so a
+compact summary has extra spend rows to ignore. The selector finds the total by
+its `monthly_total` window key and treats a row with a share or a value label as
+a cap, so a monthly or lifetime cap wins even when the total has the same
+duration. Following the provider's insertion order would let a category row
+become the summary.
 
 ### Why guest meters jump and not glide
 
@@ -299,7 +328,8 @@ replaced the drawer's MCP tab: the MCP section carries the same switches.
   Context row and the project's app and run controls are absent, since they
   need a desktop host. A row that opens something outside the drawer (a
   subagent's session, a pinned message, the board) closes the drawer through
-  `LeaveWorkStatusContext`; the desktop card provides none.
+  `LeaveWorkStatusContext`; the desktop card provides none. A Context sources
+  link an extension opens in its workspace tab stays in the drawer, on that tab.
 - **The phone's look, from the same primitives.** Under `WorkStatusTouchContext`
   (`touchContext.ts`) the primitives draw what the phone's Usage popover draws:
   a quiet heading over one toned card per section, rows at least 44px with a
@@ -351,10 +381,10 @@ which requests only providers enabled for this panel.
 | PR + checks | `useFreshestSourceControlVisualSummaryForBranch` | **read-only**; follows the freshest bound-identity entry for the branch |
 | Subagents | child sessions from `useAllLiveSessions` (`parentID`) + `useAllSessionStatuses`; per-row cost from `computeRollup`'s `perChildCost` (each child's own subtree total, so nested subagent-of-subagent cost rolls up under its immediate parent row); all of it in `useSubagentRows`, shared with the Subagents panel | |
 | Subagent activity and context | the child's own messages and parts in the directory store (`subagentActivity.ts`, `SubagentLive.tsx`), one leaf subscription per row | see *What a subagent is doing* below |
-| Subagent report | the newest `<subagent>` report in the parent: a report message for a background run, the call's own result for a foreground one (`useSubagentReports`) | recomputed when the parent's message list changes (per message, never per streamed part), with each message's and each part array's reports cached; nothing is read while the session has no subagents |
+| Subagent report | the newest subagent report (`<background-result kind="subagent">`) in the parent: a report message for a background run, the call's own result for a foreground one (`useSubagentReports`) | recomputed when the parent's message list changes (per message, never per streamed part), with each message's and each part array's reports cached; nothing is read while the session has no subagents |
 | Subagent blockers | directory `permission` / `question` maps | one subscription covers every child |
 | Workflows | `useSessionWorkflowRuns` (`lib/workflows/store.ts`): the session's runs read once from the server, then kept current by `openchamber:workflow-run` events | only while workflows are shown: not in VS Code, and only with the workflow tool on (`selectWorkflowsShown`) |
-| Usage | `components/usage/usageGroups.ts` over `useQuotaStore` | grouping shared with the mobile popover; presentation is not: a provider line in the text colour with its logo muted (`ProviderLogo tint`), groups set apart by 8px, limit rows under the name at the label x with a short reset time (`formatQuotaResetShort`) and compacted counts (`compactQuotaValueLabel`), full figures in the row tooltip; values muted unless a limit is in its warning or critical band (`usageValueTone`) |
+| Usage | `components/usage/usageGroups.ts` over `useQuotaStore` | grouping shared with the mobile popover; presentation is not: a provider line in the text colour with its logo muted (`ProviderLogo tint`), groups set apart by 8px, limit rows under the name at the label x with a short reset time (`formatQuotaResetShort`) and compacted counts (`compactQuotaValueLabel`), full figures in the row tooltip; the collapsed headline compacts the same way and truncates its label before its value; values muted unless a limit is in its warning or critical band (`usageValueTone`) |
 | Linked plans | `useProjectContextStore` plans of the session's project whose `session.sessionId` is this session | refreshed through `observeProjectContext` |
 | Linked threads | `lib/linkedIssues.ts` over session metadata; state from tracked items | written by the flows that attach an issue or PR, and removable from the row; a linked PR that is also the checked-out branch's PR shows the branch summary, as its sidebar row does |
 | Turn stats | `telemetry.ts` over `useSessionMessageRecords` | computed while authoritatively idle, including when collapsed; active mounts read warm records once for the previous turn; either rate above 5,000 tok/s is reported as unknown (see the two-rate description below) |
@@ -362,7 +392,7 @@ which requests only providers enabled for this panel.
 | Goal | `useSessionGoal` | respects the Settings toggle |
 | MCP | `useMcpStore` | the switch reuses `useMcpStore.setEnabled`; a failed toggle shows its error in a toast and leaves the switch usable |
 | Pinned messages | `getContextObligatoryMessages` + `state.part`, else one `getSessionMessage` read | see below |
-| Tasks | `useSessionTodosStore`: the server's list for the session (`packages/web/server/lib/session-todos`), read once by `useLoadSessionTodos` in the section list, then kept current by `openchamber:session-todos` events | listed only once the server says OpenCode's experimental `todowrite` tool is on in the session's directory; while it is off nothing is read or shown. VS Code has no such route, so the loader never reads there and Tasks stays unlisted |
+| Tasks | `useSessionTodosStore`: the server's list for the session (`packages/web/server/lib/session-todos`), read once by `useLoadSessionTodos` in `WorkStatusPanel` and in the mobile Status pane (outside the section list, which the pane unmounts while an `off` Tasks leaves every section hidden) while the panel is visible and Tasks is enabled in its section layout (before the section has rows, since that read says whether it lists), then kept current by `openchamber:session-todos` events | listed only once the server says OpenCode's experimental `todowrite` tool is on in the session's directory; while it is off nothing is read or shown. VS Code has no such route, so the loader never reads there and Tasks stays unlisted |
 
 ### Subagent rows
 
@@ -889,13 +919,21 @@ Selection rules live in `usageHeadline.ts` and are pinned by
 - provider ids are matched directly, with a small alias table for the ones that
   diverge from OpenCode's (`openai`/`chatgpt` → `codex`, `anthropic` → `claude`,
   `gemini` → `google`);
+- an extension's group is keyed `ext-<guestId>`, so a direct id can never be
+  one: when the direct match finds nothing, an extension whose
+  `contributes.quota.providers` is exactly the composer's provider id (no alias)
+  is taken instead. That list is a credential grant and a reply does not say
+  whose windows it reports, so an extension declaring several credentials stays
+  in the expanded list only. A declaring extension with no row that has a value
+  to show (a failed first read, a reset time without an amount) is skipped for the next one; a direct id match wins when both could
+  claim the provider, so a built-in keeps the headline it always had;
 - model-scoped rows are skipped while any provider-level row exists — a
   per-model quota is not the provider's;
 - rows without a window duration (credit balances, tool counters) are a last
   resort, never preferred over a real window;
-- **no match means no headline.** The section falls back to the display-mode
-  label, because showing an unmatched provider's quota would read as the active
-  one.
+- **no match in either place means no headline.** The section falls back to the
+  display-mode label, because showing an unmatched provider's quota would read
+  as the active one.
 
 ## Provider status line
 

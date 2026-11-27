@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import type { FrameScrollDirection } from '@/components/chat/lib/scroll/timelineScrollIntent';
 import { PREVIEW_BRIDGE_CHANNEL } from '@/lib/browser/previewFrameHost';
+import { SANDBOX_STORAGE_SCRIPT } from '@/lib/browser/sandboxStorage';
 import type { ChatQuoteAnchor } from '@/lib/chatQuoteAnchor';
 import type { JsonValue } from '@/lib/opencode/model';
 import { chartSeriesColors, KIT_SHARED_CSS, kitVariables } from '@/components/chat/lib/visualKit';
@@ -28,7 +29,12 @@ const CLEAR_SELECTION_MESSAGE = `${MESSAGE_PREFIX}clear-selection`;
 const MARKS_MESSAGE = `${MESSAGE_PREFIX}marks`;
 const REVEAL_MESSAGE = `${MESSAGE_PREFIX}reveal`;
 const POINTER_MESSAGE = `${MESSAGE_PREFIX}pointer`;
+const SCRIPT_ERROR_MESSAGE = `${MESSAGE_PREFIX}script-error`;
 const HTML_RENDER_SELECTION_MAX_LENGTH = 20_000;
+const SCRIPT_ERROR_MAX_COUNT = 5;
+const SCRIPT_ERROR_MAX_LENGTH = 500;
+const SCRIPT_ERROR_SETTLE_MS = 400;
+const ANSWER_CONTROLS = 'button:not([data-oc-decline]),input:not([type=hidden]),select,textarea,a[href],label,summary,.oc-option,.oc-button,[onclick],[role=button],[tabindex]:not([tabindex="-1"]),[contenteditable]:not([contenteditable=false])';
 const HTML_RENDER_FLASH_DURATION_MS = 1600;
 
 export interface HtmlRenderTheme {
@@ -197,7 +203,15 @@ const ANNOTATION_BRIDGE = `(function(C){window.addEventListener("message",functi
     + 'try{t=(0,eval)(d.code);}catch(x){r(false,m(x));return;}'
     + `Promise.resolve(t).then(function(v){r(true,v===undefined?null:v);},function(x){r(false,m(x));});});})(${JSON.stringify(PREVIEW_BRIDGE_CHANNEL)});`;
 
+const SCRIPT_ERROR_WATCH = `var EE=[],EL=0,EF=0,EP=function(m){if(!EL&&EE.length<${SCRIPT_ERROR_MAX_COUNT})EE.push(m.slice(0,${SCRIPT_ERROR_MAX_LENGTH}));},`
+    + `ER=function(){if(EF)window.parent.postMessage({type:${JSON.stringify(SCRIPT_ERROR_MESSAGE)},errors:EE},"*");};`
+    + `window.addEventListener("error",function(e){EP(String(e.message||"Script error"));});`
+    + `window.addEventListener("unhandledrejection",function(e){var r;try{r=String(e.reason);}catch(x){r="a rejected promise";}EP("Uncaught (in promise) "+r);});`
+    + `window.addEventListener("load",function(){setTimeout(function(){if(EL)return;EL=1;if(EE.length)setTimeout(function(){EF=!document.querySelector(${JSON.stringify(ANSWER_CONTROLS)});ER();},${SCRIPT_ERROR_SETTLE_MS});});});`
+    + `window.addEventListener("message",function(e){var d=e.data;if(e.source===window.parent&&d&&d.type===${JSON.stringify(ANSWER_STATE_MESSAGE)}&&d.waiting===true)ER();});`;
+
 const BOOTSTRAP_SCRIPT = `(function(){var s=document.getElementById("oc-html-render-theme");if(!s||window.parent===window)return;var B=${JSON.stringify(BASE_CSS)};`
+    + SCRIPT_ERROR_WATCH
     + `window.addEventListener("message",function(e){var d=e.data;if(e.source!==window.parent||!d||d.type!==${JSON.stringify(THEME_MESSAGE)}||!d.variables||typeof d.variables!=="object")return;var c=":root{color-scheme:"+(d.appearance==="light"?"light":"dark")+";";for(var k in d.variables){if(/^--[a-z0-9-]+$/.test(k))c+=k+":"+String(d.variables[k]).replace(/[;{}<>]/g,"")+";";}s.textContent=c+"}"+B;});`
     + `window.addEventListener("message",function(e){var d=e.data;if(e.source!==window.parent||!d||d.type!==${JSON.stringify(POINTER_MESSAGE)})return;if(d.over===true)document.documentElement.setAttribute("data-oc-pointer","");else document.documentElement.removeAttribute("data-oc-pointer");});`
     + `document.addEventListener("click",function(e){var t=e.target,a=t&&t.closest?t.closest("a[href]"):null,u;if(!a)return;try{u=new URL(a.getAttribute("href"),document.baseURI);}catch(x){return;}if(!/^https?:$/.test(u.protocol))return;e.preventDefault();window.parent.postMessage({type:${JSON.stringify(OPEN_LINK_MESSAGE)},url:u.href},"*");},true);`
@@ -213,9 +227,13 @@ const BOOTSTRAP_SCRIPT = `(function(){var s=document.getElementById("oc-html-ren
     + `window.addEventListener("keydown",function(e){var t=e.composedPath()[0],f;if(!e.isTrusted||e.isComposing||!(e.metaKey||e.ctrlKey)||/^[acvxyz]$/i.test(e.key)&&!e.altKey||t&&(t.isContentEditable||/^(?:INPUT|TEXTAREA|SELECT)$/.test(t.tagName)))return;`
     + `f=function(v){window.removeEventListener("keydown",f);if(v!==e||e.defaultPrevented)return;window.parent.postMessage({type:${JSON.stringify(KEY_MESSAGE)},key:e.key,code:e.code,metaKey:e.metaKey,ctrlKey:e.ctrlKey,shiftKey:e.shiftKey,altKey:e.altKey,repeat:e.repeat},"*");};`
     + `window.addEventListener("keydown",f);setTimeout(function(){window.removeEventListener("keydown",f);});},true);`
-    + `var SL="",ST=0,SD=0,SF=function(f){clearTimeout(ST);ST=0;var s=window.getSelection(),t=s?s.toString().trim().slice(0,${HTML_RENDER_SELECTION_MAX_LENGTH}):"",r={top:0,left:0,width:0,height:0},b,a=null;`
+    + `var SE=function(n){var e=n&&(n.nodeType===1?n:n.parentElement);if(!e)return false;if(e.tagName==="INPUT")return /^(?:text|search|url|tel|email|password|number)$/.test(e.type);if(e.tagName==="TEXTAREA")return true;return !/^(?:SELECT|BUTTON)$/.test(e.tagName)&&!!e.isContentEditable;},`
+    + `SA=function(){var e=document.activeElement;while(e&&e.shadowRoot&&e.shadowRoot.activeElement)e=e.shadowRoot.activeElement;return e;},`
+    + `SR=new WeakSet(),SV=null,SI=function(v){var e=document.activeElement;if(v===SV)return;SV=v;while(e&&e.shadowRoot){if(!SR.has(e.shadowRoot)){SR.add(e.shadowRoot);e.shadowRoot.addEventListener("focusin",SI);}e=e.shadowRoot.activeElement;}if(SE(SA()))SF(1);},`
+    + `SL="",ST=0,SD=0,SF=function(f){clearTimeout(ST);ST=0;var s=window.getSelection(),d=!!f&&SE(SA()),t=s&&!SE(SA())&&!SE(s.anchorNode)&&!SE(s.focusNode)?s.toString().trim().slice(0,${HTML_RENDER_SELECTION_MAX_LENGTH}):"",r={top:0,left:0,width:0,height:0},b,a=null;`
     + `if(t&&s.rangeCount){b=s.getRangeAt(0).getBoundingClientRect();r={top:b.top,left:b.left,width:b.width,height:b.height};a=AK(s.getRangeAt(0));}else t="";`
-    + `if(t===SL&&!(f&&t))return;SL=t;window.parent.postMessage({type:${JSON.stringify(SELECTION_MESSAGE)},text:t,rect:r,anchor:a},"*");};`
+    + `if(t===SL&&!(f&&t)&&!d)return;SL=t;window.parent.postMessage({type:${JSON.stringify(SELECTION_MESSAGE)},text:t,rect:r,anchor:a,dismiss:d},"*");};`
+    + `document.addEventListener("focusin",SI);`
     + `document.addEventListener("selectionchange",function(){if(SD)return;clearTimeout(ST);ST=setTimeout(SF,200);});`
     + `document.addEventListener("mousedown",function(){SD=1;},true);document.addEventListener("mouseup",function(){SD=0;clearTimeout(ST);ST=setTimeout(function(){SF(1);},10);},true);`
     + `window.addEventListener("keydown",function(e){var f;if(e.key!=="Escape"||!SL||!e.isTrusted||e.isComposing)return;f=function(v){window.removeEventListener("keydown",f);if(v!==e||e.defaultPrevented)return;window.parent.postMessage({type:${JSON.stringify(SELECTION_ESCAPE_MESSAGE)}},"*");};`
@@ -232,7 +250,7 @@ const BOOTSTRAP_SCRIPT = `(function(){var s=document.getElementById("oc-html-ren
     + `AH=function(n,r){if(!window.Highlight||!window.CSS||!CSS.highlights)return;if(r.length)CSS.highlights.set(n,new Highlight(...r));else CSS.highlights.delete(n);},`
     + `AP=function(){var m=[],f=[],i,r;AR=[];for(i=0;i<AM.length;i++){r=AQ(AM[i].anchor);if(!r)continue;AR.push({id:AM[i].id,range:r});m.push(r);if(AM[i].focused)f.push(r);}AH("oc-chat-quote",m);AH("oc-chat-quote-focus",f);};`
     + `window.addEventListener("message",function(e){var d=e.data,g;if(e.source!==window.parent||!d)return;`
-    + `if(d.type===${JSON.stringify(CLEAR_SELECTION_MESSAGE)}){SL="";clearTimeout(ST);g=window.getSelection();if(g)g.removeAllRanges();}`
+    + `if(d.type===${JSON.stringify(CLEAR_SELECTION_MESSAGE)}){SL="";clearTimeout(ST);g=window.getSelection();if(g&&!SE(SA()))g.removeAllRanges();}`
     + `else if(d.type===${JSON.stringify(MARKS_MESSAGE)}&&Array.isArray(d.marks)){AM=d.marks.filter(AV);AP();}`
     + `else if(d.type===${JSON.stringify(REVEAL_MESSAGE)}&&AV({id:"",anchor:d.anchor})){g=AQ(d.anchor);if(!g)return;(g.startContainer.parentElement||document.body).scrollIntoView({block:"center",inline:"nearest"});`
     + `AH("oc-chat-quote-flash",[g]);clearTimeout(AF);AF=setTimeout(function(){AH("oc-chat-quote-flash",[]);},${HTML_RENDER_FLASH_DURATION_MS});}});`
@@ -300,7 +318,7 @@ export function buildHtmlRenderDocument(
     return insertHeadMarkup(html, [
         `<style id="oc-html-render-theme">${themeCss(theme)}</style>`,
         contained ? '<style>html{overscroll-behavior:none}</style>' : '',
-        `<script>${BOOTSTRAP_SCRIPT}</script>`,
+        `<script>${SANDBOX_STORAGE_SCRIPT}${BOOTSTRAP_SCRIPT}</script>`,
         `<script type="application/json" id="oc-html-render-answer">${scriptJson({ ...answerState, declineLabel })}</script>`,
         `<script>${ANSWER_SCRIPT}</script>`,
     ].join(''));
@@ -390,12 +408,13 @@ type HtmlRenderFrameMessage =
     | { kind: 'open-link'; url: string }
     | { kind: 'key'; chord: HtmlRenderKeyChord }
     | { kind: 'submit'; id: JsonRpcId; submission: HtmlRenderSubmission }
-    | { kind: 'selection'; text: string; rect: z.infer<typeof selectionRectSchema>; anchor?: Omit<ChatQuoteAnchor, 'page'> }
+    | { kind: 'selection'; text: string; rect: z.infer<typeof selectionRectSchema>; anchor?: Omit<ChatQuoteAnchor, 'page'>; dismiss?: boolean }
     | { kind: 'selection-escape' }
     | { kind: 'mark-click'; id: string; rect: z.infer<typeof selectionRectSchema> }
     | { kind: 'scroll'; direction: FrameScrollDirection }
     | { kind: 'decline' }
-    | { kind: 'decline-placed'; placed: boolean };
+    | { kind: 'decline-placed'; placed: boolean }
+    | { kind: 'script-error'; errors: string[] };
 
 export interface HtmlRenderMark {
     id: string;
@@ -411,6 +430,7 @@ const frameMessageSchema = z.discriminatedUnion('type', [
         type: z.literal(SELECTION_MESSAGE),
         text: z.string().max(HTML_RENDER_SELECTION_MAX_LENGTH),
         rect: selectionRectSchema,
+        dismiss: z.boolean().optional(),
         anchor: pageAnchorSchema.nullish().catch(null),
     }),
     z.object({ type: z.literal(SELECTION_ESCAPE_MESSAGE) }),
@@ -418,6 +438,10 @@ const frameMessageSchema = z.discriminatedUnion('type', [
     z.object({ type: z.literal(SCROLL_MESSAGE), direction: z.enum(['up', 'down']) }),
     z.object({ type: z.literal(DECLINE_MESSAGE) }),
     z.object({ type: z.literal(DECLINE_PLACED_MESSAGE), placed: z.boolean() }),
+    z.object({
+        type: z.literal(SCRIPT_ERROR_MESSAGE),
+        errors: z.array(z.string().max(SCRIPT_ERROR_MAX_LENGTH)).min(1).max(SCRIPT_ERROR_MAX_COUNT),
+    }),
 ]);
 
 const uiMessageSchema = z.object({
@@ -453,6 +477,7 @@ export function readHtmlRenderFrameMessage(event: Pick<MessageEvent, 'data'>): H
         const text = message.text.trim();
         const selection: Extract<HtmlRenderFrameMessage, { kind: 'selection' }> = { kind: 'selection', text, rect: message.rect };
         if (text && message.anchor) selection.anchor = message.anchor;
+        if (!text && message.dismiss) selection.dismiss = true;
         return selection;
     }
     if (message.type === SELECTION_ESCAPE_MESSAGE) return { kind: 'selection-escape' };
@@ -460,6 +485,7 @@ export function readHtmlRenderFrameMessage(event: Pick<MessageEvent, 'data'>): H
     if (message.type === SCROLL_MESSAGE) return { kind: 'scroll', direction: message.direction };
     if (message.type === DECLINE_MESSAGE) return { kind: 'decline' };
     if (message.type === DECLINE_PLACED_MESSAGE) return { kind: 'decline-placed', placed: message.placed };
+    if (message.type === SCRIPT_ERROR_MESSAGE) return { kind: 'script-error', errors: message.errors };
     if (!message.metaKey && !message.ctrlKey) return null;
     return { kind: 'key', chord: keyChordSchema.parse(message) };
 }

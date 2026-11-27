@@ -3,6 +3,7 @@ import type { QuotaProviderId } from '@/types';
 export interface QuotaProviderMeta {
   id: QuotaProviderId;
   name: string;
+  providers?: string[];
 }
 
 export const QUOTA_PROVIDERS: QuotaProviderMeta[] = [
@@ -11,8 +12,6 @@ export const QUOTA_PROVIDERS: QuotaProviderMeta[] = [
   { id: 'codex', name: 'Codex' },
   { id: 'cursor', name: 'Cursor' },
   { id: 'github-copilot', name: 'GitHub Copilot' },
-  { id: 'google', name: 'Google' },
-  { id: 'antigravity', name: 'Antigravity' },
   { id: 'kimi-for-coding', name: 'Kimi for Coding' },
   { id: 'nano-gpt', name: 'NanoGPT' },
   { id: 'openrouter', name: 'OpenRouter' },

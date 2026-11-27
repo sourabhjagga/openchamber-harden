@@ -1,6 +1,8 @@
 import { execFile } from 'node:child_process';
 import http from 'node:http';
-
+import type { GiteaPerson, GiteaReview, ReviewerStatesApi } from './reviewer-states.ts';
+import type { DiffApi } from './diff.ts';
+import type { ReferencesApi } from './references.ts';
 import {
   SOURCE_CONTROL_PROVIDER_ERROR_MESSAGE_MAX,
   SOURCE_CONTROL_PROVIDER_PATH,
@@ -24,6 +26,12 @@ import {
   type SourceControlProviderSession,
   type SourceControlReconcileData,
 } from '@openchamber/sdk';
+import type { ReviewDraftsDeps, Reviews } from './review-drafts.ts';
+
+const modulePath = (name: string) => `./${name}${'.js'}`;
+const { readReviews, reviewDismissal, withReviewerStates }: ReviewerStatesApi = await import(modulePath('reviewer-states'));
+const { readReferences, withReferences, itemReferences }: ReferencesApi & { itemReferences: typeof import('./references.ts').itemReferences } = await import(modulePath('references'));
+const { mapChangedFile, splitUnifiedDiff }: DiffApi = await import(modulePath('diff'));
 
 const port = Number(process.env.OPENCHAMBER_SERVICE_PORT);
 const serviceToken = process.env.OPENCHAMBER_SERVICE_TOKEN ?? '';
@@ -40,7 +48,7 @@ const STATUS_SCAN_PAGES = 5;
 type GiteaUser = { id: number; login: string; full_name?: string; email?: string; avatar_url?: string };
 type GiteaRepo = {
   id: number; name: string; owner: { login: string }; html_url: string; clone_url?: string; default_branch?: string;
-  fork?: boolean; parent?: GiteaRepo | null;
+  fork?: boolean; parent?: GiteaRepo | null; permissions?: { admin?: boolean };
 };
 type GiteaBranchRef = { ref: string; sha: string; repo_id?: number; repo?: GiteaRepo };
 type GiteaIssue = {
@@ -50,6 +58,7 @@ type GiteaIssue = {
 type GiteaPull = GiteaIssue & {
   draft?: boolean; merged?: boolean; mergeable?: boolean; head: GiteaBranchRef; base: GiteaBranchRef;
   merge_base?: string;
+  requested_reviewers?: GiteaPerson[];
 };
 type GiteaChangedFile = { filename: string; status?: string; additions?: number; deletions?: number; changes?: number };
 type GiteaComment = {
@@ -163,10 +172,6 @@ type Comment = Identity & Dated & {
   id: string; url: string; body: string; author: User | null;
   canUpdate?: boolean; canDelete?: boolean;
 };
-type ChangedFile = {
-  path: string; status: 'added' | 'removed' | 'renamed' | 'modified';
-  additions?: number; deletions?: number; changes?: number; patch?: string;
-};
 type ChangeRequestStatus = {
   identity: Identity; project: Project; branch: string; changeRequest: ChangeRequest | null; ci: null;
   canMerge?: boolean; resolvedRemoteName: string | null; defaultBranch: string | null;
@@ -265,34 +270,6 @@ const mapComment = (call: Call, raw: GiteaComment, fallbackUrl: string): Comment
   return comment;
 };
 
-const FILE_STATUSES = new Map<string, ChangedFile['status']>([['added', 'added'], ['deleted', 'removed'], ['removed', 'removed'], ['renamed', 'renamed']]);
-
-const mapChangedFile = (raw: GiteaChangedFile): ChangedFile => {
-  const file: ChangedFile = { path: raw.filename, status: FILE_STATUSES.get(raw.status ?? '') ?? 'modified' };
-  if (raw.additions !== undefined) file.additions = raw.additions;
-  if (raw.deletions !== undefined) file.deletions = raw.deletions;
-  if (raw.changes !== undefined) file.changes = raw.changes;
-  return file;
-};
-
-const splitUnifiedDiff = (diff: string): Map<string, string> => {
-  const parts = new Map<string, string>();
-  const chunks = diff.split(/^(?=diff --git )/m).filter((chunk) => chunk.startsWith('diff --git '));
-  for (const chunk of chunks) {
-    const lines = chunk.split('\n');
-    const plus = lines.find((line) => line.startsWith('+++ '));
-    const minus = lines.find((line) => line.startsWith('--- '));
-    const renamed = lines.find((line) => line.startsWith('rename to '));
-    let path = '';
-    if (plus && plus !== '+++ /dev/null') path = plus.slice(4).replace(/^b\//, '');
-    else if (renamed) path = renamed.slice('rename to '.length);
-    else if (minus && minus !== '--- /dev/null') path = minus.slice(4).replace(/^a\//, '');
-    else path = lines[0].match(/^diff --git a\/.+? b\/(.+)$/)?.[1] ?? '';
-    if (path) parts.set(path.replace(/\t.*$/, ''), chunk.endsWith('\n') ? chunk : `${chunk}\n`);
-  }
-  return parts;
-};
-
 const listState = (state: string): string => {
   if (state === 'closed' || state === 'merged') return 'closed';
   return state === 'all' ? 'all' : 'open';
@@ -381,11 +358,13 @@ const findBranchPull = async (call: Call, repo: GiteaRepo, branch: string): Prom
 
 type Handler = (call: Call, input: Input, request: SourceControlProviderRequest) => Promise<SourceControlJson>;
 
-const unsupported: Handler = async (_call, _input, request) => {
-  throw new CallError(`${request.method} is not something this Git host offers`, 501, 'UNSUPPORTED');
-};
+const unsupported: Handler = async (_call, _input, request) => { throw new CallError(`${request.method} is not something this Git host offers`, 501, 'UNSUPPORTED'); };
+
+const { createReviewDrafts }: { createReviewDrafts: (deps: ReviewDraftsDeps) => Reviews } = await import(modulePath('review-drafts'));
+const reviewDrafts = createReviewDrafts({ api, repoPath, text, integer, objectOf, selectorOf, resolveRepo, readPull, fail: (message, status, code) => new CallError(message, status, code) });
 
 const handlers = {
+  ...reviewDrafts.handlers,
   'auth.status': unsupported,
   'auth.verify': async (call) => {
     const { data } = await api<GiteaUser>(call, 'GET', '/user');
@@ -433,25 +412,24 @@ const handlers = {
   },
 
   changeRequestContext: async (call, input) => {
-    const { project } = await resolveRepo(call, text(input, 'directory'), text(input, 'remote'), selectorOf(input, 'project'));
-    const number = integer(input, 'number');
-    const repo = repoPath(project);
-    const includeDiff = input.includeDiff === true;
-    const [raw, { data: comments }, diff, changed] = await Promise.all([
+    const { raw: repoRaw, project } = await resolveRepo(call, text(input, 'directory'), text(input, 'remote'), selectorOf(input, 'project'));
+    const number = integer(input, 'number'), repo = repoPath(project), includeDiff = input.includeDiff === true;
+    const [raw, { data: comments }, diff, changed, reviews, references] = await Promise.all([
       readPull(call, project, number),
       api<GiteaComment[]>(call, 'GET', `${repo}/issues/${number}/comments`),
       includeDiff ? apiText(call, `${repo}/pulls/${number}.diff`) : Promise.resolve(''),
       includeDiff ? readChangedFiles(call, repo, number) : Promise.resolve([]),
+      input.includeTimeline === true ? readReviews(SCAN_SIZE, (page, limit) =>
+        api<GiteaReview[]>(call, 'GET', `${repo}/pulls/${number}/reviews`, { query: { page: String(page), limit: String(limit) } })) : Promise.resolve(null),
+      readReferences(itemReferences(api, call, repo, number, input.includeReferences === true)),
     ]);
-    const pull = mapPull(call, raw, project);
-    const patches = splitUnifiedDiff(diff);
+    const pull = mapPull(call, raw, project), patches = splitUnifiedDiff(diff);
     const files = changed.map((file) => {
-      const mapped = mapChangedFile(file);
-      const patch = patches.get(mapped.path);
+      const mapped = mapChangedFile(file), patch = patches.get(mapped.path);
       if (patch) mapped.patch = patch;
       return mapped;
     });
-    return {
+    const context = withReviewerStates({
       identity: call.identity,
       project,
       changeRequest: pull,
@@ -460,7 +438,8 @@ const handlers = {
       files,
       diff,
       ci: null,
-    };
+    }, reviews, raw.requested_reviewers ?? [], repoRaw.permissions?.admin === true && pull.state === 'open');
+    return withReferences(context, references);
   },
 
   listIssues: async (call, input) => {
@@ -475,9 +454,12 @@ const handlers = {
 
   getIssue: async (call, input) => {
     const { project } = await resolveRepo(call, text(input, 'directory'), text(input, 'remote'), selectorOf(input, 'project'));
-    const { data } = await api<GiteaIssue>(call, 'GET', `${repoPath(project)}/issues/${integer(input, 'number')}`);
+    const [{ data }, references] = await Promise.all([
+      api<GiteaIssue>(call, 'GET', `${repoPath(project)}/issues/${integer(input, 'number')}`),
+      readReferences(itemReferences(api, call, repoPath(project), integer(input, 'number'), input.includeReferences === true)),
+    ]);
     if (data.pull_request) throw new CallError(`#${data.number} is a pull request`, 404);
-    return mapIssue(call, data, project);
+    return withReferences(mapIssue(call, data, project), references);
   },
 
   issueComments: async (call, input) => {
@@ -769,7 +751,7 @@ const perform = async (call: Call, input: Input): Promise<SourceControlMutationR
       return { state };
     }
     default:
-      throw new CallError(`${kind} is not something this Git host offers`, 501, 'UNSUPPORTED');
+      return kind === 'change-request-review-dismiss' ? reviewDismissal(api, CallError).perform(call, kind, normalized, providerTarget) : reviewDrafts.perform(call, input);
   }
 };
 
@@ -809,7 +791,7 @@ const reconcile = async (call: Call, input: Input): Promise<SourceControlReconci
       return data.state === text(normalized, 'state') ? { state: 'succeeded', result: { state: data.state } } : NOT_APPLIED;
     }
     default:
-      return { state: 'outcome-unknown' };
+      return kind === 'change-request-review-dismiss' ? reviewDismissal(api, CallError).reconcile(call, kind, normalized, providerTarget) : reviewDrafts.reconcile(call, input);
   }
 };
 

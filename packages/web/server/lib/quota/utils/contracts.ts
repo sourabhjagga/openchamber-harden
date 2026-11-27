@@ -6,12 +6,24 @@ export interface JsonObject {
 
 export type ResetTimestamp = string | number;
 
+type UsageWindowValue =
+  | { kind: 'requests'; count: number }
+  | { kind: 'spend'; spent: number | null; limit: number | null };
+
 export interface UsageWindowInput<Percent = number | null | undefined, Seconds = number | null> {
   usedPercent?: Percent;
   windowSeconds?: Seconds;
   resetAt?: ResetTimestamp | null;
   valueLabel?: string | null | undefined;
+  value?: UsageWindowValue | undefined;
   creditsUsed?: number | undefined;
+  credits?: UsageWindowCredits | undefined;
+}
+
+export interface UsageWindowCredits {
+  used: number;
+  limit: number;
+  remaining?: number;
 }
 
 export interface UsageWindow<Percent = number | null | undefined, Seconds = number | null> {
@@ -23,7 +35,9 @@ export interface UsageWindow<Percent = number | null | undefined, Seconds = numb
   resetAtFormatted: string | null;
   resetAfterFormatted: string | null;
   valueLabel?: string;
+  value?: UsageWindowValue;
   creditsUsed?: number;
+  credits?: UsageWindowCredits;
 }
 
 export interface ProviderUsage {
@@ -41,6 +55,7 @@ export interface QuotaResult<ProviderId extends string | null = string, Provider
   error?: string;
   planLabel?: string;
   accountLabel?: string;
+  selection?: string;
 }
 
 export interface QuotaResultInput<ProviderId extends string | null = string, ProviderName extends string | null = string, Usage = ProviderUsage> {

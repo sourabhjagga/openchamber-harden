@@ -10,6 +10,7 @@ import { useI18n } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 import { isVSCodeRuntime } from '@/lib/desktop';
 import { isSessionPinned } from '@/lib/sessionPins';
+import { isLeadSession } from '@/lib/sessionLead';
 import { getSessionGoal } from '@/lib/sessionGoalMetadata';
 import { getCurrentSessionAssist } from '@/lib/sessionAssistMetadata';
 import { openGuestSurface } from '@/lib/guests/open-surface';
@@ -19,19 +20,24 @@ import { pluginModeFromId } from '@/lib/surfaces/modes';
 import { resolveEffectiveDirectory } from '@/hooks/useEffectiveDirectory';
 import { getSessionActivityTime } from '@/sync/session-ordering';
 import { streamPerfCount } from '@/stores/utils/streamDebug';
+import { useSessionDisplayStore } from '@/stores/useSessionDisplayStore';
 import { useUIStore } from '@/stores/useUIStore';
+import { findBlockingRequestTarget, openBlockingRequestTarget } from '@/sync/sync-context';
+import type { BlockingRequestKind } from '@/sync/session-request-hooks';
 import { DraggableSessionRow } from '../folders/sessionFolderDnd';
 import { listedChildren } from '../listedChildren';
 import { isPinnedZoneRowKey, sessionExpansionKey } from '../sessionSidebarRowModel';
 import { formatSessionCompactDateLabel, formatSessionDateLabel } from '../utils';
 import { DirectoryActionIndicator } from './DirectoryActionIndicator';
 import { GuestRowMarks } from './GuestRowMarks';
-import { SessionLeadToggle, SessionTreeChevron } from './SessionRowChevrons';
+import { SessionLeadSlot, SessionLeadToggle, SessionTreeChevron } from './SessionRowChevrons';
 import { SessionRowActions } from './SessionRowActions';
 import { SessionRowPrBadge } from './SessionRowPrBadge';
 import { SessionRowRename } from './SessionRowRename';
 import { SessionRowTooltipBody } from './SessionRowTooltipBody';
 import { SessionTimelineRowBody } from './SessionTimelineRowBody';
+import { holdSessionRowPosition } from './holdSessionRowPosition';
+import { selectBlockingBadgeSessions } from './sessionNodeItemUtils';
 import { areSessionNodeItemPropsEqual } from './sessionNodeItemMemo';
 import type { SessionNodeItemProps } from './sessionNodeItemProps';
 import { resolveSessionRowActionLayout, resolveSessionRowLines } from './sessionRowLayout';
@@ -45,6 +51,8 @@ import { useSessionRowMenus } from './useSessionRowMenus';
 import { useSessionRowPlace } from './useSessionRowPlace';
 import { useSessionRowRename } from './useSessionRowRename';
 import { useSessionRowWork } from './useSessionRowWork';
+import { useLiveSessionNode } from './useLiveSessionNode';
+import { useShowsOpenHiddenSession } from './useShowsOpenHiddenSession';
 
 export type { SessionNodeItemProps } from './sessionNodeItemProps';
 
@@ -52,7 +60,7 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
   streamPerfCount('ui.sidebar_session_node.render');
   const { t } = useI18n();
   const {
-    node,
+    node: structuralNode,
     depth = 0,
     ownsWork,
     groupDirectory,
@@ -93,6 +101,7 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
   } = props;
   const isVSCode = React.useMemo(() => isVSCodeRuntime(), []);
   const rowTooltip = useScrollDismissedTooltip();
+  const node = useLiveSessionNode(structuralNode);
   const session = node.session;
   const { isOneLineTimelineRow, isTwoLineRow, isTimelineRow, isZoneRow } = resolveSessionRowLines(renderContext, detailed);
   const hidePinnedMarker = rowKey !== undefined && isPinnedZoneRowKey(rowKey);
@@ -100,6 +109,7 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
   const {
     isCurrentSession,
     isActive,
+    runOverviewOpen,
     sessionDirectory,
     sessionProjectId,
     projectRootDirectory,
@@ -126,7 +136,8 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
   const contextMenuInstanceKey = rowKey ? `session-context:${rowKey}` : null;
   const sessionGoal = getSessionGoal(session);
   const sessionTitle = session.title || t('sessions.sidebar.session.untitled');
-  const hasChildren = listedChildren(node).length > 0;
+  const showSubagentSessions = useSessionDisplayStore((state) => state.showSubagentSessions);
+  const hasChildren = listedChildren(node, showSubagentSessions).length > 0;
   const isPinnedSession = isSessionPinned(pinnedSessionIds, sessionDirectory, session.id);
   const expansionKey = legacyContextKey;
   const isExpanded = expandedParents.has(expansionKey);
@@ -144,8 +155,9 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
     showStatusMarker,
     showActivityDuration,
     waitingOnUser,
-  } = useSessionRowLiveState({ node, sessionDirectory, isExpanded, isActive, timelineBadgeSessionScopes });
-  const { canTrackWork, isInWork, showDoneHint, toggleWork } = useSessionRowWork({
+  } = useSessionRowLiveState({ node, sessionDirectory, isExpanded, showSubagentSessions, isActive, timelineBadgeSessionScopes });
+  const showsOpenHiddenSession = useShowsOpenHiddenSession(node, isExpanded, showSubagentSessions, runOverviewOpen);
+  const { canTrackWork, pinBlocksWork, isInWork, showDoneHint, toggleWork } = useSessionRowWork({
     node,
     ownsWork,
     archivedBucket,
@@ -164,6 +176,7 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
     archivedBucket,
     isPinnedSession,
     canTrackWork,
+    pinBlocksWork,
     isInWork,
     toggleWork,
     projectId,
@@ -184,16 +197,6 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
     startSessionWorktreeMenuLoad,
   });
   const { isContextMenuOpen, isSessionMenuOpen } = menus;
-  const actionLayout = resolveSessionRowActionLayout({
-    isVSCode,
-    alwaysShowActions,
-    archivedBucket,
-    mobileVariant,
-    canTrackWork,
-    isTimelineRow,
-    isOneLineTimelineRow,
-    isSessionMenuOpen,
-  });
   const { formRef, renameInputRef } = useSessionRowRename({ isEditing, sessionRowKey, editTitle, handleSaveEdit });
   const interactions = useSessionRowInteractions({
     node,
@@ -209,6 +212,32 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
     handleSessionSelect,
   });
   const { isRowSelected, selectionModeEnabled } = interactions;
+  const pendingBadgeCount = (hasPendingPermission ? 1 : 0) + (hasPendingForm ? 1 : 0);
+  const badgesOpenRequests = !selectionModeEnabled;
+  const badgesAtRowEnd = badgesOpenRequests && !isTwoLineRow && pendingBadgeCount > 0;
+  const hoverRevealsActions = !alwaysShowActions || isVSCode;
+  const vscodeRoomBesideBadges = isVSCode && alwaysShowActions && badgesAtRowEnd;
+  const actionLayout = resolveSessionRowActionLayout({
+    isVSCode,
+    alwaysShowActions,
+    archivedBucket,
+    mobileVariant,
+    canTrackWork,
+    isTimelineRow,
+    isOneLineTimelineRow,
+    isSessionMenuOpen,
+    endBadgeCount: badgesAtRowEnd && hoverRevealsActions ? (pendingBadgeCount === 2 ? 2 : 1) : 0,
+  });
+  const openPendingRequest = (kind: BlockingRequestKind, badge: HTMLElement) => {
+    const badgeSessions = timelineBadgeSessionScopes
+      ? timelineBadgeSessionScopes.flatMap(({ directory, sessionIDs }) => sessionIDs.map((sessionID) => ({ sessionID, directory })))
+      : selectBlockingBadgeSessions(node, isExpanded, sessionDirectory, showSubagentSessions);
+    const target = findBlockingRequestTarget(badgeSessions, kind);
+    if (!target) return;
+    holdSessionRowPosition(badge);
+    openBlockingRequestTarget(target, handleSessionSelect);
+  };
+  const isHighlighted = isActive || showsOpenHiddenSession;
   const sessionRecapEnabled = useUIStore((state) => state.sessionRecapEnabled);
 
   const sessionTimestamp = getSessionActivityTime(session) || Date.now();
@@ -223,7 +252,7 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
         depth={depth}
         isTwoLineRow={isTwoLineRow}
         isOneLineTimelineRow={isOneLineTimelineRow}
-        isActive={isActive}
+        isActive={isActive || showsOpenHiddenSession}
         repeat={repeat}
         timelineProject={timelineProject}
         tooltipProjectLabel={tooltipProjectLabel}
@@ -254,7 +283,12 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
     ? <SessionLeadToggle expanded={isExpanded} alwaysShowActions={alwaysShowActions} onToggle={toggleSubsessions} />
     : null;
   const leadIconClassName = alwaysShowActions ? 'opacity-0' : 'group-hover:opacity-0 group-has-[:focus-visible]:opacity-0';
-  const treeSlot = isTwoLineRow ? null : treeChevron ?? <span aria-hidden className="h-3.5 w-3.5 flex-shrink-0" />;
+  const isLead = isLeadSession(session);
+  const treeSlot = isTwoLineRow
+    ? null
+    : isLead
+      ? <SessionLeadSlot chevron={treeChevron} alwaysShowActions={alwaysShowActions} />
+      : treeChevron ?? <span aria-hidden className="h-3.5 w-3.5 flex-shrink-0" />;
 
   const streamingIndicator = isZombie
     ? <Icon name="error-warning" className="h-4 w-4 text-status-warning" />
@@ -263,8 +297,8 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
   const currentRecap = sessionRecapEnabled && !isStreaming
     ? getCurrentSessionAssist(session)?.recap || null
     : null;
-  const rowBadges = (hasPendingPermission || hasPendingForm)
-    ? <PendingRequestBadges hasPermission={hasPendingPermission} hasForm={hasPendingForm} />
+  const rowBadges = pendingBadgeCount > 0
+    ? <PendingRequestBadges hasPermission={hasPendingPermission} hasForm={hasPendingForm} onOpen={badgesOpenRequests ? openPendingRequest : undefined} />
     : null;
   const timelinePrBadge = isTimelineRow && primaryRef ? (
     <SessionRowPrBadge
@@ -294,9 +328,9 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
       project={timelineProject}
       projectLabel={tooltipProjectLabel}
       title={sessionTitle}
-      titleClassName={isRowSelected || (isActive && !repeat)
+      titleClassName={isRowSelected || (isHighlighted && !repeat)
         ? 'text-interactive-selection-foreground'
-        : isActive
+        : isHighlighted
           ? 'text-foreground'
           : showUnreadStatus || hasPendingPermission || hasPendingForm
           ? 'font-semibold text-foreground'
@@ -312,10 +346,15 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
       prBadge={timelinePrBadge}
       zombieIndicator={isTimelineRow ? streamingIndicator : null}
       goal={goalMark}
-      marks={guestMarks.length > 0 ? <GuestRowMarks marks={guestMarks} onOpen={openGuestMark} /> : null}
-      badges={rowBadges}
+      marks={guestMarks.length > 0 || (isTwoLineRow && isLead) ? <>
+        {isTwoLineRow && isLead ? <SessionLeadSlot chevron={null} alwaysShowActions={alwaysShowActions} /> : null}
+        {guestMarks.length > 0 ? <GuestRowMarks marks={guestMarks} onOpen={openGuestMark} /> : null}
+      </> : null}
+      badges={badgesAtRowEnd ? null : rowBadges}
+      endBadges={badgesAtRowEnd ? rowBadges : null}
       doneHint={showDoneHint ? <DoneHintMark /> : null}
-      metaPaddingClass={isTimelineRow && alwaysShowActions
+      metaActionsRoomClass={actionLayout.endBadgeActionsRoomClass}
+      metaPaddingClass={isTimelineRow && alwaysShowActions && !vscodeRoomBesideBadges
         ? (showQuickArchiveAction ? 'pe-13' : 'pe-7')
         : undefined}
       hideMetaOnHoverClass={alwaysShowActions && !isVSCode ? '' : actionLayout.coveredMetaFadeClass}
@@ -336,15 +375,15 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
                 data-session-row-box=""
                 data-session-scope={selectionScopeKey ?? ''}
                 data-session-archived={archivedBucket ? '1' : '0'}
-                aria-current={isActive ? 'page' : undefined}
+                aria-current={isActive ? 'page' : showsOpenHiddenSession ? 'true' : undefined}
                 onClick={interactions.handleRowBackgroundClick}
                 style={{ paddingInlineStart: isTwoLineRow ? sessionDetailedRowPaddingLeft(depth) : sessionTreeRowPaddingLeft(depth) }}
                 className={cn(
                   'group relative my-0.5 flex cursor-pointer items-center rounded-md pe-2.5',
                   !isTwoLineRow && 'gap-1.5',
                   isTwoLineRow ? 'py-1.5' : 'py-[5px]',
-                  !(isRowSelected || (isActive && !repeat)) && 'hover:bg-interactive-hover/60',
-                  (isRowSelected || (isActive && !repeat)) && 'oc-selected text-interactive-selection-foreground',
+                  !(isRowSelected || (isHighlighted && !repeat)) && 'hover:bg-interactive-hover/60',
+                  (isRowSelected || (isHighlighted && !repeat)) && 'oc-selected text-interactive-selection-foreground',
                   isRowSelected && 'ring-1 ring-inset ring-border',
                 )}
               />
@@ -382,7 +421,7 @@ function SessionNodeItemComponent(props: SessionNodeItemProps): React.ReactNode 
                     interactions.isTouchPressed && 'bg-interactive-hover/70',
                     isTimelineRow || !alwaysShowActions
                       ? undefined
-                      : (isVSCode ? vscodeAlwaysActionPaddingClass : alwaysActionPaddingClass),
+                      : (isVSCode ? (vscodeRoomBesideBadges ? undefined : vscodeAlwaysActionPaddingClass) : alwaysActionPaddingClass),
                   )}
                 >
                   {rowBody}

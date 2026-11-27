@@ -1,11 +1,12 @@
 
 import { OpenCode } from '@opencode/client';
-import type { CredentialCreateInput, CredentialEntry, CredentialOAuth, CredentialValue, IntegrationInfo, JsonValue, UsageLimitsInfo } from '@opencode/client';
+import type { CredentialCreateInput, CredentialEntry, CredentialOAuth, CredentialValue, IntegrationInfo, JsonValue, ProviderInfo, UsageLimitsInfo } from '@opencode/client';
 import { z } from 'zod';
+import { LOCATION_PLUGINS_NOT_READY, waitForLocationPlugins } from './location-plugins.js';
 
 export type LegacyAuthEntry =
-  | { type: 'api'; key: string; metadata?: { [key: string]: JsonValue } }
-  | { type: 'oauth'; access: string | undefined; refresh: string | undefined; expires: number | undefined; accountId?: string; enterpriseUrl?: string; server?: string; orgID?: string };
+  | { type: 'api'; key: string; label?: string; metadata?: { [key: string]: JsonValue } }
+  | { type: 'oauth'; access: string | undefined; refresh: string | undefined; expires: number | undefined; label?: string; methodID?: string; accountId?: string; enterpriseUrl?: string; server?: string; orgID?: string };
 export type LegacyAuthFile = Record<string, LegacyAuthEntry>;
 
 type Metadata = NonNullable<CredentialOAuth['metadata']>;
@@ -22,6 +23,8 @@ export interface CredentialSource {
   create?: CreateCredential;
   remove?: (credentialID: string) => Promise<void>;
   listEnvironmentKeys?: () => Promise<Record<string, string>>;
+  launchEnvironment?: () => NodeJS.ProcessEnv | null;
+  listProviders?: () => Promise<ProviderInfo[]>;
   readUsageLimits?: () => Promise<UsageLimitsInfo | null>;
 }
 
@@ -29,7 +32,7 @@ interface CredentialConnection {
   buildOpenCodeUrl: (path: string, prefix?: string) => string;
   getOpenCodeAuthHeaders: () => Record<string, string>;
   getLaunchEnvironment?: () => NodeJS.ProcessEnv | null;
-  getDefaultDirectory?: () => string | null;
+  getDefaultDirectory?: () => string | null | Promise<string | null>;
 }
 
 let source: CredentialSource | null = null;
@@ -73,17 +76,24 @@ export const openCodeCredentialSource = ({
     list: () => client().credential.list(),
     create,
     remove: (credentialID: string) => client().credential.remove({ credentialID }),
+    launchEnvironment: getLaunchEnvironment,
     listEnvironmentKeys: async () => {
       const environment = getLaunchEnvironment();
       if (!environment) return {};
-      const { data } = await client(getDefaultDirectory()).integration.list();
+      const { data } = await client(await getDefaultDirectory()).integration.list();
       return projectEnvironmentKeys(data, environment);
     },
-    readUsageLimits: async () => (await client(getDefaultDirectory()).experimental.usage.limits()).data,
+    listProviders: async () => {
+      const location = client(await getDefaultDirectory());
+      if (!(await waitForLocationPlugins(location))) throw new Error(LOCATION_PLUGINS_NOT_READY);
+      return (await location.provider.list()).data;
+    },
+    readUsageLimits: async () => (await client(await getDefaultDirectory()).experimental.usage.limits()).data,
   };
 };
 
 const metadataString = z.string();
+const credentialLabel = z.string().trim().min(1);
 
 type ProjectableCredential = CredentialValue & Pick<Partial<CredentialOAuth>, 'access' | 'refresh' | 'expires'>;
 const projectCredentialValue = (value: ProjectableCredential): LegacyAuthEntry => {
@@ -91,6 +101,7 @@ const projectCredentialValue = (value: ProjectableCredential): LegacyAuthEntry =
     return value.metadata ? { type: 'api', key: value.key, metadata: value.metadata } : { type: 'api', key: value.key };
   }
   const entry: Extract<LegacyAuthEntry, { type: 'oauth' }> = { type: 'oauth', access: value.access, refresh: value.refresh, expires: value.expires };
+  if (value.type === 'oauth') entry.methodID = value.methodID;
   const accountId = metadataString.safeParse(value.metadata?.accountID).data;
   const enterpriseUrl = metadataString.safeParse(value.metadata?.enterpriseUrl).data;
   const server = metadataString.safeParse(value.metadata?.server).data;
@@ -105,7 +116,12 @@ const projectCredentialValue = (value: ProjectableCredential): LegacyAuthEntry =
 export const projectCredentialEntries = (entries: CredentialEntry[]) => {
   const result: LegacyAuthFile = {};
   for (const entry of entries) {
-    if (entry.active) result[entry.integrationID] = projectCredentialValue(entry.value);
+    if (entry.active) {
+      const label = credentialLabel.safeParse(entry.label).data;
+      const projected = projectCredentialValue(entry.value);
+      if (label !== undefined) projected.label = label;
+      result[entry.integrationID] = projected;
+    }
   }
   return result;
 };
@@ -121,6 +137,27 @@ const readWithEnvironment = async (current: CredentialSource) => {
   const result: LegacyAuthFile = {};
   for (const [integrationID, key] of Object.entries(environmentKeys)) result[integrationID] = { type: 'api', key };
   return { ...result, ...stored };
+};
+
+export interface KeyCredential {
+  key: string;
+  credentialID?: string;
+}
+
+const readKeyCredentialsFrom = async (current: CredentialSource) => {
+  const noEnvironment: Record<string, string> = {};
+  const [entries, environmentKeys] = await Promise.all([
+    current.list(),
+    current.listEnvironmentKeys ? current.listEnvironmentKeys() : noEnvironment,
+  ]);
+  const result: Record<string, KeyCredential> = {};
+  for (const [integrationID, key] of Object.entries(environmentKeys)) result[integrationID] = { key };
+  for (const entry of entries) {
+    if (!entry.active) continue;
+    if (entry.value.type === 'key') result[entry.integrationID] = { key: entry.value.key, credentialID: entry.id };
+    else delete result[entry.integrationID];
+  }
+  return result;
 };
 
 const coalesce = <Result>() => {
@@ -140,6 +177,7 @@ const coalesce = <Result>() => {
 const sharedRead = coalesce<LegacyAuthFile>();
 const sharedStoredRead = coalesce<LegacyAuthFile>();
 const sharedLoginRead = coalesce<Record<string, StoredLogin>>();
+const sharedKeyRead = coalesce<Record<string, KeyCredential>>();
 
 export interface StoredLogin {
   methodID: string;
@@ -168,6 +206,19 @@ const selectedLogin = (entries: CredentialEntry[], integrationID: string) => ent
 
 export function readOpenCodeCredentials() {
   return sharedRead(readWithEnvironment);
+}
+
+export function readKeyCredentials() {
+  return sharedKeyRead(readKeyCredentialsFrom);
+}
+
+export function readLaunchEnvironment() {
+  return source?.launchEnvironment?.() ?? null;
+}
+
+export async function readOpenCodeProviders() {
+  if (!source?.listProviders) throw new Error('OpenCode is not connected yet');
+  return source.listProviders();
 }
 
 export async function readOpenCodeUsageLimits() {

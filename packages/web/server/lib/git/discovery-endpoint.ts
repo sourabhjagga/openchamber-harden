@@ -2,11 +2,15 @@ import { isString } from '../shared/guards.js';
 import path from 'node:path';
 
 const CONTROL_PATTERN = /[\0-\x20\x7f]/;
+const PATH_CONTROL_PATTERN = /[^\x20-\x7e\u0080-\uffff]/;
 const SCP_PATTERN = /^(?:([^@/:\s]+)@)?([A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?):([^\\]+)$/;
 
 interface EndpointOptions {
   ownRemote?: boolean;
+  trailingSlash?: boolean;
 }
+
+const RAW_URL_PATH_PATTERN = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/?#]*(\/.*)$/;
 
 interface ParsedEndpoint {
   kind: 'ssh' | 'https';
@@ -15,6 +19,7 @@ interface ParsedEndpoint {
   host: string;
   port: string | null;
   endpointPath: string;
+  rawPath: string;
   endpoint: string;
 }
 
@@ -30,18 +35,25 @@ const decodePath = (value: string) => {
   }
 };
 
-const validatePath = (value: string, { absolute }: { absolute: boolean }) => {
+const validatePath = (value: string, { absolute, allowSpace }: { absolute: boolean; allowSpace: boolean }) => {
   const decoded = decodePath(value);
   const parts = decoded.split('/');
   const content = absolute ? parts.slice(1) : parts;
-  if (CONTROL_PATTERN.test(decoded) || decoded.includes('\\') || !content.length
+  if ((allowSpace ? PATH_CONTROL_PATTERN : CONTROL_PATTERN).test(decoded) || decoded.includes('\\') || !content.length
     || content.some((part) => !part || part === '.' || part === '..')) {
     throw discoveryError('Git discovery endpoint path is unsafe');
   }
   return decoded;
 };
 
-const parseEndpoint = (value: string, { ownRemote = false }: EndpointOptions = {}): ParsedEndpoint => {
+const stripTrailingSlash = (value: string, parsed: URL) => {
+  const rawPath = value.match(RAW_URL_PATH_PATTERN)?.[1];
+  if (!rawPath || /[?#\\]/.test(value)) throw discoveryError('Git discovery endpoint is unsafe');
+  validatePath(rawPath.slice(0, -1), { absolute: true, allowSpace: true });
+  parsed.pathname = parsed.pathname.slice(0, -1);
+};
+
+const parseEndpoint = (value: string, { ownRemote = false, trailingSlash = false }: EndpointOptions = {}): ParsedEndpoint => {
   if (!isString(value) || !value || value.trim() !== value
     || value.startsWith('-') || CONTROL_PATTERN.test(value) || value.includes('::')) {
     throw discoveryError('Git discovery endpoint is invalid');
@@ -51,7 +63,7 @@ const parseEndpoint = (value: string, { ownRemote = false }: EndpointOptions = {
   if (scp && !value.includes('://')) {
     if (/[?#]/.test(value)) throw discoveryError('Git discovery endpoint is unsafe');
     const [, user, host = '', remotePath = ''] = scp;
-    const endpointPath = validatePath(remotePath, { absolute: false });
+    const endpointPath = validatePath(remotePath, { absolute: false, allowSpace: false });
     return {
       kind: 'ssh',
       style: 'scp',
@@ -59,6 +71,7 @@ const parseEndpoint = (value: string, { ownRemote = false }: EndpointOptions = {
       host: host.toLowerCase(),
       port: null,
       endpointPath,
+      rawPath: remotePath,
       endpoint: `${user ? `${user}@` : ''}${host.toLowerCase()}:${remotePath}`,
     };
   }
@@ -75,7 +88,8 @@ const parseEndpoint = (value: string, { ownRemote = false }: EndpointOptions = {
     throw discoveryError('Git discovery endpoint is unsafe');
   }
   if (parsed.protocol === 'https:') parsed.username = '';
-  const endpointPath = validatePath(parsed.pathname, { absolute: true });
+  if (trailingSlash && value.endsWith('/')) stripTrailingSlash(value, parsed);
+  const endpointPath = validatePath(parsed.pathname, { absolute: true, allowSpace: true });
   parsed.hostname = parsed.hostname.toLowerCase();
   const endpoint = parsed.toString().replace(/\/$/, '');
   return {
@@ -85,6 +99,7 @@ const parseEndpoint = (value: string, { ownRemote = false }: EndpointOptions = {
     host: parsed.hostname,
     port: parsed.port || null,
     endpointPath,
+    rawPath: parsed.pathname,
     endpoint,
   };
 };
@@ -120,12 +135,12 @@ const joinRelativePath = (parentPath: string, relative: string) => {
   return `${parentPath.startsWith('/') ? '/' : ''}${stack.join('/')}`;
 };
 
-const formatRelativeEndpoint = (parent: ParsedEndpoint, endpointPath: string) => {
+const formatRelativeEndpoint = (parent: ParsedEndpoint, rawPath: string) => {
   if (parent.style === 'scp') {
-    return `${parent.user ? `${parent.user}@` : ''}${parent.host}:${endpointPath}`;
+    return `${parent.user ? `${parent.user}@` : ''}${parent.host}:${rawPath}`;
   }
   const authority = `${parent.user ? `${parent.user}@` : ''}${parent.host}${parent.port ? `:${parent.port}` : ''}`;
-  return `${parent.kind}://${authority}${endpointPath}`;
+  return `${parent.kind}://${authority}${rawPath}`;
 };
 
 const publicEndpoint = <Extra extends object>(parsed: ParsedEndpoint, extra: Extra) => Object.freeze({
@@ -141,11 +156,11 @@ export function normalizeDiscoveryEndpoint(value: string, options?: EndpointOpti
   return publicEndpoint(parseEndpoint(value, options), {});
 }
 
-export function resolveGitRelativeEndpoint(value: string, parentRemoteUrl: string) {
-  const parent = parseEndpoint(parentRemoteUrl, { ownRemote: true });
+export function resolveGitRelativeEndpoint(value: string, parentRemoteUrl: string, { trailingSlash = false } = {}) {
+  const parent = parseEndpoint(parentRemoteUrl, { ownRemote: true, trailingSlash });
   const resolved = /^(?:\.\.?\/)/.test(value)
-    ? parseEndpoint(formatRelativeEndpoint(parent, joinRelativePath(parent.endpointPath, value)))
-    : parseEndpoint(value);
+    ? parseEndpoint(formatRelativeEndpoint(parent, joinRelativePath(parent.rawPath, value)))
+    : parseEndpoint(value, { trailingSlash });
   return publicEndpoint(resolved, {
     relationship: Object.freeze({
       sameHost: parent.host === resolved.host,

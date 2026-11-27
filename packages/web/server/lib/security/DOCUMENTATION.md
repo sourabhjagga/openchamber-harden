@@ -20,6 +20,18 @@ HTTP and WebSocket consumers. `../ui-auth` owns credentials and session cookies;
   its SSE traffic can continue.
 - Session identity uses the same host-port cookie resolver as issuance and
   validation. Extracted notification identity is not a CSRF token.
+- Preflights from the desktop origin (`openchamber-ui://app`) get the
+  requested header names reflected, because the desktop sends the remote
+  host's saved request headers. The Capacitor origins (`capacitor://localhost`,
+  `https://localhost`), `http://localhost` and development origins keep the
+  fixed list: reflecting on a local origin would let any local page send
+  arbitrary request headers, including headers with server-side meaning.
+  (Relay provenance is selected by the dispatcher-stamped
+  `x-openchamber-relay-proof`, never by a client-sent
+  `x-openchamber-relay-connection`; see `../client-auth/DOCUMENTATION.md`.)
+  A requested list is reflected only when every entry is an HTTP field-name
+  token separated by commas with optional space or tab; anything else, and a
+  standalone `*` that would act as a wildcard, falls back to the fixed list.
 - Frame ancestors contain the app and packaged shells plus development origins
   only in development. Configured additions must be plain origins or the
   explicit wildcard; untrusted documents supply their own response policy.
@@ -27,8 +39,7 @@ HTTP and WebSocket consumers. `../ui-auth` owns credentials and session cookies;
   LAN address is invisible inside a container. An invalid value is ignored.
 - Bind helpers receive strings already resolved by server startup or the CLI.
   HTTP headers and the stored `publicOrigin` retain string validation at use.
-- Origin decisions return either a boolean immediately or a promise when
-  reading settings. Upgrade consumers must support both forms.
+- Origin decisions always return a promise, including the packaged-origin and same-host fast paths, and `RequestOriginChecker` says so. A consumer awaits the decision; reading the return value directly would treat a pending lookup as allowed, which is the regression the contract exists to prevent; the `openchamber/origin-check-awaited` lint rule rejects an unawaited check in a condition. Malformed headers reject the promise instead of throwing.
 - Forwarded-host and host arrays use their first entry. Empty arrays still fail
   instead of becoming an absent header. Malformed cookie escapes return their
   raw value.

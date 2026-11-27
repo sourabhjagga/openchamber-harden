@@ -1,7 +1,7 @@
 import type { Message, Part } from "@/lib/opencode/model"
-import { mergeMessages } from "./optimistic"
+import { confirmedOptimisticIDs, isPendingInboxMessage, mergeMessages, type OptimisticItem } from "./optimistic"
 import type { SessionMaterializationReason } from "./event-reducer"
-import { sortMessagesChronologically } from "./message-ordering"
+import { isSameCompletedCompaction } from "./message-ordering"
 import { toolContentShellChars } from "@/lib/opencode/toolContentShells"
 
 const STREAMING_PART_FIELDS = ["text", "output"] as const
@@ -21,6 +21,7 @@ export type MaterializedState = {
 export type MaterializeSessionSnapshotsOptions = {
   skipPartTypes?: ReadonlySet<string>
   mode?: "merge" | "prepend"
+  placement?: "tail" | "head"
 }
 
 export type MaterializeSessionSnapshotsResult = {
@@ -29,6 +30,40 @@ export type MaterializeSessionSnapshotsResult = {
   messages: Message[]
   messagesChanged: boolean
   partsChanged: boolean
+}
+
+export function materializeFetchedSessionPage(
+  state: MaterializedState,
+  sessionID: string,
+  page: { session: Message[]; partsByMessageID: ReadonlyMap<string, Part[]> },
+  optimistic: Map<string, OptimisticItem>,
+  mode: "merge" | "prepend" | "replace" | "initial",
+): MaterializeSessionSnapshotsResult {
+  for (const messageID of confirmedOptimisticIDs(page, optimistic.values())) optimistic.delete(messageID)
+  const pageIDs = new Set(page.session.map((message) => message.id))
+  const outstanding = mode === "initial" || mode === "replace"
+    ? (state.message[sessionID] ?? []).filter((message) => !pageIDs.has(message.id) && optimistic.get(message.id)?.message === message)
+    : []
+  const base = outstanding.length === 0 ? state : {
+    ...state,
+    message: { ...state.message, [sessionID]: state.message[sessionID].filter((message) => !outstanding.includes(message)) },
+  }
+  let materialized = materializeSessionSnapshots(
+    base,
+    sessionID,
+    page.session.map((info) => ({ info, parts: page.partsByMessageID.get(info.id) ?? [] })),
+    mode === "prepend" ? { mode: "prepend" } : { placement: mode === "merge" ? "tail" : "head" },
+  )
+  const visibleIDs = new Set(materialized.messages.map((message) => message.id))
+  const missingOptimistic = [...new Set([...outstanding.map((message) => message.id), ...optimistic.keys()])]
+    .flatMap((messageID) => visibleIDs.has(messageID) ? [] : [optimistic.get(messageID)!])
+  if (missingOptimistic.length > 0) {
+    materialized = materializeSessionSnapshots(materialized, sessionID, missingOptimistic.map((item) => ({
+      info: item.message,
+      parts: item.parts,
+    })))
+  }
+  return materialized
 }
 
 export type SessionMaterializationStatus = {
@@ -295,6 +330,12 @@ function mergeMaterializedParts(
   return [...mergedParts, ...missingLiveParts]
 }
 
+function settledCompactionTwin(existing: Message, incoming: readonly Message[], current: readonly Message[]): Message | undefined {
+  if (existing.role !== "compaction") return undefined
+  const twin = incoming.find((message) => isSameCompletedCompaction(message, existing))
+  return twin && !current.some((message) => message.id === twin.id) ? twin : undefined
+}
+
 export function materializeSessionSnapshots(
   state: MaterializedState,
   sessionID: string,
@@ -307,28 +348,32 @@ export function materializeSessionSnapshots(
       .filter((record) => !!record?.info?.id)
       .map((record) => [record.info.id, record] as const),
   )
-  const nextMessages = sortMessagesChronologically([...recordsByMessageID.values()].map((record) => record.info))
+  const nextMessages = [...recordsByMessageID.values()].map((record) => record.info)
   const snapshots = nextMessages.map((message) => recordsByMessageID.get(message.id)!)
   const existingMessages = state.message[sessionID]
   const currentMessages = existingMessages ?? []
   const incomingByID = new Map(nextMessages.map((message) => [message.id, message] as const))
   let reconciledCurrentMessages = currentMessages
-  let deliveredWhileAway = false
+  const deliveredWhileAway = new Set<string>()
+  const movedIDs = new Set<string>()
   for (let index = 0; index < currentMessages.length; index += 1) {
     const existing = currentMessages[index]
-    const incoming = incomingByID.get(existing.id)
-    const delivered = existing.role === "synthetic" && existing.pending === true && incoming?.role === "synthetic"
+    const incoming = incomingByID.get(existing.id) ?? settledCompactionTwin(existing, nextMessages, currentMessages)
+    const delivered = incoming?.role === existing.role && isPendingInboxMessage(existing) && !isPendingInboxMessage(incoming)
     const completed = existing.role === "assistant"
       && incoming?.role === "assistant"
       && incoming.time.completed !== undefined
       && (existing.time.completed === undefined || existing.closedLocally === true)
-    if (!incoming || (!delivered && !completed)) continue
-    deliveredWhileAway ||= delivered
+    const compacted = existing.role === "compaction" && incoming?.role === "compaction"
+      && (incoming.id !== existing.id || (existing.status === "running" && incoming.status !== "running"))
+    if (!incoming || (!delivered && !completed && !compacted)) continue
+    if (delivered && existing.role === "synthetic") deliveredWhileAway.add(existing.id)
+    if (delivered) movedIDs.add(existing.id)
     if (reconciledCurrentMessages === currentMessages) reconciledCurrentMessages = [...currentMessages]
     reconciledCurrentMessages[index] = incoming
   }
-  if (deliveredWhileAway) reconciledCurrentMessages = sortMessagesChronologically(reconciledCurrentMessages)
-  const messages = mergeMessages(reconciledCurrentMessages, nextMessages)
+  if (deliveredWhileAway.size > 0) reconciledCurrentMessages = reconciledCurrentMessages.filter((message) => !deliveredWhileAway.has(message.id))
+  const messages = mergeMessages(reconciledCurrentMessages, nextMessages, options.mode === "prepend" ? "older" : options.placement, movedIDs)
   const messagesChanged = messages !== currentMessages || (existingMessages === undefined && snapshots.length === 0)
 
   let partsChanged = false

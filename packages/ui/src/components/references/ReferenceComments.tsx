@@ -13,6 +13,7 @@ import { useEmojiShortcodes } from '@/lib/emoji/shortcodes';
 import { useI18n } from '@/lib/i18n';
 import { isIMECompositionEvent } from '@/lib/ime';
 import { ReferenceMarkdownEditor } from './ReferenceMarkdownEditor';
+import { joinProjectPath } from '@/lib/source-control/projectPath';
 import { cn } from '@/lib/utils';
 
 import { MarkdownSuggestionContext } from '@/components/chat/markdown/markdownSuggestion';
@@ -21,12 +22,14 @@ import { ReferenceMarkdownRewriteContext } from './projectUploads';
 import { ReferenceLinksContext } from './referenceLinks';
 import { commentDraft, commentDraftKey, forgetCommentDraft, rememberCommentDraft } from './referenceCommentDrafts';
 import { REFERENCE_META_TEXT, relativeTimeOf } from './referencePickerItems';
-import type { ReferenceCommentItem, ReferenceCommentThread, ReferenceCommitGroup, ReferenceTimelineEntry } from './referenceTimeline';
+import type { ReferenceCommentItem, ReferenceCommentThread, ReferenceCommitGroup, ReferenceReferenceItem, ReferenceTimelineEntry } from './referenceTimeline';
+import type { ReviewActionsTarget } from './ReferenceReviews';
 
 export type ReferenceThreadActions = {
-    reply: (threadId: string, body: string) => Promise<boolean>;
-    setResolved: (threadId: string, resolved: boolean) => Promise<boolean>;
+    reply?: (threadId: string, body: string) => Promise<boolean>;
+    setResolved?: (threadId: string, resolved: boolean) => Promise<boolean>;
     setAnswer?: (threadId: string, answer: boolean) => Promise<boolean>;
+    reviews?: ReviewActionsTarget;
 };
 
 export type ReferenceCommentActions = {
@@ -293,6 +296,11 @@ const ThreadRest: React.FC<{
                     >
                         <Icon name="check" className="size-3.5 text-[var(--status-success)]" />
                         {summary}
+                        {thread.outdated ? (
+                            <span className="inline-flex items-center rounded-full border border-edge px-1.5 typography-micro text-muted-foreground">
+                                {t('review.card.outdated')}
+                            </span>
+                        ) : null}
                         <Icon name="arrow-right-s" className="size-3.5 opacity-70" />
                     </button>
                 </span>
@@ -301,11 +309,12 @@ const ThreadRest: React.FC<{
     }
 
     const sendReply = async () => {
+        const reply = actions?.reply;
         const replyBody = text.trim() ? text : null;
-        if (!actions || !replyBody || busy) return;
+        if (!reply || !replyBody || busy) return;
         setBusy('reply');
         try {
-            if (await actions.reply(thread.id, replyBody)) {
+            if (await reply(thread.id, replyBody)) {
                 setText('');
                 setReplying(false);
             }
@@ -314,10 +323,11 @@ const ThreadRest: React.FC<{
         }
     };
     const toggleResolved = async () => {
-        if (!actions || busy || settling) return;
+        const settle = actions?.setResolved;
+        if (!settle || busy || settling) return;
         setBusy('resolve');
         try {
-            if (await actions.setResolved(thread.id, !thread.resolved)) setWrittenOn(thread);
+            if (await settle(thread.id, !thread.resolved)) setWrittenOn(thread);
         } finally {
             setBusy(null);
         }
@@ -383,7 +393,12 @@ const ThreadRest: React.FC<{
                 </div>
             ) : null}
             <div className="mt-1 flex flex-wrap items-center gap-1 -ms-1.5">
-                {actions && thread.canReply && !replying ? (
+                {thread.outdated ? (
+                    <span className="inline-flex items-center rounded-full border border-edge px-1.5 typography-micro text-muted-foreground">
+                        {t('review.card.outdated')}
+                    </span>
+                ) : null}
+                {actions?.reply && thread.canReply && !replying ? (
                     <HoverTooltip label={t('contextTooltips.tracker.replyToThread')}>
                         <span className="inline-flex">
                             <Button size="xs" variant="ghost" className={THREAD_ACTION_CLASS} onClick={() => setReplying(true)} disabled={busy !== null}>
@@ -393,7 +408,7 @@ const ThreadRest: React.FC<{
                         </span>
                     </HoverTooltip>
                 ) : null}
-                {actions && thread.canResolve ? (
+                {actions?.setResolved && thread.canResolve ? (
                     <HoverTooltip label={t(thread.resolved ? 'contextTooltips.tracker.reopenThread' : 'contextTooltips.tracker.resolveThread')}>
                         <span className="inline-flex">
                             <Button size="xs" variant="ghost" className={THREAD_ACTION_CLASS} onClick={() => void toggleResolved()} disabled={busy !== null || settling}>
@@ -469,6 +484,42 @@ const CommentEntry: React.FC<{
                     commentActions={commentActions}
                 />
             ) : editor ?? <CommentBody comment={comment} />}
+        </>
+    );
+};
+
+const ReferenceEntry: React.FC<{ entry: ReferenceReferenceItem; now: number }> = ({ entry, now }) => {
+    const { t } = useI18n();
+    const { directory, repository, issuePrefix, changeRequestPrefix } = React.useContext(ReferenceLinksContext);
+    const ownRepo = repository ? joinProjectPath(repository.owner, repository.repo) : null;
+    const openLink = useOpenChatLink(directory ?? '');
+    const { reference } = entry;
+    const relative = relativeLabel(t, reference.createdAt, now);
+    const mark = reference.kind === 'pull' ? changeRequestPrefix : issuePrefix;
+    const label = reference.repo && reference.repo !== ownRepo ? `${reference.repo}${mark}${reference.number}` : `${mark}${reference.number}`;
+    const chip = (
+        <a
+            href={reference.url}
+            aria-label={t('sourceBoard.references.open', { reference: label })}
+            onClick={(event) => {
+                if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                event.preventDefault();
+                openLink(reference.url);
+            }}
+            className="inline-flex h-5 min-w-0 max-w-full items-center rounded-full border border-edge px-1.5 font-mono typography-meta text-muted-foreground outline-none transition-colors hover:bg-interactive-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+        >
+            <span className="truncate">{label}</span>
+        </a>
+    );
+    return (
+        <>
+            <Avatar author={reference.author?.login ?? null} avatarUrl={reference.author?.avatarUrl ?? null} className="absolute inset-s-0 top-0 size-6" />
+            <div className={cn('flex min-h-6 min-w-0 flex-wrap items-center gap-x-1.5 typography-meta', REFERENCE_META_TEXT)}>
+                <span className="font-medium text-muted-foreground">{reference.author?.login ?? '—'}</span>
+                {relative ? <span>{relative}</span> : null}
+                <span>{t('sourceBoard.references.mentionedIn')}</span>
+                {reference.title ? <HoverTooltip label={reference.title}>{chip}</HoverTooltip> : chip}
+            </div>
         </>
     );
 };
@@ -556,7 +607,9 @@ export const ReferenceComments: React.FC<{
                 return (
                     <div key={entry.key} className="group relative pb-4 ps-9 last:pb-0">
                         {!isLast ? <div className="absolute bottom-1 inset-s-3 top-8 w-px bg-edge" /> : null}
-                        {entry.kind === 'commits' ? <CommitGroup group={entry} now={now} /> : (
+                        {entry.kind === 'commits' ? <CommitGroup group={entry} now={now} /> : entry.kind === 'reference' ? (
+                            <ReferenceEntry entry={entry} now={now} />
+                        ) : (
                             <CommentEntry
                                 comment={entry}
                                 now={now}

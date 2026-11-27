@@ -14,13 +14,13 @@ import type { FormRequest } from '@/lib/opencode/model';
 import type { RecoveredQuestion } from '@/sync/recoverable-questions';
 import { readWebSearchConsent } from '@/lib/opencode/websearch';
 import { useUIStore } from '@/stores/useUIStore';
-import { useScopedBlockingForms, useRecoveredQuestions, useSessions } from '@/sync/sync-context';
+import { useScopedBlockingForms, useRecoveredQuestions } from '@/sync/sync-context';
 import { revealWaitingPage, useRequestReveal } from '@/sync/request-reveal';
-import { useChatSessionSelection } from './chatColumnSession';
+import { useIsRequestFromSubagent } from './requestSource';
 import * as sessionActions from '@/sync/session-actions';
 import { agentUnavailableFrom, connectionLostMessage, isFormRequestNotFoundError } from '@/sync/form-request-error';
 import { useMobileAutocompleteMaxHeight } from './useMobileAutocompleteMaxHeight';
-import { FormDockModeContext } from './formsInChat';
+import { FormDockModeContext, formWaitingBlockId } from './formsInChat';
 import { FormFieldControl } from './FormFieldControl';
 import { WebSearchConsentDock } from './WebSearchConsent';
 import { FormMarkdown } from './FormMarkdown';
@@ -46,6 +46,9 @@ interface FormDockProps {
     hidden: boolean;
 }
 
+const dockKey = (form: FormRequest, directory: string | undefined, runtimeKey: string): string =>
+    Object.values(formDraftScope(form, directory, runtimeKey)).join('\u0000');
+
 const FormDockView: React.FC<FormDockProps> = ({ sessionId, directory, hidden }) => {
     const mode = React.useContext(FormDockModeContext);
     const inChat = mode === 'in-chat';
@@ -65,7 +68,7 @@ const FormDockView: React.FC<FormDockProps> = ({ sessionId, directory, hidden })
                         key="in-chat"
                         sessionId={sessionId}
                         form={first}
-                        formIds={[...forms.map((item) => item.id), ...recovered.map((item) => item.form.id)]}
+                        waitingForms={[...forms, ...recovered.map((item) => item.form)]}
                     />
                 )}
             </AnimatePresence>
@@ -75,11 +78,11 @@ const FormDockView: React.FC<FormDockProps> = ({ sessionId, directory, hidden })
         <AnimatePresence>
             {hidden ? null : form ? (
                 webSearchConsent
-                    ? <WebSearchConsentDock key={form.id} form={form} consent={webSearchConsent} />
-                    : <FormDockPanel key={`${runtimeKey}\u0000${form.id}`} form={form} forms={forms} directory={directory} runtimeKey={runtimeKey} readingHistory={readingHistory} />
+                    ? <WebSearchConsentDock key={dockKey(form, directory, runtimeKey)} form={form} consent={webSearchConsent} />
+                    : <FormDockPanel key={dockKey(form, directory, runtimeKey)} form={form} forms={forms} directory={directory} runtimeKey={runtimeKey} readingHistory={readingHistory} />
             ) : recoveredFirst ? (
                 <FormDockPanel
-                    key={`${runtimeKey}\u0000${recoveredFirst.form.id}`}
+                    key={dockKey(recoveredFirst.form, recoveredFirst.directory ?? directory, runtimeKey)}
                     form={recoveredFirst.form}
                     forms={forms}
                     directory={directory}
@@ -95,15 +98,19 @@ const FormDockView: React.FC<FormDockProps> = ({ sessionId, directory, hidden })
 const FormDockPointer: React.FC<{
     sessionId: string | null;
     form: FormRequest;
-    formIds: string[];
-}> = ({ sessionId, form, formIds }) => {
+    waitingForms: FormRequest[];
+}> = ({ sessionId, form, waitingForms }) => {
     const { t } = useI18n();
-    const reveal = React.useCallback((formId: string) => {
-        if (sessionId) revealWaitingPage(sessionId, formId);
+    const revealCard = React.useCallback((target: FormRequest) => {
+        if (sessionId) revealWaitingPage(sessionId, formWaitingBlockId(target));
     }, [sessionId]);
-    useRequestReveal(formIds, reveal);
+    const revealRequested = React.useCallback((formId: string) => {
+        const target = waitingForms.find((item) => item.id === formId);
+        if (target) revealCard(target);
+    }, [revealCard, waitingForms]);
+    useRequestReveal(waitingForms.map((item) => item.id), revealRequested);
     const title = form.title?.trim() || t('chat.formCard.inputNeeded');
-    const waiting = formIds.length - 1;
+    const waiting = waitingForms.length - 1;
     return (
         <ComposerFloatingPanel
             role="region"
@@ -114,7 +121,7 @@ const FormDockPointer: React.FC<{
                     <TooltipTrigger asChild>
                         <button
                             type="button"
-                            onClick={() => reveal(form.id)}
+                            onClick={() => revealCard(form)}
                             aria-label={t('chat.formDock.showInChatAria')}
                             className="flex min-w-0 flex-1 items-center gap-2 text-start text-muted-foreground transition-colors hover:text-foreground"
                         >
@@ -145,7 +152,6 @@ const FormDockPanel: React.FC<{
 }> = ({ form, forms, directory, runtimeKey, readingHistory, recovered }) => {
     const { t } = useI18n();
     const isMobile = useUIStore((state) => state.isMobile);
-    const sessions = useSessions(useChatSessionSelection().directory ?? undefined);
     const bodyRef = React.useRef<HTMLDivElement | null>(null);
 
     const fields = form.fields;
@@ -198,10 +204,7 @@ const FormDockPanel: React.FC<{
         saveFormDraft(draftScope, { fieldsSignature, values, step });
     }, [draftScope, fieldsSignature, step, values]);
 
-    const isFromSubagent = React.useMemo(() => {
-        const source = sessions.find((session) => session.id === form.sessionID);
-        return Boolean(source?.parentID);
-    }, [form.sessionID, sessions]);
+    const isFromSubagent = useIsRequestFromSubagent(form.sessionID);
 
     const shown = React.useMemo(() => visibleFields(fields, values), [fields, values]);
     const missing = React.useMemo(() => missingRequiredKeys(fields, values), [fields, values]);

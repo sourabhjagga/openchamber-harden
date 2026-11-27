@@ -27,6 +27,8 @@ export interface ProviderCapabilities {
   labels: boolean;
   reviewers: boolean;
   reviewThreads: { start: boolean; reply: boolean; resolve: boolean };
+  reviewDismiss?: 'others' | 'own';
+  reviewUndismiss?: boolean;
   reviewDrafts?: { fileComments: boolean };
   uploads: boolean;
   stacks: boolean;
@@ -75,16 +77,21 @@ export interface ProviderDescriptor {
     instances: { multiple: boolean; allowLoopbackHttp: boolean; allowPort: boolean; reserved: readonly string[]; placeholder: string };
     cliTransport: boolean;
     token?: { scopes: readonly string[]; createPath?: string };
-    urls: { changeRequest: readonly string[]; issue: readonly string[]; discussion?: readonly string[]; commit?: readonly string[]; user?: readonly string[] };
+    urls: { changeRequest: readonly string[]; issue: readonly string[]; discussion?: readonly string[]; commit?: readonly string[]; user?: readonly string[]; resolve?: string };
     features: {
       referenceSearch: boolean; referenceDetail: boolean; listStatuses: boolean; referencesAcross: boolean;
-      startThread: boolean; authorCanReview: boolean; projectUploads: boolean; issueCloseReason: boolean;
+      startThread: boolean; authorCanReview: boolean; projectUploads: boolean; absoluteProjectUploads?: boolean; issueCloseReason: boolean;
       reviewDrafts?: boolean; reviewDraftFileComments?: boolean;
       changeRequestTemplates: readonly string[];
       branchHeads?: boolean;
       submitRequirements?: boolean;
       advancedSearch?: boolean;
       commentEdit?: boolean;
+      issueAssignees?: boolean;
+      issueCloseReasonWrite?: boolean;
+      baseChange?: boolean;
+      updateBranch?: boolean;
+      rebase?: boolean;
     };
   };
   routeAliases?: {
@@ -135,13 +142,19 @@ export interface PublicProviderDescriptor {
     token?: { scopes: string[]; createPath?: string };
   };
   settings: { fields: Array<{ id: string; kind: SettingsFieldKind; secret: boolean }> };
-  urls: { changeRequest: string[]; issue: string[]; discussion?: string[]; commit?: string[]; user?: string[] };
+  urls: { changeRequest: string[]; issue: string[]; discussion?: string[]; commit?: string[]; user?: string[]; resolve?: string };
   features: ProviderDescriptor['presentation']['features'] & {
     changeRequestPatch: boolean;
+    reviews: boolean;
     reviewModel?: ReviewModel;
     revisions?: boolean;
     createByPush?: boolean;
     discussions?: boolean;
+  };
+  capabilities: {
+    reviewThreads: { start: boolean; reply: boolean; resolve: boolean };
+    reviewDismiss?: 'others' | 'own';
+    reviewUndismiss?: boolean;
   };
   extension?: { guestId: string; name: string; version: string };
 }
@@ -263,15 +276,16 @@ export interface ProviderImplementation<MutationInput = Json, ProviderTarget = J
     listChangeRequests(input: ReadInput & { page: number; query?: string | undefined; state: string; people: string; labels?: string[] }): Promise<object>;
     changeRequestContext(input: ReadInput & {
       number: number; project?: ProjectSelector | undefined; includeDiff: boolean; includeCIDetails: boolean; includeTimeline: boolean;
+      includeReferences?: boolean;
       revision?: string;
     }): Promise<object>;
     listIssues?(input: ReadInput & { page: number; query?: string | undefined; state: string; people: string; labels?: string[] }): Promise<object>;
-    getIssue?(input: ReadInput & { number: number; project?: ProjectSelector | undefined }): Promise<object | null>;
+    getIssue?(input: ReadInput & { number: number; project?: ProjectSelector | undefined; includeReferences?: boolean }): Promise<object | null>;
     issueComments?(input: ReadInput & { number: number; project?: ProjectSelector | undefined }): Promise<object>;
     projectUpstream(input: ReadInput): Promise<object>;
     projectBranches(input: ReadInput & { project: ProjectSelector }): Promise<object>;
     listLabels?(input: ReadInput & { project: ProjectSelector }): Promise<object>;
-    listReviewerCandidates?(input: ReadInput & { project: ProjectSelector }): Promise<object>;
+    listReviewerCandidates?(input: ReadInput & { project: ProjectSelector; role?: 'assignee' | 'reviewer' }): Promise<object>;
     readUpload?(input: ReadInput & { project: ProjectSelector; secret: string; filename: string; range?: string | undefined; signal: AbortSignal }): Promise<Response>;
     readChangeRequestPatch?(input: Omit<ReadInput, 'context'> & {
       number: number; sourceRepo?: { owner: string; repo: string } | null | undefined; revision?: string; linked?: true;
@@ -290,7 +304,7 @@ export interface ProviderImplementation<MutationInput = Json, ProviderTarget = J
     }): Promise<ResolvedChangeRequestSource>;
     references?(input: ReadInput & { kind: 'issue' | 'pull' | 'discussion'; state: string; people: string; query: string; cursor: string | null }): Promise<object>;
     referencesAcross?(input: { body: SourceControlJson; validateReadContext(context: ReadContextRequest): Promise<ProviderReadContext | null> }): Promise<object>;
-    referenceDetail?(input: ReadInput & { project: ProjectSelector; number: number; host: string; kind: 'item' | 'discussion' }): Promise<object>;
+    referenceDetail?(input: ReadInput & { project: ProjectSelector; number: number; host: string; kind: 'item' | 'discussion'; includeReferences?: boolean }): Promise<object>;
     reviewState?(input: ReadInput & { project: ProjectSelector; number: number }): Promise<object>;
     referenceStatuses?(input: Omit<ReadInput, 'session'> & { pulls: string }): Promise<object>;
   };
@@ -345,10 +359,38 @@ export interface ChangeRequestRevision {
   ref: string;
 }
 
+export interface ChangeRequestReviewSummary {
+  id: string;
+  state: 'approved' | 'changes_requested' | 'commented' | 'pending' | 'dismissed';
+  author: { login: string; avatarUrl?: string | undefined } | null;
+  submittedAt: string | null;
+}
+
 export interface ChangeRequestContextExtensions {
   voteLabels?: ChangeRequestVoteLabel[];
   submitRequirements?: ChangeRequestSubmitRequirement[];
   revisions?: ChangeRequestRevision[];
+  reviews?: ChangeRequestReviewSummary[];
+  canDismissReviews?: boolean;
+}
+
+export interface ChangeRequestThreadSummary {
+  id: string;
+  path: string;
+  side?: 'old' | 'new';
+  line: number | null;
+  startLine: number | null;
+  resolved: boolean;
+  canReply: boolean;
+  canResolve: boolean;
+  outdated?: boolean;
+  comments: Array<{
+    id: string;
+    body: string;
+    createdAt: string;
+    url: string;
+    author: { login: string; avatarUrl?: string | undefined } | null;
+  }>;
 }
 
 export interface ChangeRequestExtensions {

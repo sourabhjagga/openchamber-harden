@@ -34,6 +34,9 @@
     "opencodeBinary": {
       "scope": "instance"
     },
+    "useGlobalOpenCodeService": {
+      "scope": "instance"
+    },
     "serverUpdateChannel": {
       "scope": "instance",
       "surfaces": [
@@ -186,6 +189,9 @@
     "agentTerminalToolEnabled": {
       "scope": "instance"
     },
+    "agentActionsToolEnabled": {
+      "scope": "instance"
+    },
     "agentImageToolEnabled": {
       "scope": "instance"
     },
@@ -214,6 +220,9 @@
       "scope": "instance"
     },
     "agentWorkflowAutoApprove": {
+      "scope": "instance"
+    },
+    "agentWorkflowAutoApproveLeads": {
       "scope": "instance"
     },
     "isolatedSpacesEnabled": {
@@ -289,6 +298,9 @@
     "sttEndpointPath": {
       "scope": "instance"
     },
+    "sttKeyProvider": {
+      "scope": "instance"
+    },
     "sttModel": {
       "scope": "instance"
     },
@@ -296,6 +308,9 @@
       "scope": "instance"
     },
     "sttLanguage": {
+      "scope": "profile"
+    },
+    "sttPrompt": {
       "scope": "profile"
     },
     "sttCorrectTranscript": {
@@ -363,6 +378,9 @@
       "scope": "profile",
       "perSurface": true
     },
+    "sessionWorkIncludesPinned": {
+      "scope": "profile"
+    },
     "sidebarSessionBatchSize": {
       "scope": "profile"
     },
@@ -385,6 +403,10 @@
       "scope": "profile",
       "perSurface": true
     },
+    "sidebarShowSubagentSessions": {
+      "scope": "profile",
+      "perSurface": true
+    },
     "sidebarWorktreeNameByBranch": {
       "scope": "profile"
     },
@@ -397,6 +419,12 @@
     "sidebarHiddenSections": {
       "scope": "profile",
       "perSurface": true
+    },
+    "sidebarPageOrder": {
+      "scope": "profile"
+    },
+    "sidebarHiddenPages": {
+      "scope": "profile"
     },
     "workStatusSectionOrder": {
       "scope": "profile"
@@ -478,6 +506,9 @@
     "selectionApprovalText": {
       "scope": "profile"
     },
+    "keepEarlierReplies": {
+      "scope": "profile"
+    },
     "showTurnChangedFiles": {
       "scope": "profile"
     },
@@ -500,6 +531,12 @@
       "scope": "profile"
     },
     "diffHideWhitespace": {
+      "scope": "profile"
+    },
+    "referencePreviewNewestFirst": {
+      "scope": "profile"
+    },
+    "referencePreviewCollapseDescription": {
       "scope": "profile"
     },
     "gitChangesViewMode": {
@@ -623,6 +660,9 @@
     "largeTextPasteBehavior": {
       "scope": "profile"
     },
+    "documentAttachBehavior": {
+      "scope": "profile"
+    },
     "savePastedImagesAsFiles": {
       "scope": "profile"
     },
@@ -699,6 +739,15 @@
       "scope": "profile"
     },
     "defaultAgent": {
+      "scope": "profile"
+    },
+    "chatsDefaultModel": {
+      "scope": "profile"
+    },
+    "chatsDefaultVariant": {
+      "scope": "profile"
+    },
+    "chatsDefaultAgent": {
       "scope": "profile"
     },
     "smallModelUseDefault": {
@@ -804,6 +853,15 @@
       "scope": "profile"
     },
     "sessionGoalDefaultBudget": {
+      "scope": "profile"
+    },
+    "sessionCostAlertsEnabled": {
+      "scope": "profile"
+    },
+    "sessionCostWarnThreshold": {
+      "scope": "profile"
+    },
+    "sessionCostCriticalThreshold": {
       "scope": "profile"
     },
     "summarizeLastMessage": {
@@ -979,6 +1037,10 @@
       "local": true
     },
     "contextEditorTreeWidth": {
+      "scope": "device",
+      "local": true
+    },
+    "gitSidebarWidth": {
       "scope": "device",
       "local": true
     },

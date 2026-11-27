@@ -64,6 +64,7 @@ export const createPreferenceActions: UIStoreSlice<
   | 'setShowOpenCodeUpdateNotifications'
   | 'setInputSpellcheckEnabled'
   | 'setLargeTextPasteBehavior'
+  | 'setDocumentAttachBehavior'
   | 'setEnterToSend'
   | 'setEnterToSendConfigured'
   | 'setMobileReturnKeySends'
@@ -74,6 +75,7 @@ export const createPreferenceActions: UIStoreSlice<
   | 'setCopyMessagesAsPlainText'
   | 'setShowToolFileIcons'
   | 'setShowTurnChangedFiles'
+  | 'setKeepEarlierReplies'
   | 'setTimeFormatPreference'
   | 'setWeekStartPreference'
   | 'setDesktopWindowControlsPosition'
@@ -343,6 +345,10 @@ export const createPreferenceActions: UIStoreSlice<
     set({ largeTextPasteBehavior: normalizeLargeTextPasteBehavior(value) });
   },
 
+  setDocumentAttachBehavior: (value) => {
+    set({ documentAttachBehavior: value });
+  },
+
   setEnterToSend: (value) => {
     set({ enterToSend: value });
   },
@@ -377,6 +383,10 @@ export const createPreferenceActions: UIStoreSlice<
 
   setShowToolFileIcons: (value) => {
     set({ showToolFileIcons: value });
+  },
+
+  setKeepEarlierReplies: (value) => {
+    set({ keepEarlierReplies: value });
   },
 
   setShowTurnChangedFiles: (value) => {

@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { z } from 'zod';
 import { unwrapOpenCodeResponse } from '../opencode/response-envelope.js';
+import { waitForPluginList } from '../opencode/location-plugins.js';
 import type { TranslatedEvent } from '../event-stream/translate-v2.js';
 import type { SessionWarmingSnapshot } from './contracts.js';
 
@@ -68,6 +69,9 @@ const modelListSchema = z.array(z.object({
   id: z.string(),
   providerID: z.string(),
   cost: z.array(z.unknown()).catch([]),
+  family: z.string().nullish().catch(null),
+  modelID: z.string().nullish().catch(null),
+  limit: z.object({ context: z.number(), input: z.number().optional() }).nullish().catch(null),
   settings: z.object({ cache: z.object({ ttl: z.string() }).partial().nullish() }).passthrough().nullish(),
 }).passthrough());
 
@@ -85,6 +89,38 @@ const cacheLifetimeOf = (model: z.infer<typeof modelListSchema>[number] | null |
   if (configured) return configured;
   if (model?.providerID === 'claude-agent' && model.cost.length === 0) return CLAUDE_SUBSCRIPTION_CACHE_MS;
   return null;
+};
+
+type OpenCodeReader = Pick<SessionWarmingRuntimeOptions, 'buildOpenCodeUrl' | 'getOpenCodeAuthHeaders'> & { fetchImpl: typeof fetch };
+
+const readOpenCodeJson = async ({ fetchImpl, buildOpenCodeUrl, getOpenCodeAuthHeaders }: OpenCodeReader, route: string, directory: string) => {
+  const response = await fetchImpl(buildOpenCodeUrl(route, ''), {
+    headers: {
+      Accept: 'application/json',
+      'x-opencode-directory': encodeURIComponent(directory),
+      ...getOpenCodeAuthHeaders(),
+    },
+    signal: AbortSignal.timeout(STATUS_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new Error(`OpenCode answered ${response.status}`);
+  }
+  return unwrapOpenCodeResponse(await response.json());
+};
+
+export const readSessionModel = async (reader: OpenCodeReader, sessionId: string, directory: string) => {
+  const session = sessionModelSchema.safeParse(await readOpenCodeJson(reader, `/api/session/${encodeURIComponent(sessionId)}`, directory));
+  if (!session.success) return null;
+  await waitForPluginList(async () => {
+    const plugins = await readOpenCodeJson(reader, '/api/plugin', directory);
+    return Array.isArray(plugins) ? plugins : [];
+  });
+  const models = modelListSchema.safeParse(await readOpenCodeJson(reader, '/api/model', directory));
+  const { id, providerID } = session.data.model;
+  const model = models.success ? models.data.find((item) => item.id === id && item.providerID === providerID) : null;
+  const { context = 0, input = 0 } = model?.limit ?? {};
+  return { id, providerID, family: model?.family ?? null, modelID: model?.modelID ?? null, cacheLifetimeMs: cacheLifetimeOf(model), window: context && input ? Math.min(context, input) : context || input || null };
 };
 
 const statusPayloadSchema = z.object({
@@ -209,35 +245,12 @@ export const createSessionWarmingRuntime = ({
     }
   };
 
-  const readJson = async (route: string, directory: string) => {
-    const response = await fetchImpl(buildOpenCodeUrl(route, ''), {
-      headers: {
-        Accept: 'application/json',
-        'x-opencode-directory': encodeURIComponent(directory),
-        ...getOpenCodeAuthHeaders(),
-      },
-      signal: AbortSignal.timeout(STATUS_TIMEOUT_MS),
-    });
-    if (!response.ok) {
-      await response.body?.cancel().catch(() => undefined);
-      throw new Error(`OpenCode answered ${response.status}`);
-    }
-    return unwrapOpenCodeResponse(await response.json());
+  const readPingInterval = async (sessionId: string, directory: string) => {
+    const model = await readSessionModel({ fetchImpl, buildOpenCodeUrl, getOpenCodeAuthHeaders }, sessionId, directory).catch(() => null);
+    const lifetime = model?.cacheLifetimeMs;
+    return lifetime ? lifetime * CACHE_LIFETIME_SHARE : WARMING_INTERVAL_MS;
   };
 
-  const readPingInterval = async (sessionId: string, directory: string) => {
-    try {
-      const session = sessionModelSchema.safeParse(await readJson(`/api/session/${encodeURIComponent(sessionId)}`, directory));
-      if (!session.success) return WARMING_INTERVAL_MS;
-      const models = modelListSchema.safeParse(await readJson('/api/model', directory));
-      const { id, providerID } = session.data.model;
-      const model = models.success ? models.data.find((item) => item.id === id && item.providerID === providerID) : null;
-      const lifetime = cacheLifetimeOf(model);
-      return lifetime ? lifetime * CACHE_LIFETIME_SHARE : WARMING_INTERVAL_MS;
-    } catch {
-      return WARMING_INTERVAL_MS;
-    }
-  };
 
   const schedulePing = (sessionId: string, entry: WarmingEntry, at: number) => {
     if (entry.warmUntil === null || at >= entry.warmUntil) {

@@ -1,7 +1,6 @@
 import React from 'react';
 import { useI18n } from '@/lib/i18n';
 import { formatWindowLabel } from '@/lib/quota';
-import { getDisplayModelName } from '@/lib/quota/model-families';
 import { useQuotaProviders, useQuotaStore } from '@/stores/useQuotaStore';
 import type { QuotaProviderId, UsageWindow } from '@/types';
 import { selectVisibleModelEntries } from './usageModelSelection';
@@ -18,6 +17,7 @@ export type UsageProviderGroup = {
   providerName: string;
   planLabel?: string | null;
   accountLabel?: string | null;
+  providers: string[];
   rows: UsageLimitRow[];
   /** Provider-level message: a fetch error, or "nothing reported". */
   status: string | null;
@@ -67,7 +67,7 @@ export const useUsageProviderGroups = (): UsageProviderGroup[] => {
           rows.push({
             key: `model-${modelName}-${label}`,
             label: formatWindowLabel(label),
-            subtitle: getDisplayModelName(modelName),
+            subtitle: modelName,
             window,
           });
         }
@@ -89,6 +89,7 @@ export const useUsageProviderGroups = (): UsageProviderGroup[] => {
           providerName: providerMeta.name,
           planLabel: result?.planLabel,
           accountLabel: result?.accountLabel,
+          providers: providerMeta.providers ?? [],
           rows,
           status,
         };

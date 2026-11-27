@@ -1,4 +1,4 @@
-import type { Message, Part } from '@/lib/opencode/model';
+import { isWaitingSteer, type Message, type Part } from '@/lib/opencode/model';
 import type { TurnActivityRecord, TurnChangedFile, TurnGroupingContext } from '../lib/turns/types';
 
 type MessageRecord = {
@@ -113,12 +113,16 @@ export const areRenderRelevantPartsEqual = (left: Part[], right: Part[]): boolea
   return true;
 };
 
+const isPendingMessage = (message: Message): boolean =>
+  (message.role === 'user' || message.role === 'synthetic') && message.pending === true;
+
 const areRenderRelevantMessageInfoEqual = (left: Message, right: Message): boolean => {
   if (left === right) return true;
 
   return left.id === right.id
     && left.role === right.role
     && left.sessionID === right.sessionID
+    && (left.role !== 'assistant' || right.role !== 'assistant' || left.error === right.error)
     && (left as { finish?: unknown }).finish === (right as { finish?: unknown }).finish
     && (left as { status?: unknown }).status === (right as { status?: unknown }).status
     && (left.role !== 'compaction' || right.role !== 'compaction' || left.summary === right.summary)
@@ -131,6 +135,8 @@ const areRenderRelevantMessageInfoEqual = (left: Message, right: Message): boole
     && (left as { variant?: unknown }).variant === (right as { variant?: unknown }).variant
     && (left as { clientRole?: unknown }).clientRole === (right as { clientRole?: unknown }).clientRole
     && (left as { userMessageMarker?: unknown }).userMessageMarker === (right as { userMessageMarker?: unknown }).userMessageMarker
+    && isPendingMessage(left) === isPendingMessage(right)
+    && isWaitingSteer(left) === isWaitingSteer(right)
     && ((left as { time?: { created?: unknown; completed?: unknown } }).time?.created ?? null) === ((right as { time?: { created?: unknown; completed?: unknown } }).time?.created ?? null)
     && ((left as { time?: { created?: unknown; completed?: unknown } }).time?.completed ?? null) === ((right as { time?: { created?: unknown; completed?: unknown } }).time?.completed ?? null);
 };
@@ -231,6 +237,7 @@ export const areRelevantTurnGroupingContextsEqual = (
   }
 
   if (left.turnId !== right.turnId) return false;
+  if (left.snapshotTurnId !== right.snapshotTurnId) return false;
   if (left.isFirstAssistantInTurn !== right.isFirstAssistantInTurn) return false;
   if (!areStringListsEqual(left.earlierAssistantText, right.earlierAssistantText)) return false;
   if (left.isLastAssistantInTurn !== right.isLastAssistantInTurn) return false;

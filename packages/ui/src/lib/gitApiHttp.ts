@@ -222,7 +222,7 @@ const isSafeDisplayEndpoint = (value: string): boolean => {
     return (url.protocol === 'https:' || url.protocol === 'ssh:')
       && !url.username && !url.password && !url.search && !url.hash
       && Boolean(url.hostname && url.pathname && url.pathname !== '/')
-      && !/[\0-\x20\x7f\\]/.test(pathname)
+      && /^[\x20-\x5b\x5d-\x7e\u0080-\uffff]*$/.test(pathname)
       && pathname.split('/').slice(1).every((part) => part && part !== '.' && part !== '..');
   } catch {
     return false;
@@ -387,7 +387,7 @@ const operationErrorCodeSchema = z.enum([
     'GIT_LFS_CLIENT_MISSING',
     'CHECKOUT_TOO_LARGE',
     'PATH_LENGTH_LIMIT',
-    'BRANCH_NAME_CONFLICT',
+    'BRANCH_NAME_CONFLICT', 'SUBMODULE_SOURCE_LOCAL', 'LFS_SOURCE_LOCAL',
     'UNKNOWN',
   ]);
 const operationErrorSchema = <const Code extends readonly [string, ...string[]]>(codes: Code) => z.object({

@@ -20,6 +20,7 @@ OpenChamber's own server features live beside it: settings persistence in `../se
 - Agent and command names are relative paths inside their owned directories. Express decodes encoded separators, so validation accepts nested names while refusing absolute paths and traversal. The disabled-agent catalog has a separate route so an agent named `disabled` remains addressable.
 - MCP conversion preserves handwritten protocol and startup-timeout fields even though the editor has no controls for them. Agent markdown bodies override frontmatter `system`, matching OpenCode's reader.
 - The minimum OpenCode version agrees with `engines.opencode` in the web package manifest. A future major remains unsupported until its contract is checked.
+- A managed OpenCode, in the web server and the VS Code extension alike, starts with `OPENCODE_CLIENT=openchamber` (`managed-opencode-env.ts`), so its model requests carry `x-opencode-client: openchamber` and the `openchamber` user-agent suffix, and OpenCode can tell OpenChamber's traffic apart. An external OpenCode keeps its own name.
 - An external connection requires explicit host, port, or skip-start configuration. Automatic attachment to a default port can take over a user's independent OpenCode instance and couple unrelated lifecycles.
 - A pending restart with a stopped-process task runs that task in its own restart, even if another restart is already in flight. Task failure is reported after the managed server starts again so a failed upgrade does not leave it stopped.
 - Process-registry cleanup considers only recorded children, verifies their current executable and known port against PID reuse, and requires evidence that the owner is gone. EPERM means a PID still exists; an identity that cannot be verified stays untouched.
@@ -27,12 +28,20 @@ OpenChamber's own server features live beside it: settings persistence in `../se
 - Message shells keep subagent results whole because older OpenCode versions put the child-session reference there. File-edit results also stay whole because their useful diff is already in metadata and shelling their short text saves no meaningful bytes. Shelled OpenChamber envelopes retain the outcome as well as the action so failed calls cannot read as successful actions.
 - Pending permissions and forms are seeded from the upstream stream because reading a directory's pending list can initialize that location. Replies without a request ID clear that kind's unverifiable pending request; turn end clears permissions and waiting pages, and restart clears all pending requests.
 - Running-image checks stop counting jobs older than OpenCode's image timeout plus a minute. An interrupted generation can remain listed after an OpenCode restart and otherwise hold a goal indefinitely.
-- Skill-list fetch failure remains distinct from an authoritative empty list. Partial local discovery reports its incompleteness, and process-level discovery flags travel with the list because browsers cannot infer which external roots OpenCode enables. Built-in skill IDs remain separate from display names because policy statements use IDs.
+- Skill-list fetch failure remains distinct from an authoritative empty list. Partial local discovery reports its incompleteness, and process-level discovery flags travel with the list because browsers cannot infer which external roots OpenCode enables. The flags are read from the environment the managed OpenCode was started with (`getManagedOpenCodeProcessEnv()`), which includes variables from Settings and `opencode service set env` that OpenChamber's own process never has; with an external OpenCode, whose environment is unknown, the list carries no flags and the UI hides nothing, because OpenChamber's own environment can differ from that server's and a hidden skill the agent does load is the worse mistake. Flag values follow OpenCode's parser: `1` or `true` in any case, nothing else. The VS Code bridge reports them the same way from its managed OpenCode's launch environment. Built-in skill IDs remain separate from display names because policy statements use IDs.
+- A skill an MCP server serves (OpenCode's `mcp_skills` flag) arrives with a `skill://` path and an empty body. The list keeps it on the `<built-in>` path, which is what makes every editing, renaming and file surface treat it as read-only; the UI tells it from OpenCode's own built-ins by the `:` in its name (`mcpSkillServer` in `skillLocations.ts`), since built-in skills carry no server. The detail route reads the body of any `<built-in>` skill listed without one through `experimental.skill.file` (`skill-body.ts`), so listing never asks an MCP server for files; a failed read leaves the body empty and the page still opens. The VS Code bridge does the same.
+- The Skills sidebar's "Skills from MCP servers" box writes `experimental.mcp_skills` to the user's global `opencode.json` (`PUT /api/config/skill-mcp`, `api:config/skill-mcp` in VS Code), so it works the same for a managed and an external OpenCode. OpenCode reads the flag once, when it builds a location's MCP layer, so the write is followed by `applyMcpSkillsFlag` (`mcp-skills-apply.ts`): for every running location it waits until OpenCode's own config shows the new value, then evicts the location so the next request rebuilds it. Evicting before that confirmation lost the race whenever the open UI's next request rebuilt the location before OpenCode's file watcher reread the config, and that build kept the old flag. Eviction runs the location's shutdown, which rejects pending permission requests, cancels forms and ends OpenCode terminals, so a location with a running session, a pending request or form, or a terminal is left alone and checked again every 15 seconds for up to an hour; a newer toggle cancels the older wait. A project `opencode.json` that sets any `experimental` key hides the global one for that project, because OpenCode takes `experimental` from one document only.
 - Skill installation provenance refines the Installed badge; provenance-write failure cannot fail a completed installation or deletion. Roots discovered in both user and project scope share disk reads while retaining discovery order and project precedence.
 - Skill supporting-file walks and repeated ancestor probes stay out of list enrichment because bundled environments can contain thousands of files. Skill mutation serialization and exclusive creation protect the check-then-write interval against concurrent requests and processes.
 - Installer options come only from host-owned callers. Commands, destinations, versions, URLs, and environments are never request-controlled, and installer output is discarded because it can contain registry or environment secrets. Windows extraction uses the system `tar.exe` because Git Bash tar interprets a drive-letter path as a remote host.
 
 ## Decisions
+
+### Why the retired opencode-claude plugin is removed, and Bun is not shimmed
+
+`@openchamber/opencode-claude` served Claude as the `claude-code` provider until OpenCode 2.2.3 shipped the same provider as `claude-agent`. It calls `Bun.serve` when it loads, so the desktop's bundled OpenCode, which runs on Node, fails every Claude turn with "Bun is not defined" while it is listed. Before each managed start, `retired-plugins.ts` removes it from the global config files. Once OpenCode answers, it connects Claude Agent through the Claude Code login, unless Claude Agent already has a connection, and the UI shows a toast that says which of the two happened (`opencode-claude-retired`, `opencode-claude-retired-unconnected`).
+
+Saved `claude-code/...` selections are not carried over. The plugin stored concrete model IDs that Claude Agent mostly lists under aliases, and mapping them would change model resolution for every user, so the toast asks the user to pick Claude models again. A folder config is left as written, because it may be someone else's repository; a policy deny there loses to an earlier allow and would add a parse of `OPENCODE_CONFIG_CONTENT` to every launch, so none is added. An external OpenCode runs on Bun, where the plugin still works, so it is left alone. A partial `globalThis.Bun` would make other Bun-only plugins fail later and less clearly, so it stays out.
 
 ### Why config and wire fields stay unchecked until use
 
@@ -145,6 +154,10 @@ Proxy registration precedes OpenCode bootstrap, so an external HTTPS target may 
 
 A bounded readiness hold lets the first request succeed when OpenCode finishes starting. Immediate 503s put clients into retry backoff and delay bootstrap; a genuinely unavailable server still receives a bounded failure.
 
+### Why a prompt that never reached OpenCode carries its own header
+
+The UI resends a prompt only when the failure proves OpenCode never received it (`packages/ui/src/lib/opencode/DOCUMENTATION.md`, *Transport and authoritative state*). Only the proxy can tell, so `prompt-delivery.ts` adds `x-openchamber-error: opencode-unreachable` to the 503 of a `POST /api/session/:id/prompt` in two cases: the readiness hold answered without forwarding it (`markHeldPrompt`), or the connection to OpenCode failed before it opened, `ECONNREFUSED`, `ENOTFOUND` or `EAI_AGAIN` (`markRefusedPrompt`). A reset socket, a timeout and every other route keep the plain 503 or 504: OpenCode may have admitted the request, and a resend could run a prompt another client cancelled meanwhile.
+
 ### Why streaming request framing survives header filtering
 
 A stream without content length needs transfer encoding or OpenCode can read an empty prompt body. A parsed body replay instead sets content length and removes transfer encoding because OpenCode rejects requests carrying both.
@@ -188,6 +201,62 @@ message. A plugin's relative path is resolved against the config that declares
 it; the last matching statement in the earliest matching config decides whether
 the denial can take effect.
 
+### Why session-directory writes resolve and reads keep their spelling
+
+OpenCode stores whatever directory string a request carries, and its session
+listing answers only the spelling it holds. A home folder behind a symlink (the
+common case when it lives on another mount) therefore produced a session that
+was stored under the alias spelling and never listed again, and a later move
+made it worse. So the places where this server hands OpenCode a new session
+directory resolve it first: proxy create and move bodies (`POST /api/session`
+and `POST /api/session/:id/move`, which web, desktop, both mobile shells and the
+relay all reach through this server's proxy), control-tool creates and worktree
+moves, and workflow agent starts. For the control tool the start folder inside a
+worktree (`openchamber-sessions/worktree-start-directory.ts`) comes back
+resolved, after Git and setup used the checkout spelling, so a create uses that
+one path for the session, its first prompt, the `session-created` event and the
+result, and a worktree move reports the path it handed OpenCode; a create
+outside a worktree already gets a resolved folder from the directory check.
+Each takes the canonicalizer from
+`createSessionDirectoryCanonicalizer`, which resolves the exact string it was
+given (no trimming, so `project` and `project ` stay two folders) and passes a
+relative path, or one whose `realpath` fails, through unchanged.
+
+A symlink on this machine means nothing to an OpenCode that runs elsewhere. The
+canonicalizer exists only while OpenCode shares this filesystem, the same test
+`openCodePluginDelivery` uses: a managed child, or an external one at a
+loopback address. With a remote `OPENCODE_HOST` every write path sends the
+directory exactly as the client spelled it, and the proxy does not parse the
+create body at all.
+
+The proxy parses a create body itself (nothing parses `/api/session` before
+it). A body it rejects as invalid JSON or over 64 KB is already consumed, so it
+answers 400 or 413 itself instead of forwarding an empty request; a body with a
+non-JSON content type is not read and goes to OpenCode as it arrived. A body it
+did read is always written again, an empty `{}` included, as plain JSON with a
+matching `Content-Length` and no `Content-Encoding`, since the parser inflated it.
+
+What stays outside this rule:
+
+- Reads keep their spelling. The `directory=` read rewrite in the proxy
+  (`createDirectoryQueryCanonicalizer`) stays as it was, and nothing else
+  rewrites a directory on the way out: asking OpenCode for a spelling it holds
+  no sessions for is the same failure from the other side.
+- A directory under the configured chats root keeps the client's spelling on
+  create, because a chats session's identity derives from that configured
+  root. `scheduled-tasks/chats-scope.ts` accepts both spellings of its root,
+  resolving the real one once in the background (through the nearest existing
+  ancestor, so a fresh install works before the folder exists) and again after
+  startup creates the folder; `contains` itself never touches the filesystem.
+- Scheduled runs (`scheduled-tasks/runtime.ts`) create their session in the
+  task's project folder or its isolated worktree as stored, without this
+  canonicalizer; they are not control-tool creates.
+- The VS Code extension sends create and move straight to OpenCode through its
+  own bridge (`packages/vscode/src/bridge-proxy-runtime.ts`), not through this
+  proxy, so it is outside this rule.
+- Sessions already stored under an alias spelling are not migrated in bulk; a
+  later move through any of the paths above stores the real path.
+
 ## Entrypoints and structure
 - `packages/web/server/lib/opencode/index.js`: public entrypoint (currently baseline placeholder).
 - `packages/web/server/lib/opencode/auth.js`: provider authentication file operations.
@@ -195,10 +264,10 @@ the denial can take effect.
 - `packages/web/server/lib/opencode/auth-state-runtime.js`: managed OpenCode server auth password/header runtime.
 - `packages/web/server/lib/opencode/routes.js`: OpenCode/provider settings and auth-related route registration.
 - `packages/web/server/lib/opencode/v1-migration-topup.js`: re-arms OpenCode's own V1 -> V2 session import for V1 sessions changed by 1.x after the last completed import; runs only before a managed spawn. See "v1-migration-topup.js" below.
-- `packages/web/server/lib/opencode/lifecycle.js`: OpenCode process lifecycle runtime (startup, restart, readiness, health monitoring). It records each lifecycle transition (launch, ready, exit, restart, health failure and recovery, external connect) as a fixed action in the process-local diagnostic journal (`../diagnostics/server-journal.js`), which the diagnostic timeline exports; the journal never holds stderr, paths or error text. A configured external server that misses the startup readiness window is re-probed every five seconds until it answers, because the health monitor only speaks for a process OpenChamber started. The interval stays fixed rather than backing off, so a very late start is still found within seconds. One probe runs at a time, its timeout covers the response body, and an answer that arrives after shutdown began or the endpoint changed is dropped. After readiness it warms the last-used directory only (first entry of the `getWarmupDirectories` dep, best-effort) because OpenCode initializes each directory lazily on first request and that cost would otherwise be paid by the user's first interactive session open. It warms no other projects: on OpenCode 2 the first directory-scoped read boots that location's whole MCP fleet. The warmed directory is also `getDefaultOpenCodeDirectory()`, the scope for server-side reads that have no directory of their own (integrations in `auth.js`, the small model's model and provider lists, the agent check after a restart): v2 answers a location read without one for its own working directory, the user's home for a managed OpenCode, and would start an MCP fleet there. While no warmed directory is usable (no project open), the getter answers the `noProjectDirectory` dep instead, the managed chats root, which the UI also works in then. Once the UI saves the directory it moved to (`lastDirectory`, reported by the settings runtime's `onLastDirectoryChanged`), `noteCurrentDirectory` makes that directory the default: the UI runs it anyway, and the one used last at startup may be a chat the user left, whose location the UI stops; a read there, such as the quota's integration list every 3 minutes, started it again. The getter revalidates that directory on every read: once it is no longer a readable directory (deleted, moved, replaced by a file, or stripped of read/execute permission) it is never sent, and the lifecycle advances to another directory the warm pass validated or re-reads `getWarmupDirectories` (coalesced, with a short cooldown) so a currently-valid `lastDirectory` replaces the stale one. A stale cached path would otherwise make every directory-scoped read answer `500 FileSystem.realPath ... ENOENT` — the failure that took the quota credential read down with it.
+- `packages/web/server/lib/opencode/lifecycle.js`: OpenCode process lifecycle runtime (startup, restart, readiness, health monitoring). It records each lifecycle transition (launch, ready, exit, restart, health failure and recovery, external connect) as a fixed action in the process-local diagnostic journal (`../diagnostics/server-journal.js`), which the diagnostic timeline exports; the journal never holds stderr, paths or error text. A configured external server that misses the startup readiness window is re-probed every five seconds until it answers, because the health monitor only speaks for a process OpenChamber started. The interval stays fixed rather than backing off, so a very late start is still found within seconds. One probe runs at a time, its timeout covers the response body, and an answer that arrives after shutdown began or the endpoint changed is dropped. After readiness it warms the last-used directory only (first entry of the `getWarmupDirectories` dep, best-effort) because OpenCode initializes each directory lazily on first request and that cost would otherwise be paid by the user's first interactive session open. It warms no other projects: on OpenCode 2 the first directory-scoped read boots that location's whole MCP fleet. The warmed directory is also `getDefaultOpenCodeDirectory()`, the scope for server-side reads that have no directory of their own (integrations in `auth.js`, the small model's model and provider lists, the agent check after a restart): v2 answers a location read without one for its own working directory, the user's home for a managed OpenCode, and would start an MCP fleet there. While no warmed directory is usable (no project open), the getter answers the `noProjectDirectory` dep instead, the managed chats root, which the UI also works in then. Once the UI saves the directory it moved to (`lastDirectory`, reported by the settings runtime's `onLastDirectoryChanged`), `noteCurrentDirectory` makes that directory the default: the UI runs it anyway, and the one used last at startup may be a chat the user left, whose location the UI stops; a read there, such as the quota's integration list every 3 minutes, started it again. The getter is asynchronous and revalidates that directory on every read through `../directory-reachability`, so a folder on an offline share counts as unusable without blocking: once it is no longer a readable directory (deleted, moved, replaced by a file, or stripped of read/execute permission) it is never sent, and the lifecycle advances to another directory the warm pass validated or re-reads `getWarmupDirectories` (coalesced, with a short cooldown) so a currently-valid `lastDirectory` replaces the stale one. A stale cached path would otherwise make every directory-scoped read answer `500 FileSystem.realPath ... ENOENT` — the failure that took the quota credential read down with it.
 - The managed OpenCode's environment also carries the user's variables from Settings and from `opencode service set env` (`getUserEnvironment`, see `../environment`), over the inherited environment and under everything OpenChamber sets for OpenCode itself; enterprise mode passes none. `getManagedOpenCodeProcessEnv()` therefore includes them, so a provider key given this way is visible to the credential reader like any other variable OpenCode reports.
 - `packages/web/server/lib/opencode/provider-env-aliases.js`: mirrors known provider credential env aliases into the managed OpenCode process environment (for example `GEMINI_API_KEY` → `GOOGLE_GENERATIVE_AI_API_KEY`) so OpenCode connection detection and the upstream AI SDK agree on the same key names. Canonical implementation shared by web lifecycle and the VS Code managed spawn path (`packages/vscode/src/provider-env-aliases.ts` re-exports this module).
-- `packages/web/server/lib/opencode/env-runtime.js`: OpenCode CLI/binary resolution and shell environment runtime. The desktop's bundled OpenCode is a server script (`packages/electron/opencode-server`, resolved from `resourcesPath/opencode-server` or `OPENCHAMBER_BUNDLED_OPENCODE_SERVER_DIR`, source `bundled`); `resolveManagedOpenCodeLaunchSpec` runs it on the host's own Node on every platform (Electron's executable with `ELECTRON_RUN_AS_NODE`), and the version check and the spawn add the spec's `env`. It is never exported as `OPENCODE_BINARY` or put on PATH (maintainer decision, 2026-11-17): a terminal or an agent's shell runs the user's own `opencode` or none.
+- `packages/web/server/lib/opencode/env-runtime.js`: OpenCode CLI/binary resolution and shell environment runtime. The bundled OpenCode is a server script (`packages/web/opencode-server`, resolved from `OPENCHAMBER_BUNDLED_OPENCODE_SERVER_DIR`, Electron's `resourcesPath/opencode-server`, or the built web package's `build/opencode-server`, source `bundled`); `resolveManagedOpenCodeLaunchSpec` runs it on Node on every platform (Electron's executable with `ELECTRON_RUN_AS_NODE` in desktop, host `node` in web/CLI), and the version check and the spawn add the spec's `env`. It is never exported as `OPENCODE_BINARY` or put on PATH (maintainer decision, 2026-11-17): a terminal or an agent's shell runs the user's own `opencode` or none.
 - `packages/web/server/lib/opencode/bundled-opencode-server.ts`: finds the desktop's bundled OpenCode server script among the directories `env-runtime.js` names and builds its launch spec (see the `env-runtime.js` entry).
 - `packages/web/server/lib/opencode/env-config.js`: OpenCode-related environment variable parsing and validation (host/port/hostname).
 - `packages/web/server/lib/opencode/hmr-state-runtime.js`: HMR-persistent runtime state initialization, auth-state bootstrap, and HMR sync helpers.
@@ -216,7 +285,8 @@ OpenCode 2 loads the user config, then `OPENCODE_CONFIG`, then project `opencode
 - `packages/web/server/lib/opencode/managed-plugin-config.js`: the `OPENCODE_CONFIG_CONTENT` merge used only on the fallback path, when the user's own environment owns `OPENCODE_CONFIG`; it appends managed plugin directories, plugin-switch policies and permission rules.
 - `packages/web/server/lib/opencode/managed-config-file.js`: the managed OpenCode config layer — materializes the enabled OpenChamber plugins (agent tools, the limit failover reporter from `../limit-failover/` while a fallback model or an account switch is set, and the session title prompt, always), writes the plugin-switch denials into `policies`, and publishes them in a file OpenCode watches.
 - `packages/web/server/lib/opencode/plugin-switches.js`: OpenChamber's own record of the plugins switched off in its UI, stored under `<data-dir>/plugin-switches.json` and applied only to the managed OpenCode child.
-- `packages/web/server/lib/opencode/session-title-plugin.js`: the plugin that gives OpenCode's hidden `title` agent OpenChamber's title style and names a session started with attached context alone from that context. See "Session title prompt" below.
+- `packages/web/server/lib/opencode/session-title-plugin.ts`: the plugin that gives OpenCode's hidden `title` agent OpenChamber's title style and names a session started with attached context alone from that context. See "Session title prompt" below.
+- `packages/web/server/lib/opencode/directory-canonicalization.ts`: the session-directory canonicalizer for the write paths (proxy create/move bodies, control-tool creates, worktree moves, workflow agent starts), active only while OpenCode shares this filesystem, and the proxy's `directory=` read rewrite. See "Why session-directory writes resolve and reads keep their spelling" above.
 - `packages/web/server/lib/opencode/instance-dir.js`: this server's own folder under `<data-dir>/run/instances/<pid>/` for the files its managed OpenCode reads, and removal of folders left by servers that are gone.
 
 ### Managed plugins on OpenCode 2.x
@@ -247,6 +317,7 @@ in that user's sessions. On the fallback path the same rules are merged into
 `OPENCODE_CONFIG_CONTENT` (`appendManagedPermissions`).
 - `packages/web/server/lib/opencode/model-discovery.js`: bounded custom-provider `/models` discovery and optional models.dev enrichment. It accepts only http(s), does not follow redirects, filters transport headers, never returns credentials, and treats models.dev failure as unenriched success. Edit requests may name the provider so the host can fall back to a stored credential when the form leaves the key blank — the key from OpenCode's credential store or, failing that, the provider's stored config entry (`settings.apiKey`, else the first `env` variable name that is set in the server environment) — but only while the form's base URL still matches the saved one, so a changed URL never receives the stored credential; an explicitly entered replacement key wins.
 - `packages/web/server/lib/opencode/skill-routes.ts`: route registration for skill config CRUD, supporting files, and skills catalog scan/install flows.
+- `packages/web/server/lib/opencode/external-skill-switches.ts`: builds the skill-list response, with the switch that turns off `.claude` skills read from the managed OpenCode's launch environment, for the web route and the VS Code bridge alike.
 - `packages/web/server/lib/opencode/proxy.js`: OpenCode API/SSE forwarding and readiness-gate route registration.
 - `packages/web/server/lib/opencode/session-runtime.js`: session status/activity runtime for OpenCode SSE events.
 - `packages/web/server/lib/opencode/watcher.js`: global SSE watcher runtime for push/session event fanout.
@@ -258,6 +329,27 @@ in that user's sessions. On the fallback path the same rules are merged into
 - `packages/web/server/lib/opencode/worktree-directory.js`: resolves OpenCode's `worktree.directory` into the absolute parent directory for new worktrees. Relative paths start at the canonical checkout, absolute paths are used as-is, and a leading `~` means home. Both the web server and VS Code's `gitService.ts` call `readWorktreeDirectorySetting` in `config-files.js`, which merges the global files, `OPENCODE_CONFIG`, and every discovered folder config in OpenCode order. Invalid JSONC or an unreadable file rejects the read; null means the setting is unset and keeps the data-dir default.
 - `packages/web/server/lib/ui-auth/ui-auth.js`: UI session authentication runtime (outside OpenCode module).
 - `packages/web/server/lib/ui-auth/ui-passkeys.js`: UI passkey storage and WebAuthn registration/authentication helpers (outside OpenCode module).
+
+### Why unrecognized model modalities are kept
+
+Model discovery (`model-discovery.ts`), provider config projection
+(`config-v2.ts`) and the custom-provider validator (`providers.ts`) use
+`model-modalities.ts` to map MIME types to the categories the form edits:
+`text`, `image`, `audio`, `video`, and `pdf`. A MIME type maps by its top-level
+type, with `application/pdf` mapping to `pdf`. Entries keep their first-seen
+order without repeats.
+
+An entry that names no category, such as `application/json`, stays as written,
+the way OpenCode's own catalog keeps it, and an explicit empty list stays empty.
+Modern capability blocks leave missing fields unset for OpenCode to resolve.
+Dropping or defaulting either kind of reported list would
+change the capabilities a provider declared on an unrelated edit, or show an
+all-unknown list as Text and Image support. A save accepts such an entry only
+when the stored model already lists it in that field, so the form round-trips
+what it cannot edit and a request cannot add a new one. The form uses only
+editable categories in newly discovered or inherited lists. The save merges
+`tools`, `input`, and `output` individually, keeping stored values for any
+omitted fields. An unrecognized entry is written back exactly as stored.
 
 ### Why worktree discovery has a separate config reader
 
@@ -299,11 +391,15 @@ environment, so its variable keys stay unknown and are left out.
 exists in OpenCode's store.
 
 - `configureOpenCodeCredentials(source | null)`: wires the reader to a `{ list }` credential source; reads throw until it is wired.
-- `openCodeCredentialSource({ buildOpenCodeUrl, getOpenCodeAuthHeaders, getLaunchEnvironment? })`: the running OpenCode as that source, URL and headers read per call; `getLaunchEnvironment` returns the managed launch environment or null.
+- `openCodeCredentialSource({ buildOpenCodeUrl, getOpenCodeAuthHeaders, getLaunchEnvironment? })`: the running OpenCode as that source, URL and headers read per call; `getLaunchEnvironment` returns the managed launch environment or null, and the source hands it out as `launchEnvironment`.
+- `readLaunchEnvironment()`: the managed launch environment of the wired source, or null (an external OpenCode, or not wired yet). The voice key providers resolve a provider's `{env:NAME}` key from it, so they read the variable OpenCode itself sees, never the OpenChamber server's.
 - `readOpenCodeCredentials()`: each integration's active credential, keyed by
   integration id (the provider id for providers), in the legacy `auth.json`
   entry shape (`{ type: 'api', key }` /
-  `{ type: 'oauth', access, refresh, expires, accountId?, enterpriseUrl?, server?, orgID? }`).
+  `{ type: 'oauth', methodID, access, refresh, expires, accountId?, enterpriseUrl?, server?, orgID? }`),
+  plus the row's display `label` when OpenCode has one. OpenCode Go quota
+  results use it as `accountLabel`.
+  The method ID identifies the login method for consumers that need to distinguish plugin credentials.
   The OAuth projection keeps only `server` and `orgID` from OpenCode Console
   credential metadata, so quota providers can identify a Console sign-in
   without carrying account names or emails.
@@ -372,10 +468,10 @@ Hard rules, verified against v2.0.8 (the completion stamp against v2.0.16)
   avoiding that needs an upstream import route that takes explicit ids.
 
 ## Public exports (providers.js)
-- `getProviderSources(providerId, workingDirectory)`: Resolves which OpenCode config layers define a provider. The user layer is both global files: when `opencode.jsonc` sits beside `opencode.json`, OpenCode loads both and the `.jsonc` wins, so `user.path` is the file that holds the provider (the `.jsonc` when the entry lives there, else the primary file). `upsertProviderConfig` and `removeProviderConfig` with scope `user` edit that same file, so a provider defined only in `opencode.jsonc` gets Edit in Settings and is changed in place; a new provider still goes to the primary file. Saving such a provider also takes it off `disabled_providers` in the primary file, where `setProviderDisabled` records it.
+- `getProviderSources(providerId, workingDirectory)`: Resolves which OpenCode config layers define a provider. The user layer is both global files: when `opencode.jsonc` sits beside `opencode.json`, OpenCode loads both and the `.jsonc` wins, so `user.path` is the file that holds the provider (the `.jsonc` when the entry lives there, else the primary file). `upsertProviderConfig` and `removeProviderConfig` with scope `user` edit that same file, so a provider defined only in `opencode.jsonc` gets Edit in Settings and is changed in place; a new provider still goes to the primary file. Saving such a provider also takes it off `disabled_providers` in the primary file, where `setProviderDisabled` records it. `inheritedCanonical` is the `canonical` a layer under the one holding the entry sets, with that file's path (`readInheritedProviderCanonical`): OpenCode folds provider layers and has no way to unset `canonical` from a higher one, so the edit form says which provider still applies with None there. The VS Code bridge sends the same field.
 - `listProviderConfigs(workingDirectory)`: Every provider a config layer defines, projected into the canonical v2 `ProviderEntity` shape, with `legacy` marking entries still stored under the v1 `provider` key.
-- `upsertProviderConfig(providerId, config, workingDirectory, scope?, options?)`: Validates and writes a custom provider block into the user/project/custom config layer. The payload may use the v2 spelling (`package`, `settings.baseURL`, `headers`) or the v1 spelling (`npm`, `options.baseURL`); what lands on disk is always a v2 `providers` entry with `settings.baseURL`. AI SDK package names carry `aisdk:`; bundled `@opencode/ai/*` provider and model packages stay bare. The adapter may be OpenAI Chat Completions, OpenAI Responses, or Anthropic Messages. Existing provider, option, and retained-model fields not managed by the form are preserved, as far as the v2 projection (`toProviderEntity`) carries them; it carries a model's `type`, so a model marked `image` by hand stays an image model after a form save. A model `type` in the payload (the form's image generation checkbox sends `image` or `chat`, and a loaded type such as `decision` as it was) is written without checking its value: OpenCode's set of types is open-ended. Omitted models, headers, and env credentials remain explicit removals. A model's `variants` (reasoning levels) are replaced when the payload carries the array, cleared when it carries an empty one, and kept when the key is absent. Updating an entry still stored under the legacy `provider` key rewrites it under `providers` in the same file, dropping the fields v2 accepts but ignores; unrelated legacy siblings are untouched. Does not store API keys. Requires `config.env` or `options.hasStoredAuth`. OpenCode 2 keeps credentials in its own store, so `PUT /api/provider` sets `hasStoredAuth` from the request's `hasCredential` (the form is about to store a key, or the edited provider keeps its credential) as well as a credential OpenCode already stores for the provider. The key itself goes through `integration.connect.key` after this write, because OpenCode registers a custom provider's key method only once the provider is in config. Edit flows must pass the provider's effective existing layer (`custom` > `project` > `user`) so updates do not create a global user override.
-- `validateCustomProviderConfig(providerId, config, options?)`: Structural validation for custom provider payloads (id format, the three supported AI SDK adapters and their bundled OpenCode Chat Completions, Responses and Anthropic counterparts, http(s) base URL, models, credentials via `env` or `hasStoredAuth`). Accepts both spellings and returns the normalized v2 value. An `aisdk:`-prefixed bundled package is refused.
+- `upsertProviderConfig(providerId, config, workingDirectory, scope?, options?)`: Validates and writes a custom provider block into the user/project/custom config layer. The payload may use the v2 spelling (`package`, `settings.baseURL`, `headers`) or the v1 spelling (`npm`, `options.baseURL`); what lands on disk is always a v2 `providers` entry with `settings.baseURL`. AI SDK package names carry `aisdk:`; bundled `@opencode/ai/*` provider and model packages stay bare. The adapter may be OpenAI Chat Completions, OpenAI Responses, or Anthropic Messages. Existing provider, option, and retained-model fields not managed by the form are preserved, as far as the v2 projection (`toProviderEntity`) carries them; it carries a model's `type`, so a model marked `image` by hand stays an image model after a form save. A model `type` in the payload (the form's image generation checkbox sends `image` or `chat`, and a loaded type such as `decision` as it was) is written without checking its value: OpenCode's set of types is open-ended. Omitted models, headers, and env credentials remain explicit removals. A model's `variants` (reasoning levels) are replaced when the payload carries the array, cleared when it carries an empty one, and kept when the key is absent. The provider's `canonical` (the catalog provider OpenCode copies model defaults from) follows the client certificate's rule: a string replaces it, null removes it, absent keeps it, so a form that never read the stored entry cannot erase it; anything other than a provider ID without spaces is refused. Updating an entry still stored under the legacy `provider` key rewrites it under `providers` in the same file, dropping the fields v2 accepts but ignores; unrelated legacy siblings are untouched. Does not store API keys. Requires `config.env` or `options.hasStoredAuth`. OpenCode 2 keeps credentials in its own store, so `PUT /api/provider` sets `hasStoredAuth` from the request's `hasCredential` (the form is about to store a key, or the edited provider keeps its credential) as well as a credential OpenCode already stores for the provider. The key itself goes through `integration.connect.key` after this write, because OpenCode registers a custom provider's key method only once the provider is in config. Edit flows must pass the provider's effective existing layer (`custom` > `project` > `user`) so updates do not create a global user override.
+- `validateCustomProviderConfig(providerId, config, options?)`: Structural validation for custom provider payloads (id format, the three supported AI SDK adapters and their bundled OpenCode Chat Completions, Responses and Anthropic counterparts, http(s) base URL, models, credentials via `env` or `hasStoredAuth`). Accepts both spellings and returns the normalized v2 value. A model's `capabilities` keep only the fields the payload sets (`tools`, `input`, `output`), and `toProviderEntity` reads a stored block the same way: OpenCode fills a missing field from the canonical provider's model, so a default written in its place would replace what the model inherits. An `aisdk:`-prefixed bundled package is refused. With `options.layers`, a newly chosen `canonical` whose config entry in any layer sets `settings`, `headers` or `body` is refused (`canonicalSourceConnectionError`): OpenCode copies those into the provider before its own values, so a gateway's TLS certificate or auth header would reach this provider's endpoint. A canonical the provider already names in some layer stays accepted.
 - `mergeCustomProviderConfig(existingValue, normalizedConfig)`: The merge `upsertProviderConfig` writes: the stored entry, read through the v2 projection, under the validated form payload. Unmanaged provider and model fields stay; an empty `variants` list removes the levels; omitted headers and env are removals. `settings.tls` is the client certificate a gateway with mutual TLS asks for (OpenCode 2.3.0+): `cert` and `key` both or neither, usually `{file:path}` references that are stored, never read, here, and an optional `passphrase` kept byte for byte. `tls: null` removes it and an absent `tls` keeps it, because the edit form leaves it out while the stored entry is unknown (its read pending or failed), and a save then must not drop a certificate written by hand. The VS Code extension's `upsertProviderConfig` calls this function and `validateCustomProviderConfig` directly, so a change here changes what both runtimes write; run the extension's `opencodeConfig.providers.test.ts` too.
 - `removeProviderConfig(providerId, workingDirectory, scope?)`: Removes a provider block from the selected config layer.
 
@@ -479,7 +575,7 @@ Nullish body destructuring retains the original Node error message.
   - `PUT /api/config/settings`
   - `GET /api/config/opencode-resolution`
   - `POST /api/opencode/upgrade` (enforces the active runtime's upgrade capability, shares concurrent upgrade requests and runs the resolved CLI with `upgrade`; the existing Reload action restarts managed OpenCode afterwards)
-  - `GET /api/opencode/upgrade-status` (returns version availability plus the authoritative `upgrade.supported`, `upgrade.manager`, and `upgrade.reason` capability)
+  - `GET /api/opencode/upgrade-status` (returns version availability plus the authoritative `upgrade.supported`, `upgrade.manager`, and `upgrade.reason` capability). The npm registry lookup fails soft: an unreachable registry still answers 200 with the installed `currentVersion` and `available: null` and `latestVersion: null`, so a failed update check never renders the local version as unknown; clients read the missing `latestVersion` as an indeterminate check and retry it.
   - `GET /api/provider/:providerId/source`
   - `PUT /api/provider` (create/update custom OpenAI-compatible provider config in OpenCode user/project/custom layers via `scope`; secrets stay in auth via the OpenCode auth API)
   - `POST /api/provider/discover-models` (user-initiated custom-provider model discovery; fetches the configured `/models` path server-side and optionally enriches exact model matches from the shared models.dev cache). A form with a client certificate (`tls`) presents it on an `https` endpoint as OpenCode would: `{file:...}` and `{env:...}` are resolved here, the request goes through `node:https` on a connection of its own (the global fetch takes no certificate in Node, and the shared agent pools sockets without the passphrase in its key), and redirects are not followed.
@@ -618,6 +714,17 @@ The runtime maintains active-session count incrementally from idempotent activit
   - `waitForPortRelease(port, timeoutMs, hostname?)`
   - `killProcessOnPort(port)`
 
+### Why Windows frees the OpenCode port with netstat and not PowerShell
+
+Starting PowerShell hangs while a mapped drive is offline (*Why the Windows
+snapshot reads the registry*), so the port lookup blocked the thread for its whole
+timeout and then stopped nothing. `windows-port-processes.ts` runs `netstat` and
+`taskkill` asynchronously, and callers await it. It picks the same processes
+`Get-NetTCPConnection -State Listen` did: those listening on the port, never this one.
+A listener is recognised by remote port 0, because Windows translates the state
+column. Quitting during a restart joins the cleanup already running for that port:
+a second one could hold a PID Windows has since given to another process.
+
 ### Why lifecycle errors retain unchecked fields
 
 Lifecycle dependencies and process/network APIs can reject with arbitrary values.
@@ -706,7 +813,7 @@ ConPTY or Console Window Host behavior.
 - `createOpenCodeEnvRuntime(dependencies)`: creates runtime that owns OpenCode CLI environment and binary discovery state.
 - OpenCode CLI resolution order is persisted settings, environment overrides, bundled Desktop CLI when available, PATH, known install locations, then platform shell discovery. A path pinned by the administrator (`opencodeBinary` in the machine policy file, `../enterprise-mode.js`) comes before all of them and has no fallback: `applyOpencodeBinaryFromSettings()` and `ensureOpencodeCliEnv()` resolve only that path (source `policy`), an unusable pin fails strict start with `OPENCODE_BINARY_INVALID`, and a removed pin hands resolution back to the order above. While pinned, the install-v2 and upgrade capabilities report unsupported (`reason: 'policy'`) and upgrade status never announces a newer version.
 - Automatic bundled resolution under `OPENCHAMBER_RUNTIME=desktop` stays in runtime state and is returned to the managed launch function, including on OpenCode restart. It does not populate `process.env.OPENCODE_BINARY`: AppImage updater relaunch inherits that environment and would mistake the previous bundle path for an explicit override. Explicit settings/env selections and non-desktop or non-bundled resolution retain their existing environment behavior. This prevents future inheritance; it does not reinterpret overrides already inherited from older releases.
-- The login-shell snapshot (`$SHELL -lic 'echo __OPENCHAMBER_ENV__; env -0'`, parsed from after the last marker line so text an rc file prints to stdout never fuses with the first variable) is taken synchronously at import time, so it blocks whatever process embeds the server for as long as the user's shell startup files take. An embedding host that already probed the shell hands its result over before importing the server through `login-shell-env.js` (`provideLoginShellEnvSnapshot(snapshot | null)`); the runtime then uses that and never probes, `null` included. Desktop does this on macOS and Linux; on Windows the server keeps its own registry-based snapshot. The handoff is a module slot, never an environment variable: the snapshot is the user's whole shell environment and `process.env` reaches every child.
+- The login-shell snapshot (`$SHELL -lic 'echo __OPENCHAMBER_ENV__; env -0'`, parsed from after the last marker line so text an rc file prints to stdout never fuses with the first variable) is taken synchronously at import time, so it blocks whatever process embeds the server for as long as the user's shell startup files take. An embedding host that already probed the shell hands its result over before importing the server through `login-shell-env.js` (`provideLoginShellEnvSnapshot(snapshot | null)`); the runtime then uses that and never probes, `null` included. Desktop does this on every platform. The handoff is a module slot, never an environment variable: the snapshot is the user's whole shell environment and `process.env` reaches every child.
 - Returned API:
   - `applyLoginShellEnvSnapshot()`
   - `getLoginShellEnvSnapshot()`
@@ -718,6 +825,16 @@ ConPTY or Console Window Host behavior.
   - `isExecutable(filePath)`
   - `searchPathFor(binaryName, searchPath?)`: resolves an executable from the supplied PATH value, defaulting to the process PATH.
   - `clearResolvedOpenCodeBinary()`
+
+### Why the Windows snapshot reads the registry with reg.exe and not PowerShell
+
+PowerShell's `Env:` drive returned only what it inherited from this process, so
+the machine and user `Path` values in the registry were all it added. Starting
+PowerShell opens every mapped drive, so with a network share offline it hung until
+the timeout, once for each candidate, and the fallback had no registry PATH.
+`reg.exe` (`windows-registry-path.ts`) touches no drive and is started by its
+full path, because a search through PATH can itself reach a dead share. Desktop
+runs the same queries asynchronously (`packages/electron/early-startup.mjs`).
 
 ### Why environment discovery keeps boundary checks
 
@@ -779,7 +896,13 @@ directory up to the worktree root, so a definition in a parent directory of a
 monorepo package counts; a nested id (`team/reviewer`) maps onto the path.
 Only files in the v2 `plugins/` directory are editable through the plugins
 page; a package directory or a v1 `plugin/` file is listed as a package that
-OpenCode loads and OpenChamber does not touch.
+OpenCode loads and OpenChamber does not touch. A symlink is listed as the file
+or package it points at, the way OpenCode loads it. Broken links are skipped.
+A file already in a plugin directory is listed, read, saved, deleted and
+switched under its exact on-disk name, mixed case included
+(`isExistingPluginFileName` in `plugin-paths.ts`), because OpenCode loads any
+`.js` or `.ts` name there. Only a new file has to match the lowercase naming
+rule.
 
 The plugins page lists entries from every config file OpenCode takes plugins
 from: both global files (`opencode.json` and `opencode.jsonc`),
@@ -1430,7 +1553,7 @@ setting; VS Code's separate extension bridge does not.
 - Project config: `<workingDirectory>/.opencode/opencode.json(c)` first, else `<workingDirectory>/opencode.json(c)`.
 - Custom config: `OPENCODE_CONFIG` env var path.
 - Origins (`../security/request-security.js`): CORS with credentials and socket upgrades trust the request's own host, `publicOrigin`, and the packaged clients (`openchamber-ui://app`, `capacitor://localhost`, `https://localhost`). Any other loopback port is trusted only on a development server (`OPENCHAMBER_ELECTRON_DEV=1` or `OPENCHAMBER_ALLOW_DEV_ORIGINS=1`, which the dev scripts set). Without a UI password a socket that names an `Origin` must still come from one of these (`isPasswordlessSocketOriginAllowed`): nothing else would stop a website open in the user's browser from reaching the terminal on the loopback port. Clients that send no `Origin` are not pages and pass.
-- Rate limit config: `OPENCHAMBER_RATE_LIMIT_MAX_ATTEMPTS`, `OPENCHAMBER_RATE_LIMIT_NO_IP_MAX_ATTEMPTS` env vars. Login and tunnel-connect limits key on `req.ip`. `server/index.js` sets `trust proxy` to loopback and private ranges, so `X-Forwarded-For` counts only when a proxy on this machine or a private network sent it; from anyone else it is ignored and cannot open a fresh bucket per attempt.
+- Rate limit config: `OPENCHAMBER_RATE_LIMIT_MAX_ATTEMPTS`, `OPENCHAMBER_RATE_LIMIT_NO_IP_MAX_ATTEMPTS` env vars. Login and tunnel-connect limits key on the client that `../security/client-address.ts` resolves: `X-Forwarded-For` counts only through loopback peers and addresses in `OPENCHAMBER_TRUSTED_PROXIES` (comma-separated addresses or CIDR ranges); relay-dispatched sign-ins share one bucket. They do not use `req.ip`: `server/runtime.ts` sets `trust proxy` to loopback, link-local and private ranges, which would let a LAN peer open a fresh bucket per attempt.
 
 ## Notes for contributors
 - This module serves as foundation for OpenCode-related server utilities.
@@ -1490,7 +1613,7 @@ under a running child.
   a tool switched on later then reaches a process that can already call back.
 - `persistSettings` rewrites the file (temp + rename) whenever
   `agentControlToolEnabled`, `agentScheduleToolEnabled`, `agentWebToolEnabled`, `agentMemoryToolEnabled`,
-  `agentKnowledgeToolEnabled`, `agentNotifyToolEnabled`, `agentRenderToolEnabled`, `agentSecretToolEnabled`, `agentUsageToolEnabled`, `agentTerminalToolEnabled` or `agentWorkflowToolEnabled` changes, and the guest change listener rewrites it after an extension is installed, approved, paused, resumed, updated or removed. Plugin directories are written before the
+  `agentKnowledgeToolEnabled`, `agentNotifyToolEnabled`, `agentRenderToolEnabled`, `agentSecretToolEnabled`, `agentUsageToolEnabled`, `agentTerminalToolEnabled`, `agentActionsToolEnabled` or `agentWorkflowToolEnabled` changes, and the guest change listener rewrites it after an extension is installed, approved, paused, resumed, updated or removed. Plugin directories are written before the
   file names them, and a disabled plugin is removed from the list. OpenCode
   reloads within a couple of seconds; no restart is involved. Writes run one at
   a time: the catalog is read before the file is written, so two refreshes
@@ -1517,28 +1640,139 @@ under a running child.
   harmless. The card's delivery state (`guests/opencode-plugin.js`) tells the
   user, and the same button is the way in.
 
+### Why the shared service is replaced when it is older than the installed CLI
+
+With the shared service setting on, `shared-service.ts` reads the version of
+the OpenCode CLI on disk and passes `Service.ensure` a predicate that accepts
+a running service of that version or newer. `opencode update` swaps the binary
+but leaves the running `serve --service` on the old version, so reusing any
+service it finds kept OpenChamber on the old OpenCode until the user stopped
+the daemon by hand, while the About page and the update toast asked for a
+restart that did nothing. OpenCode's own TUI and desktop replace the service on
+a version mismatch the same way, and the replacement hands persistent terminals
+and open turns to the new process. A newer service is kept so OpenChamber never
+downgrades what other clients run. Only release versions are compared: preview
+builds such as `0.0.0-next-10` do not order as semver and a preview CLI keeps
+its own registration file, so a preview on either side is reused as is. The
+version probe and the service command both go through the managed launch
+resolver, so a Windows `opencode.cmd` shim becomes the native executable: the
+client spawns the service without a shell, and a service stopped for
+replacement could not be started again from a shim. When
+the CLI version cannot be read, in enterprise mode, or when a failed switch to
+the managed server rolls back to the shared one, OpenChamber reuses whatever
+service is registered and never restarts it.
+
+The same replacement makes the update toast work in shared mode. The upgrade
+capability reports `supported` while OpenChamber is connected through the
+shared service and outside enterprise mode, `/api/opencode/upgrade` runs
+`opencode upgrade` with the CLI that launches the service, and the toast's
+Reload goes through `restartOpenCode`, whose reconnect replaces the now older
+service. A config reload that replaced the service answers `requiresReload`, so
+the UI refreshes; one that reused it still asks the user to restart the
+connected server, because the running service has not reread its config. The
+CLI upgrade skips the Windows stop-and-start step: OpenChamber cannot stop a
+service it shares, and OpenCode's own upgrade keeps `serve --service` alive
+while it replaces the executable.
+
+The lifecycle's `restartOpenCode` answers whether the restart it performed or
+joined replaced the service; `refreshOpenCodeAfterConfigChange` is the only
+consumer, and the server's own `restartOpenCode` export stays `Promise<void>`.
+One restart owns the slot at a time. A caller that waited on a bootstrap retry
+or another restart checks the slot again before claiming it: a plain reload
+joins the restart that got there first, and a `whileStopped` caller waits and
+runs its task in a restart of its own, also when that restart moves from the
+managed server to the shared service: the task then runs after the managed
+server stops. A flag shared across restarts was
+rejected because an overlapping restart could overwrite another call's answer.
+
+### External local OpenCode plugin bridge (`external-plugin-bridge.ts`)
+
+When OpenChamber connects to an externally started local OpenCode server (such
+as `opencode serve --service` or an enterprise-managed local daemon), OpenChamber
+does not spawn OpenCode and cannot pass `OPENCODE_CONFIG` or callback env vars.
+
+- **Ownership:** `external-plugin-bridge.ts` materializes one stable plugin
+  folder at `<dataDir>/plugins/openchamber/` combining OpenChamber's agent tools,
+  limit-failover `retry` hook, `prompt`/compaction hooks, and `session-title`
+  transforms, plus an atomic `<dataDir>/runtime-bridge.json` file (mode `0600`)
+  holding `{ version, pid, url, token, failoverEnabled, tools }`.
+- **Invariants:**
+  - The external plugin stays completely dormant (`ctx.tool.transform`,
+    `ctx.agent.transform`, and hooks are no-ops) whenever
+    `OPENCHAMBER_AGENT_TOOL_URL` is set in the OpenCode process env (managed
+    child), when `runtime-bridge.json` is absent, or when the recorded `pid` is
+    not alive.
+  - While active, `ctx.tool.transform` registers enabled OpenChamber tools and
+    removes replaced built-in OpenCode tools (`browser.*`,
+    `generate_image` (`experimental_image_generate` before 2.4), `automation_*`, `opencode_worktree_create`,
+    `opencode_models`) dynamically without writing `-opencode.*` entries into
+    the user's global `opencode.json`.
+  - Watching `<dataDir>` for `runtime-bridge.json` changes and checking `pid`
+    liveness triggers `ctx.tool.reload()` and `ctx.agent.reload()` when
+    OpenChamber starts, updates tool settings, or exits, so built-in OpenCode
+    tools and native session titles return when OpenChamber closes.
+  - OpenChamber never silently edits the user's global `opencode.json`:
+    `GET/POST/DELETE /api/config/external-opencode-plugin(/global-config)` and
+    `ExternalOpenCodePluginBanner` in Settings let the user explicitly add or
+    remove the plugin path or copy it for enterprise-managed configs. The entry
+    goes into `opencode.json`, or into an `opencode.jsonc` beside it when only
+    that file already lists plugins, so the user's list stays in one file.
+  - Each location's plugin registers the `openchamber` RPC with one method,
+    `prove`: given a nonce it answers the HMAC-SHA256 of it under the bridge
+    token, and an empty proof while no bridge is live.
+    `isBridgePluginLoaded` asks it before a session is told about the tools
+    (`../session-knowledge/DOCUMENTATION.md`, *Whether the agent has the
+    tools*); the token never leaves the plugin.
+  - `GET /api/config/external-opencode-plugin?directory=` answers the same
+    check as `loadedInDirectory` (null when not asked, not registered, or
+    unknown), so the Settings banner can say when the config lists the plugin
+    but OpenCode has not loaded it for the open project. The UI passes the
+    directory the user works in and nothing else, since every check starts
+    that location; the route waits out a worktree removal in progress there
+    first, as the proxy does. The banner reads the registration without a
+    directory first and the folder check second, so a cold location never
+    holds back Add, Remove or Copy path, and it reads both again when the
+    window regains focus.
+- **Why one bridge file + dynamic `tools.remove` instead of per-message metadata
+  isolation:** Filtering per turn via message metadata breaks Code Mode catalog
+  hiding and requires tagging every background prompt sender. Treating the
+  external local OpenCode as shared while OpenChamber is running and restoring
+  native behavior as soon as OpenChamber exits keeps the contract simple and
+  reliable.
+
 ### Session title prompt
 
 OpenCode names a new session with its hidden `title` agent. Its built-in prompt
 keeps file names and issue numbers and tends to restate the request, so the
 first title often reads like a summary of the prompt and gets cut off in the
-sidebar. `session-title-plugin.js` replaces that agent's `system` prompt with
+sidebar. `session-title-plugin.ts` replaces that agent's `system` prompt with
 the folder-label style the UI's own regeneration uses
-(`packages/ui/src/lib/sessionTitle.ts`); the two prompts change together.
+(`packages/ui/src/lib/sessionTitle.ts`). The two prompts change together
+unless a decision below says why one differs.
 
-- The plugin is listed on every managed launch, with no setting. External
-  OpenCode and the VS Code extension's own OpenCode get no managed plugins, so
-  they keep OpenCode's prompt.
+- The plugin is listed on every managed launch, with no setting. A registered
+  external local OpenCode plugin bridge (`external-plugin-bridge.ts`) applies
+  the same title hook while it is active, that is while OpenChamber runs and
+  the bridge file points at it. The VS Code extension's own OpenCode launch and
+  an external OpenCode without the bridge get no title plugin from
+  OpenChamber, so they keep OpenCode's prompt.
 - An `agents.title.system` the user set, in global or project config or an
   agent file, still wins. OpenCode activates configured plugins after its
   built-in agents and before its config agents, so the config writes the
   prompt after this plugin.
-- For an `opencode/*-free` title model, the hook restores OpenCode's original
-  system prompt and adds OpenChamber's style as a user text part. With OpenCode
-  2.2.7, the anonymous free model tested generated no title with a replacement
-  system prompt, but did with the original prompt and the same style in the
-  input. This applies only when the request still carries OpenChamber's prompt;
-  a user-configured prompt stays untouched.
+- For a free Zen title model, the hook restores OpenCode's original system
+  prompt and adds OpenChamber's style as a user text part. Zen's free tier
+  answers no title to a replaced system prompt, and does with the original
+  prompt and the same style in the input (checked on 2.2.7; on 2.3.0 with
+  `big-pickle` and `deepseek-v4.1-flash-free`; on 2.3.2 with `big-pickle` in
+  the app). This applies only when the request still carries OpenChamber's
+  prompt; a user-configured prompt stays untouched.
+- A free Zen model is an `opencode` model that OpenCode's catalog
+  (`ctx.model.list()`) prices at zero in every price tier. The name alone is not
+  enough: `big-pickle` is free without a `-free` suffix, and matching the suffix
+  left its sessions untitled. When the catalog gives no price (a failed read,
+  or a model the list leaves out), the `-free` suffix decides, so those models
+  keep their titles.
 - OpenCode titles from the first user message's text only. Context the user
   attached (a file comment, a browser annotation, PR checks) is admitted as
   synthetic messages right before that message (`sendMessage` in
@@ -1578,6 +1812,35 @@ one Ukrainian, and a Chinese first message still produced English titles (drift
 varied per request on the same input). The prompt now states that only the
 user's message decides the language and adds a Chinese example, the same
 pinning idiom `packages/ui/src/lib/smallModel.ts` uses for its notes.
+
+#### Why the language rule says when a path's words count
+
+A first message of one English word and a path, such as
+`Read ~/.config/openchamber/projects/<id>/plans/<plan>.md`, often got a Chinese
+title on GitHub Copilot's `gpt-6-luna`, taken from the Chinese example about a
+project's plans (#7225). The prompt now tells the model that the words inside
+a path or file name count only when the message has no other words, with three
+examples: an English word before a path, a Chinese word before a path, and a
+path alone. This is an instruction, not a guarantee: it asks the model to take
+the language of the words around a path, and the language of the path's words
+when the message is only a path.
+
+The rule was measured on `gpt-6-luna` through a managed OpenCode 2.3.1, with
+English, Chinese and Ukrainian words before plan paths, paths alone, and plain
+sentences (#7227). There, an English example of a command and a path also
+fixed the English messages, but it pulled a Ukrainian word before an English
+path toward English about one time in ten. A rule without the path-alone
+example fixed them too, but a message that was only an English path then got
+a Chinese title about one time in fifteen; that is why the path-alone example
+stays. The free Zen title models, where the plugin moves the prompt
+into the user turn, were not measured. The Chinese example stays, because
+without it a Chinese first message got English titles (#5654).
+
+The Rename with AI prompt (`packages/ui/src/lib/sessionTitle.ts`) keeps its
+own rule, because it names the session from finished turns rather than from
+the first message alone. With a `Read <path>` turn and an English reply it gave
+English titles in 40 of 40 runs on `gpt-6-luna` and `gemini-3.8-flash`, a
+Chinese current title included.
 
 #### Why the prompt is short and every example fits four words
 
