@@ -52,6 +52,12 @@ export type Completion = {
   stepResults?: { step: string; status: string; error?: PublicFailure }[];
 };
 export type HydrationFailure = { status: string; error: { code: string; message: string } };
+type HydrationFailurePart = HydrationFailure & { path: string };
+export type CheckoutHydrationFailure = Readonly<{
+  status: string;
+  submodules: HydrationFailurePart[];
+  lfs: HydrationFailurePart[];
+}>;
 export type RepositoryAuthority = {
   directory?: string;
   repositoryId: string;
@@ -74,7 +80,7 @@ export type HydrationPlan = HydrationInput & {
   plannedRequirements?: HydrationRequirement[];
   plannedSourceRequired?: boolean | undefined;
   expectedHeadSha?: string;
-  preparedHydrationFailure?: HydrationFailure;
+  preparedHydrationFailure?: CheckoutHydrationFailure;
   hydrateSubmodules?: boolean;
 };
 export type AuxiliaryAuthority = {
@@ -150,6 +156,7 @@ export type TransportPlan = {
   transportMode: TransportMode;
   credentialId?: string | undefined;
   auxiliaryKind?: 'submodule' | 'lfs';
+  lfsDerivedFromRemote?: string | undefined;
   transportRole?: string;
   target: { operation: string };
 };
@@ -243,5 +250,5 @@ export type CopiedCheckoutEntry =
   | { path: string; kind: 'symlink'; snapshot: LstatSnapshot; link: string }
   | { path: string; kind: 'file'; snapshot: LstatSnapshot; contentDigest: string };
 export type HydrationInspectionInput = HydrationInput & PhaseOptions;
-export type HydrationRequirementWithEndpoint = HydrationRequirement & { rawEndpoint: string; transferReady: boolean };
+export type HydrationRequirementWithEndpoint = HydrationRequirement & { rawEndpoint: string; transferReady: boolean; derivedFromRemote?: string };
 export type { CheckoutHydration, HydrationPart, PostCheckoutHookAction };

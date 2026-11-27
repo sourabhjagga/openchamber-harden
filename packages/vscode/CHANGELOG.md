@@ -1,3 +1,48 @@
+## [2.8.1] - 2026-11-26
+
+### New
+
+- **Grouped activity, the new default.** Tool calls join into phases such as explore, edit and run, so a long turn reads as a few groups.
+- Press Stop or Esc before the model answers and the prompt comes back to the composer.
+- A steered message shows when it is still waiting for the agent (thanks to @Galnaz).
+- Expanded quotes show the words around the selected text.
+- Turn on skills from MCP servers in Settings > Skills.
+- Get a warning when a session spends more than an amount you set (thanks to @JosueGalRe).
+- The session list can show date headings and hide subagent sessions (thanks to @Galnaz and @gaojunran).
+
+### Improvements
+
+- Copilot, Z.ai and Zhipu credits follow the used or remaining setting.
+
+### Fixes
+
+- The panel stayed blank after an extension update (thanks to @yulia-ivashko).
+- Queuing a message in one panel erased another panel's queued messages.
+- A permission already accepted in another window showed an "Input needed" notification.
+- Commit message generation sent the diff to a fallback model when the chosen one was off.
+- A stale panel or a queued message could switch the session back to a model or agent nobody picked (thanks to @yulia-ivashko).
+- The chat lost the editor theme when VS Code was slow to send it (thanks to @HansG89).
+- OpenCode folder trust and link opening follow VS Code's rules (thanks to @Galnaz).
+
+## [2.8.0] - 2026-11-22
+
+### New
+
+- Line comments can be written in the chat composer with `openchamber.lineCommentPlacement` set to `chat` (thanks to @gaojunran).
+- Chat: Activity has a third mode, Show notes, that folds tool rows and keeps what the agent wrote between steps in view (thanks to @yulia-ivashko).
+- Sessions: leads started in the app show in the sidebar.
+
+### Improvements
+
+- Chat: wide Markdown tables expand to the chat's width (thanks to @chaosmanage).
+- Chat: a dropped provider connection shows as a retry while OpenCode retries, with no failed turn (thanks to @mv2sa).
+
+### Fixes
+
+- Sidebar: the wide sessions sidebar forgot its width (thanks to @fake-monkey).
+- Chat: an answered question could come back after a reload (thanks to @sergiopadure and @DeryFerd).
+- Chat: live reasoning didn't show (thanks to @Cyneric).
+
 ## [2.7.3] - 2026-11-19
 
 ### New

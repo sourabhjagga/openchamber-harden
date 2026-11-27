@@ -6,6 +6,7 @@ import { z } from 'zod';
 
 import { GUEST_CAPABILITIES } from '@openchamber/sdk';
 import type { GuestCapability } from '@openchamber/sdk';
+import { withSourceControlFileLock } from '../source-control/file-lock.js';
 
 const GUEST_SOURCES = ['path', 'zip', 'git'] as const;
 
@@ -16,6 +17,7 @@ const storeSchema = z.object({
   capabilityGrants: z.record(z.string(), z.array(z.string())).optional(),
   capabilityScopes: z.record(z.string(), z.unknown()).optional(),
   disabledGuests: z.record(z.string(), z.literal(true)).optional(),
+  guestFolders: z.record(z.string(), z.array(z.string().min(1).refine((entry) => !entry.includes('\0')))).optional(),
   serviceSocketOverrides: z.record(
     z.string(),
     z.record(z.string(), z.string().min(1).refine((entry) => !entry.includes('\0'))),
@@ -130,6 +132,20 @@ export const extensionsPersistPath = (dataDir: string) => {
 
 export const guestCopiesDir = (persistPath: string) => path.join(path.dirname(persistPath), 'extensions');
 
+export const withGuestCheckoutLock = async <Result>(persistPath: string, operation: () => Promise<Result>, { waitMs = 10_000 } = {}) => {
+  let completed: { result: Result } | undefined;
+  try {
+    return await withSourceControlFileLock(`${persistPath}.checkouts.lock`, async () => {
+      completed = { result: await operation() };
+      return completed.result;
+    }, { waitMs });
+  } catch (error) {
+    if (!completed) throw error;
+    console.warn('[guests] Could not release the checkout lock.');
+    return completed.result;
+  }
+};
+
 const realOrResolved = (value: string) => {
   try {
     return fsSync.realpathSync(value);
@@ -151,6 +167,7 @@ export type ExtensionStore = {
   capabilityGrants: Record<string, GuestCapability[]>;
   capabilityScopes: Record<string, CapabilityScope>;
   disabledGuests: Record<string, true>;
+  guestFolders: Record<string, string[]>;
   serviceSocketOverrides: Record<string, Record<string, string>>;
   storageIds?: NonNullable<z.infer<typeof storeSchema>['storageIds']>;
 };
@@ -163,6 +180,7 @@ const emptyStore = (): ExtensionStore => ({
   capabilityGrants: {},
   capabilityScopes: {},
   disabledGuests: {},
+  guestFolders: {},
   serviceSocketOverrides: {},
 });
 
@@ -188,6 +206,7 @@ export const readExtensionStore = async (persistPath: string): Promise<Extension
       capabilityGrants: knownGrantsOnly(parsed.capabilityGrants ?? {}),
       capabilityScopes: knownScopesOnly(parsed.capabilityScopes ?? {}),
       disabledGuests: parsed.disabledGuests ?? {},
+      guestFolders: parsed.guestFolders ?? {},
       serviceSocketOverrides: parsed.serviceSocketOverrides ?? {},
     };
     if (parsed.storageIds) store.storageIds = knownStorageIdsOnly(parsed.storageIds);
@@ -209,6 +228,7 @@ const writeExtensionStoreUnlocked = async (
     capabilityGrants = {},
     capabilityScopes = {},
     disabledGuests = {},
+    guestFolders = {},
     serviceSocketOverrides = {},
     storageIds = {},
   }: StoreWrite,
@@ -271,6 +291,12 @@ const writeExtensionStoreUnlocked = async (
   }
   if (Object.keys(disabled).length > 0) {
     payload.disabledGuests = disabled;
+  }
+  const folders = Object.fromEntries(
+    Object.entries(guestFolders).filter(([, list]) => Array.isArray(list) && list.length > 0),
+  );
+  if (Object.keys(folders).length > 0) {
+    payload.guestFolders = folders;
   }
   if (Object.keys(socketOverrides).length > 0) {
     payload.serviceSocketOverrides = socketOverrides;
@@ -358,6 +384,20 @@ export const writeExtensionPaths = (paths: string[], persistPath: string) => upd
   }
   return { ...current, paths, sources, gitOrigins };
 });
+
+export const withGuestFolders = (current: ExtensionStore['guestFolders'], guestId: string, folders: readonly string[]) => {
+  const guestFolders = { ...current };
+  if (folders.length > 0) {
+    guestFolders[guestId] = [...folders];
+  } else {
+    delete guestFolders[guestId];
+  }
+  return guestFolders;
+};
+
+export const setGuestFolders = (guestId: string, persistPath: string, folders: readonly string[]) => updateExtensionStore(persistPath, (current) => (
+  { ...current, guestFolders: withGuestFolders(current.guestFolders, guestId, folders) }
+));
 
 export const setCapabilityGrants = (guestId: string, persistPath: string, granted: GuestCapability[], scope: CapabilityScope | null = null) => updateExtensionStore(persistPath, (current) => {
   const capabilityGrants = { ...current.capabilityGrants };

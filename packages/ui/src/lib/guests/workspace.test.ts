@@ -11,6 +11,7 @@ import { createRuntimeOpencodeClient } from '@/lib/opencode/client';
 import { applyGlobalSessionStatusEvent, replaceGlobalSessionStatusById } from '@/sync/global-session-status';
 import { applySessionEventToGlobalSessions } from '@/sync/session-event-router';
 import { applySessionLiveWorkEvents, resetSessionLiveWork } from '@/sync/session-live-work';
+import { applyWaitingPageEvent, resetGlobalBlockingRequests } from '@/sync/global-blocking-requests';
 import type { OpenCodeEvent } from '@opencode/client';
 import { translateWireEvent } from '@/lib/opencode/events';
 import { readGuestWorkspace, observeGuestWorkspace } from './workspace';
@@ -38,6 +39,7 @@ beforeEach(() => {
 afterEach(() => {
   manager.disposeAll();
   resetSessionLiveWork();
+  resetGlobalBlockingRequests();
 });
 const readB = () => {
   const snapshot = readGuestWorkspace({ kind: 'sessions', projectId: 'b' }, 'board');
@@ -148,7 +150,7 @@ describe('extension workspace projection', () => {
       expect(activity).toEqual(['idle', 'unknown', 'idle']);
     } finally { stop(); }
   });
-  test('worktree loading and errors retain data, and token updates do not publish', async () => {
+  test('worktree loading and errors retain data, and unrelated part updates do not publish', async () => {
     const snapshots: number[] = [];
     const stop = observeGuestWorkspace({ kind: 'sessions', projectId: 'b' }, 'board', () => snapshots.push(1));
     const child = manager.ensureChild('/b-tree', { bootstrap: false });
@@ -232,6 +234,20 @@ describe('extension workspace projection', () => {
     expect(readB().sessions[0].activity).toBe('waiting-question');
     expect('messages' in readB().sessions[0]).toBe(false);
   });
+  test('a turn waiting on an answer page reads as waiting-question until the page settles, and publishes both', async () => {
+    applyGlobalSessionStatusEvent('/b-tree', { type: 'session.status', properties: { sessionID: 'b-session', status: { type: 'busy' } } });
+    const seen: string[] = [];
+    const stop = observeGuestWorkspace({ kind: 'sessions', projectId: 'b' }, 'board', (next) => {
+      if (next.kind === 'sessions') seen.push(next.sessions[0].activity);
+    });
+    try {
+      applyWaitingPageEvent({ type: 'openchamber.page-waiting', properties: { sessionID: 'b-session', directory: '/b-tree', page: { id: 'call_1', title: 'Pick a layout' } } }, () => null);
+      await Promise.resolve();
+      applyWaitingPageEvent({ type: 'openchamber.page-settled', properties: { sessionID: 'b-session', pageID: 'call_1' } }, () => null);
+      await Promise.resolve();
+      expect(seen).toEqual(['running', 'waiting-question', 'running']);
+    } finally { stop(); }
+  });
   test('the running tool shows its path relative to the session, only while the session runs, and publishes', async () => {
     const wire = { id: 'evt', created: 1, location: { directory: '/b-tree' } };
     const durable = { aggregateID: 'b-session', seq: 1, version: 1 as const };
@@ -268,6 +284,28 @@ describe('extension workspace projection', () => {
       expect(tools.some((entry) => JSON.stringify(entry) === JSON.stringify({ name: 'edit', target: 'src/layout.ts' }))).toBe(true);
     } finally { stop(); }
   });
+  test('publishes a running session\'s token totals before idle without republishing the global list', async () => {
+    expect(readB().sessions[0].tokens).toBeNull();
+    const seen: unknown[] = [];
+    const stop = observeGuestWorkspace({ kind: 'sessions', projectId: 'b' }, 'board', (next) => {
+      if (next.kind === 'sessions') seen.push(next.sessions[0].tokens);
+    });
+    const listBefore = useGlobalSessionsStore.getState().activeSessions;
+    try {
+      applySessionEventToGlobalSessions({ type: 'session.patched', properties: { sessionID: 'b-session', patch: {
+        tokens: { input: 200, output: 50, reasoning: 30, cache: { read: 700, write: 100 } }, time: { updated: 2 },
+      } } });
+      await Promise.resolve();
+      const totals = { prompt: 1000, output: 50, reasoning: 30, cacheRead: 700, cacheWrite: 100, cacheHitPercent: 70 };
+      expect(useGlobalSessionsStore.getState().activeSessions).toBe(listBefore);
+      expect(readB().sessions[0].tokens).toEqual(totals);
+      expect(seen).toEqual([null, totals]);
+    } finally {
+      stop();
+      applySessionEventToGlobalSessions({ type: 'session.idle', properties: { sessionID: 'b-session' } });
+    }
+  });
+
   test('context fill is the latest step against the session model window, unknown after a compaction', () => {
     const wire = { id: 'evt', created: 1, location: { directory: '/b-tree' } };
     const durable = { aggregateID: 'b-session', seq: 1, version: 1 as const };

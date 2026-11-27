@@ -92,6 +92,32 @@ location, which nobody had read yet: it booted there and answered
 "Integration not found", so every first connect failed and the retry worked.
 `credential.*` routes are not location-bound and stay unscoped.
 
+On the Providers page that location is the project selected in Settings
+(`useSettingsDirectory`), the same one `PUT /api/provider` writes a custom
+provider's config for; elsewhere it is the chat's project. A provider kept in a
+project's own config exists only in that project, so a key sent to the chat's
+project answered "Integration not found" on every retry, and a list read there
+showed the provider as not connected. The API key form, the OAuth and external
+sign-ins and the custom provider form all take that project.
+
+The Settings project may be one OpenCode has not opened yet. Since 2.4 such a
+location answers `integration.list` with an empty list until its plugins load,
+which showed "Connect provider" with only the custom provider card; the read
+first waits for the location's plugins (`requireLocationPlugins`, up to 5 s)
+and fails rather than returning an empty catalog.
+
+After saving a custom provider, OpenCode accepts its key only once that location
+has loaded the new provider, and a location nobody opened yet first waits for
+its plugins to start: 5.6 s with a plugin that takes 5 s, past the old 3.75 s of
+retries. `storeKeyAfterConfigWrite` in `providers/provider-key-writes.ts`
+retries "Integration not found" for up to 30 s.
+
+### Why retry the key and not wait for an event
+
+The reload announces itself with `config.updated`, `integration.updated` and
+`provider.updated`, but for every location at once and without naming the
+provider, so a retry after each event is the same as retrying on a timer.
+
 An integration method can declare a `form` (an Azure resource name, a
 Cloudflare account id). OAuth, external and API key methods render it through
 the same `ProviderFormFields`, check required fields with the helpers in
@@ -163,12 +189,41 @@ while discovery runs elsewhere, so the same path would read two different
 files. The server keeps a certificate the form never read
 (`packages/web/server/lib/opencode/DOCUMENTATION.md`, `providers.js`).
 
+"Model defaults from" sets the provider's `canonical`: OpenCode then gives each
+model whose ID that catalog provider also lists its limits, capabilities, costs
+and reasoning levels, under whatever the model row sets itself. The choices are
+every provider in the running OpenCode's integration list, connected or not,
+without MCP sign-ins, web search and well-known logins, which are keyed by their
+origin URL rather than a provider ID (`listCanonicalProviders`), passed in by the
+Providers page, which has already read that list. OpenCode copies the source
+provider's settings, headers and body into this one, so the server refuses a
+source whose config entry sets any of them: a gateway's TLS certificate or
+headers would otherwise go to this provider's endpoint. OpenCode copies from its own
+provider registry, and the models.dev feed OpenChamber fetches is older and
+misses providers OpenCode has, so that feed is not the source. The list has
+a few hundred entries, so `CanonicalProviderPicker` is searchable and mounts rows
+in steps as its end scrolls into view, with a sheet on the phone; None leads the
+unfiltered list. A saved value the list lacks stays as an option, and a list that
+fails to load shows a note and keeps the saved value. None sends null to clear
+it; a stored entry the page could not read sends nothing, so the server keeps it.
+OpenCode cannot unset `canonical` from a higher config layer, so None only removes
+the edited layer's value: when a lower layer sets one (`inheritedCanonical` from
+the source route, carried on the edit form's initial state), the field says which
+provider still applies and in which file, ahead of the note about a list that failed.
+
 Model rows render collapsed (name, id, limits, non-text inputs) so a provider
 with dozens of models stays scannable; a row added by hand opens, and a row
 with a validation error opens on submit. Capabilities are written to the
-OpenCode config only when they are known (saved config, discovery, or the
-user's edit, `capabilitiesKnown`); otherwise the key is left out so a save
-never replaces what OpenCode knows about a model with a text-only default.
+OpenCode config field by field, only those that are known (saved config,
+discovery, or the user's edit, `capabilitiesKnown`); the rest are left out so a
+save never replaces what OpenCode knows or inherits from the canonical provider
+with a text-only default. Turning tools off writes `tools` alone. Discovery
+fills each field from the provider first, then the matched catalog model. A field
+neither reports stays unset. When editing a stored model, the form shows the
+editable categories OpenCode resolved for each missing list. Unchecking one
+inherited category keeps the other editable categories, and the list stays out
+of the config until changed. Unknown entries survive in lists the model already
+stores.
 
 Custom-provider icons are OpenChamber profile preferences, keyed by provider
 ID. They are not written into OpenCode config because OpenCode has no provider
@@ -275,6 +330,19 @@ OpenCode can discover OAuth without an explicit config entry. The lookup is
 scoped to the selected server's directory and stops after 9 reads spaced
 750 ms apart, including when a header/token-auth remote server has no OAuth
 integration. Leaving the selection discards the result.
+
+### Why opening an OAuth server can retry the connection
+
+A separate OpenCode process can save an OAuth credential without updating
+the running app's MCP status. The detail page retries once per selection
+when an enabled remote reports `failed` or `needs_auth` and its matching
+integration has a saved OAuth credential. It waits for the directory's
+policy and checks live status again before reconnecting, so a cached
+failure cannot restart a disconnected server. Switching the server off, or
+any other change that makes it ineligible, while that status read is
+pending cancels the attempt. Sign-in and manual retry
+remain available if the connection still fails. The grid and other
+directories do not retry.
 
 ### Why a failed OAuth server's header says "Sign in again"
 
@@ -596,8 +664,14 @@ The page is hidden in VS Code (`metadata.ts`).
 ## Plugin duplicate sources
 
 `plugins/PluginsGrid.tsx` keeps every configuration entry and its editing target.
-A discovered package card is hidden when its normalized target is already
-represented by a declaration or another discovery record. Distinct declarations
+A discovered package card is hidden when a declaration reaches the same
+normalized target through the same switch resource (`policyResource`). A link
+to that directory under another discovery path keeps its card even when the
+real directory is declared, because its status and switch are its own. Two
+discovery records that resolve to the same
+directory (a link in `plugin/` to a package in `plugins/`) keep separate cards,
+because OpenCode reports status and applies switches by discovery path, so one
+card could not show or switch the other. Distinct declarations
 and their options remain separate, including declarations of the same target.
 Editable local files always keep their own cards and file edit/delete actions,
 including files declared in config.
@@ -879,7 +953,9 @@ the browser, and a second meaning there confuses both.
 - Retention fields remain editable with automatic cleanup off because manual cleanup uses them too. The In work block never includes archived sessions.
 - Message-search status reads continue beyond an initially settled answer after a switch because the debounced save can start indexing later.
 - Voice keys stay on the server. Dictation cleanup starts off because it sends text to the small-model provider, and without that model the server retains the transcription. Voice pickers share install state and list installed models plus the default; dictation displays the server's choice when no saved model is available.
+- A custom speech server that lists its voices gets a voice dropdown ending in Custom…; a server without a list keeps the text field. The saved voice changes only when the user picks or types one, so a voice missing from the list shows as Custom… with its value. Typing in the field keeps it in Custom mode until a listed voice is picked, and a list that arrives while the cursor is in the field keeps the field, its text and the focus; the dropdown appears beside it. A failed read names its reason in the line reserved under the field, and a Retry that clears the line hands focus to the voice control. The list is read for a finished address only (on open, when the URL field loses focus, on Enter); whether the stored key goes along is the server's decision (`packages/web/server/lib/tts/DOCUMENTATION.md`). A list longer than 100 voices uses `LongVoicePicker`, with search and rows mounted as it scrolls; its Custom… item stays in view.
 - Usage panels show only their provider's error, so Console budgets survive a failed Go usage read. Balance-only windows omit percentage bars and used captions because they report no usage share.
+- Settings names the Go credential next to its meters and the Console workspace next to its budgets. The two reads can use different accounts when the Go reader falls back to a key.
 - About separates app, connected-server and OpenCode updates. A latest-version toast waits for every relevant check; failed checks keep prior status, and authoritative running versions replace temporary installed-but-not-running state.
 - About offers upgrade commands only for package-manager installations. Update notes cover the offered release range; a stable release offered to Canary has only that release's notes.
 
@@ -941,3 +1017,11 @@ Jev answers OpenChamber classification requests and the server owns its selectio
 ### Why settings links use text color and not the accent
 
 Underlining identifies links while the accent remains reserved for primary actions. Hover and focus strengthen the underline.
+
+### Why a custom voice is a Custom… item and not a combobox
+
+No combobox primitive exists. A Custom… item keeps blends like `af_bella+af_sky`, voice profiles and servers without a list working, beside a plain dropdown for everyone else.
+
+### Why the voice-list line wraps instead of truncating
+
+The line has a reserved one-line slot, so the common messages move nothing below it. It wraps because a phone has no tooltips and two of its messages are the fix itself (an environment variable, the address form); a longer message appears only after the user typed that address, below the field they typed into.

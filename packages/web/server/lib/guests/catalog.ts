@@ -9,6 +9,7 @@ import { listRelativeGuestScriptHrefs, resolveGuestHtmlRelativePath } from './ht
 import { effectiveGrants, guestGrantScope } from './grant-scope.js';
 import { enterpriseBlockedCapabilities } from './enterprise.js';
 import { readEnterprisePolicy } from '../enterprise-mode.js';
+import { recoverGuestCheckouts, recoverIdleGuestCheckouts } from './checkout-swap.js';
 import { ensureGuestStorageIds, onExtensionStoreWrite, readExtensionStore } from './persist.js';
 import { buildPublicSocketBindings } from './sockets.js';
 import { isReservedBuiltInId, readBuiltInRegistry } from './builtins.js';
@@ -460,6 +461,9 @@ export const toPublicGuest = (guest: GuestRecord, toolLinkSettings: Record<strin
   if (guest.enterpriseBlocked?.length) {
     row.enterpriseBlocked = [...guest.enterpriseBlocked];
   }
+  if (guest.folders?.length) {
+    row.folders = [...guest.folders];
+  }
   if (guest.entry) {
     row.entry = guest.entry;
   }
@@ -651,11 +655,20 @@ const withEnterprisePolicy = (guests: InstalledGuest[]) => {
   });
 };
 
-export const listInstalledGuests = async ({ persistPath }: { persistPath: string }) => {
-  const cached = persistPath ? catalogCache.get(persistPath) : undefined;
+const recoveryListeners = new Map<string, (guestId: string) => void>();
+
+export const onGuestCheckoutRecovered = (persistPath: string, listener: (guestId: string) => void) => {
+  recoveryListeners.set(persistPath, listener);
+};
+
+export const listInstalledGuests = async ({ persistPath, underCheckoutLock = false }: { persistPath: string; underCheckoutLock?: boolean }) => {
+  const cached = persistPath && !underCheckoutLock ? catalogCache.get(persistPath) : undefined;
   if (cached && cached.expiresAt > Date.now()) {
     return withEnterprisePolicy(cached.guests);
   }
+  const recovered = persistPath ? await (underCheckoutLock ? recoverGuestCheckouts : recoverIdleGuestCheckouts)(persistPath) : [];
+  if (recovered.length > 0) invalidateGuestCatalog(persistPath);
+  for (const id of recovered) recoveryListeners.get(persistPath)?.(id);
   const version = persistPath ? catalogVersionOf(persistPath) : 0;
   const guests = await listInstalledGuestsUncached({ persistPath });
   if (persistPath && catalogVersionOf(persistPath) === version) {
@@ -690,6 +703,7 @@ const listInstalledGuestsUncached = async ({ persistPath }: { persistPath: strin
         ...withSource(guest, 'bundled', null),
         capabilityGrants: requestedGuestCapabilities(guest),
         enabled: !stored.disabledGuests?.[guest.id],
+        folders: stored.guestFolders?.[guest.id],
         socketBindings,
         storageDescriptor: { id: guest.id, storedPath: null, builtIn: true },
       });
@@ -728,6 +742,7 @@ const listInstalledGuestsUncached = async ({ persistPath }: { persistPath: strin
         guestGrantScope(guest),
       ),
       enabled: !stored.disabledGuests?.[guest.id],
+      folders: stored.guestFolders?.[guest.id],
       socketBindings,
       revision: packageRevisions.get(persistPath)?.get(guest.id) ?? 0,
       storageDescriptor: { id: guest.id, storedPath, builtIn: false },

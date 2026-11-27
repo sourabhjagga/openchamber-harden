@@ -1,21 +1,18 @@
 import { createVSCodeAPIs } from './api';
 import { createRemovalTombstones } from './inlineCommentRemovals';
-import { resolveCommentTarget } from './inlineCommentTarget';
+import { needsComposerDraft, resolveCommentTarget, type InlineCommentRecord } from './inlineCommentTarget';
 import { fetchLastAssistantMessageText } from './notificationMessage';
 import { findMessagePageItem } from '@openchamber/ui/lib/opencode/messagePaging';
-import { BridgeRequestError, onCommand, onThemeChange, postBridgeNotification, proxyApiRequest, proxySessionMessageRequest, sendBridgeMessage, sendBridgeMessageWithOptions, startSseProxy, stopSseProxy } from './api/bridge';
+import { BridgeRequestError, bridgeRequestErrorResponse, onCommand, onThemeChange, postBridgeNotification, proxyApiRequest, proxySessionMessageRequest, sendBridgeMessage, sendBridgeMessageWithOptions, startSseProxy, stopSseProxy } from './api/bridge';
 import { vscodeStreamPerfCount, vscodeStreamPerfMeasure, vscodeStreamPerfObserve } from './api/streamPerf';
 import { quotaGiftResetBridgePayload } from './quotaGiftResetRequest';
+import { sessionMetadataRequest } from './sessionMetadataRequest';
 import { extractBodyBase64, extractBodyText, extractJsonBody, hasInitBody } from './requestBodyTransport';
+import { emitVSCodeTheme, startVSCodeThemeBootstrap } from './vscodeThemeBootstrap';
 import type { RuntimeAPIs } from '@openchamber/ui/lib/api/types';
 import { opencodeClient } from '@openchamber/ui/lib/opencode/client';
 import { sanitizeHeadersForBrowser } from '@openchamber/ui/lib/runtime-fetch';
-import {
-  buildVSCodeThemeFromPalette,
-  readVSCodeThemePalette,
-  type VSCodeThemeKind,
-  type VSCodeThemePayload,
-} from '@openchamber/ui/lib/theme/vscode/adapter';
+import type { VSCodeThemeKind, VSCodeThemePayload } from '@openchamber/ui/lib/theme/vscode/adapter';
 import { formatMessage, getBootstrapMessages, readStoredLocaleForBootstrap, useI18nStore, type I18nKey } from '@openchamber/ui/lib/i18n';
 import type { VSCodeActiveEditorFile } from '@/sync/input-store';
 import { usePermissionStore } from '@openchamber/ui/stores/permissionStore';
@@ -28,6 +25,7 @@ import { hostViewerStateSchema, reportHostViewerState } from '@openchamber/ui/li
 import { vscodeSettingsNavigationSchema } from '@openchamber/ui/lib/settings/vscodeNavigation';
 import { applyVSCodeSettingsNavigation } from '@openchamber/ui/apps/vscodeSettingsNavigation';
 import { applyVSCodeSessionNavigation, vscodeSessionNavigationSchema } from '@openchamber/ui/apps/vscodeSessionNavigation';
+import { BRIDGE_JSON_PUT_ROUTES } from './bridgeJsonPutRoutes';
 
 type ConnectionStatus = 'connecting' | 'connected' | 'error' | 'disconnected';
 
@@ -186,40 +184,9 @@ const maybeHideLoadingOverlay = () => {
   setLoadingStatusText('');
 };
 
-const applyInitialTheme = (theme: { metadata?: { variant?: string }; colors?: { surface?: { background?: string; foreground?: string } } }) => {
-  if (typeof document === 'undefined' || !theme) return;
-  const variant = theme.metadata?.variant === 'dark' ? 'dark' : 'light';
-  const root = document.documentElement;
-  root.classList.remove('light', 'dark');
-  root.classList.add(variant);
+let themeKind = window.__VSCODE_CONFIG__?.theme as VSCodeThemeKind | undefined;
 
-  const background = theme.colors?.surface?.background;
-  if (background) {
-    document.body.style.backgroundColor = background;
-    let meta = document.querySelector('meta[name="theme-color"]') as HTMLMetaElement | null;
-    if (!meta) {
-      meta = document.createElement('meta');
-      meta.setAttribute('name', 'theme-color');
-      document.head.appendChild(meta);
-    }
-    meta.setAttribute('content', background);
-  }
-};
-
-const emitVSCodeTheme = (preferredKind?: VSCodeThemeKind) => {
-  const palette = readVSCodeThemePalette(preferredKind);
-  if (!palette) {
-    return;
-  }
-  const theme = buildVSCodeThemeFromPalette(palette);
-  window.__OPENCHAMBER_VSCODE_THEME__ = theme;
-   applyInitialTheme(theme);
-  window.dispatchEvent(new CustomEvent<VSCodeThemePayload>('openchamber:vscode-theme', {
-    detail: { theme, palette },
-  }));
-};
-
-emitVSCodeTheme(window.__VSCODE_CONFIG__?.theme as VSCodeThemeKind | undefined);
+startVSCodeThemeBootstrap(() => themeKind);
 
 const scheduleThemeRecompute = (kind?: VSCodeThemeKind) => {
   requestAnimationFrame(() => {
@@ -234,6 +201,10 @@ onThemeChange((payload) => {
     : typeof payload === 'object' && payload
       ? payload.kind
       : undefined) as VSCodeThemeKind | undefined;
+
+  if (kind === 'light' || kind === 'dark' || kind === 'high-contrast') {
+    themeKind = kind;
+  }
 
   if (typeof payload === 'object' && payload?.shikiThemes !== undefined) {
     window.__OPENCHAMBER_VSCODE_SHIKI_THEMES__ = payload.shikiThemes;
@@ -429,13 +400,12 @@ const handleLocalApiRequest = async (input: RequestInfo | URL, url: URL, init: R
   if (normalizedPathname === '/api/openchamber/sessions/unarchive' && method === 'POST') {
     return bridgeJsonRoute('api:sessions/unarchive', await extractJsonBody(input, init, method));
   }
-  const sessionMetadataMatch = normalizedPathname.match(/^\/api\/openchamber\/sessions\/([^/]+)\/metadata$/);
+  const sessionMetadataMatch = normalizedPathname.match(/^\/api\/openchamber\/sessions\/([^/]+)\/metadata(\/compare-and-set)?$/);
   if (sessionMetadataMatch && (method === 'GET' || method === 'POST')) {
     const sessionId = decodeURIComponent(sessionMetadataMatch[1]);
     if (method === 'GET') return bridgeJsonRoute('api:sessions/metadata:get', { sessionId });
-    const body = await extractJsonBody(input, init, method);
-    const patch = body && typeof body === 'object' && !Array.isArray(body) ? (body as { patch?: unknown }).patch : undefined;
-    return bridgeJsonRoute('api:sessions/metadata:set', { sessionId, patch });
+    const request = sessionMetadataRequest(sessionId, await extractJsonBody(input, init, method), !!sessionMetadataMatch[2]);
+    return request ? bridgeJsonRoute(request.type, request.payload) : Response.json({ error: 'expected must be an object' }, { status: 400 });
   }
 
   if (/^\/api\/projects\/[^/]+\/scheduled-tasks(?:\/[^/]+)?$/.test(normalizedPathname)) {
@@ -578,11 +548,10 @@ const handleLocalApiRequest = async (input: RequestInfo | URL, url: URL, init: R
   if (normalizedPathname === '/api/small-model' && method === 'GET') {
     const directory = getRequestDirectoryHint(url, input, init);
     try {
-      const data = await sendBridgeMessage('api:small-model:get', { directory });
-      return new Response(JSON.stringify(data), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      return jsonResponse(await sendBridgeMessage('api:small-model:get', { directory }), 200);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return new Response(JSON.stringify({ error: message }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+      if (error instanceof BridgeRequestError && error.status !== undefined) return bridgeRequestErrorResponse(error);
+      return jsonResponse({ error: error instanceof Error ? error.message : String(error) }, 500);
     }
   }
 
@@ -752,13 +721,8 @@ const handleLocalApiRequest = async (input: RequestInfo | URL, url: URL, init: R
     }
   }
 
-  if (pathname === '/api/config/warming' && method === 'PUT') {
-    return bridgeJsonRoute('api:config/warming', await extractJsonBody(input, init, method));
-  }
-
-  if (pathname === '/api/config/compaction' && method === 'PUT') {
-    return bridgeJsonRoute('api:config/compaction', await extractJsonBody(input, init, method));
-  }
+  const bridgePutRoute = method === 'PUT' ? BRIDGE_JSON_PUT_ROUTES.get(pathname) : undefined;
+  if (bridgePutRoute) return bridgeJsonRoute(bridgePutRoute, await extractJsonBody(input, init, method));
 
   if (pathname === '/api/config/skill-switch' && method === 'PUT') {
     const body = await extractJsonBody(input, init, method);
@@ -1516,19 +1480,7 @@ const removedComments = createRemovalTombstones();
 onCommand('addLineComment', (payload) => {
   // SAFETY: the payload crossed the extension boundary as JSON; every field is
   // read as unknown here and trusted only after the checks below.
-  const record = payload as {
-    draftId?: unknown;
-    filePath?: unknown;
-    relativePath?: unknown;
-    source?: unknown;
-    side?: unknown;
-    startLine?: unknown;
-    endLine?: unknown;
-    code?: unknown;
-    language?: unknown;
-    comment?: unknown;
-    targetSessionId?: unknown;
-  };
+  const record = payload as InlineCommentRecord;
 
   const draftId = typeof record.draftId === 'string' && record.draftId ? record.draftId : undefined;
   const targetSessionId = typeof record.targetSessionId === 'string' && record.targetSessionId ? record.targetSessionId : undefined;
@@ -1551,18 +1503,24 @@ onCommand('addLineComment', (payload) => {
     import('@/stores/useDirectoryStore'),
     import('@/stores/useInlineCommentDraftStore'),
   ]).then(async ([{ useSessionUIStore }, { useDirectoryStore }, { useInlineCommentDraftStore }]) => {
-    const resolveTarget = () => {
+    const targetSnapshot = () => {
       const sessionState = useSessionUIStore.getState();
       const currentSessionId = sessionState.currentSessionId ?? null;
       const draft = sessionState.newSessionDraft;
-      return resolveCommentTarget({
+      return {
         currentSessionId,
         sessionDirectory: currentSessionId ? sessionState.getDirectoryForSession(currentSessionId) ?? null : null,
         draftOpen: Boolean(draft?.open),
         draftDirectory: draft?.open ? draft.bootstrapPendingDirectory ?? draft.directoryOverride ?? null : null,
         currentDirectory: useDirectoryStore.getState().currentDirectory ?? null,
-      }, targetSessionId);
+      };
     };
+    const resolveTarget = () => resolveCommentTarget(targetSnapshot(), targetSessionId);
+
+    if (needsComposerDraft(targetSnapshot(), record.openInComposer === true, targetSessionId)) {
+      useSessionUIStore.getState().openNewSessionDraft();
+      window.dispatchEvent(new CustomEvent('openchamber:navigate', { detail: { view: 'chat' } }));
+    }
 
     let target = resolveTarget();
     for (let attempt = 0; !target && attempt < 80; attempt += 1) {
@@ -1588,6 +1546,7 @@ onCommand('addLineComment', (payload) => {
       code,
       language,
       text: comment,
+      composing: record.openInComposer === true,
     }, { written: true });
   });
 });

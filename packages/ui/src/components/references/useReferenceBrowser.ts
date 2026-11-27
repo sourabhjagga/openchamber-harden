@@ -14,6 +14,7 @@ import { itemDirectory, leftOutFolders, type AcrossReference } from './acrossRep
 import { recordLabelWrite } from './labelWrites';
 import type { CachedValue } from './referenceCache';
 import {
+    newerTrackerRead,
     referencePickerItemKey,
     trackerOfSource,
     DEFAULT_REPOSITORY_FILTER,
@@ -71,6 +72,7 @@ export type ReferenceBrowserOptions = {
     retainedItems?: ReadonlyMap<string, ReferencePickerItem>;
     pinnedItem?: ReferencePickerItem | null;
     onScreen?: boolean;
+    crossReferences?: boolean;
 };
 
 export function useReferenceBrowser({
@@ -83,6 +85,7 @@ export function useReferenceBrowser({
     retainedItems = NO_ITEMS,
     pinnedItem = null,
     onScreen = true,
+    crossReferences = false,
 }: ReferenceBrowserOptions) {
     const [chosenRepositoryKind, setRepositoryKind] = React.useState<RepositoryReferenceKind>(initialGitHubKind ?? lastRepositoryKind);
     const [chosenRepositoryFilter, setRepositoryFilter] = React.useState<RepositoryReferenceFilter>(lastRepositoryFilter.get(initialGitHubKind ?? lastRepositoryKind) ?? DEFAULT_REPOSITORY_FILTER);
@@ -224,10 +227,13 @@ export function useReferenceBrowser({
     const settledPreviewItem = useDebouncedValue(previewItem, DETAIL_DEBOUNCE_MS);
     const previewSettled = Boolean(settledPreviewItem && previewItem
         && referencePickerItemKey(settledPreviewItem) === referencePickerItemKey(previewItem));
-    const { detail: trackerDetail } = useTrackerItemDetail(
-        previewItem?.source === 'tracker' ? { provider: previewItem.provider, id: previewItem.item.id } : null,
+    const { detail: trackerDetail, refreshFromHost: refreshTrackerDetail } = useTrackerItemDetail(
+        previewItem?.source === 'tracker' ? { provider: previewItem.provider, id: previewItem.item.id, identifier: previewItem.item.identifier } : null,
         previewSettled,
     );
+    const shownTrackerItem = previewItem?.source === 'tracker'
+        ? newerTrackerRead(previewItem.item, trackerDetail.status === 'ready' ? trackerDetail.value : null)
+        : null;
     const [revisionChoice, setRevisionChoice] = React.useState<{ key: string; sha: string } | null>(null);
     const previewRevision = revisionChoice && previewKey !== null && revisionChoice.key === previewKey ? revisionChoice.sha : null;
     const selectPreviewRevision = React.useCallback((sha: string | null) => {
@@ -238,6 +244,7 @@ export function useReferenceBrowser({
         previewItem?.source === 'repository' ? previewItem.reference : null,
         previewSettled,
         previewRevision,
+        crossReferences,
     );
 
     const selectRepositoryKind = (kind: RepositoryReferenceKind) => {
@@ -340,6 +347,8 @@ export function useReferenceBrowser({
         mobilePreviewKey,
         closeMobilePreview: () => setMobilePreviewKey(null),
         trackerDetail,
+        refreshTrackerDetail,
+        shownTrackerItem,
         repositoryDetail,
         repositoryLatestDetail,
         refreshRepositoryDetail,

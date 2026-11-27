@@ -11,6 +11,7 @@ import { useDirectorySync } from '@/sync/sync-context';
 import { getRuntimeKey } from '@/lib/runtime-switch';
 import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import { createInputHistorySubmission } from '@/stores/useInputHistoryStore';
+import { buildSkillMentionInstruction } from '@/lib/skillMentionInstruction';
 
 type SessionStatusType = 'idle' | 'busy' | 'retry';
 
@@ -83,6 +84,7 @@ export const buildQueuedAutoSendPayload = (queue: QueuedMessage[]) => {
     primaryText: queued.text,
     primaryAttachments: queued.attachments ?? [],
     agentMentionName: queued.agentMention,
+    skillNames: queued.skills ?? [],
     additionalParts: queuedContextToParts(queued.context ?? []),
     sendConfig: queued.sendConfig,
     goal: queued.goal ?? null,
@@ -95,6 +97,8 @@ type ResolvedQueuedSendConfig = {
   modelID: string;
   agent?: string;
   variant?: string;
+  keepSessionModel?: boolean;
+  keepSessionAgent?: boolean;
 };
 
 export const sendQueuedAutoSendPayload = (
@@ -112,7 +116,14 @@ export const sendQueuedAutoSendPayload = (
     payload.additionalParts.length > 0 ? payload.additionalParts : undefined,
     resolved.variant,
     'normal',
-    { target, historySubmissions: payload.historySubmissions, queuedGoal: payload.goal },
+    {
+      target,
+      historySubmissions: payload.historySubmissions,
+      queuedGoal: payload.goal,
+      ...(resolved.keepSessionModel && { keepSessionModel: true }),
+      ...(resolved.keepSessionAgent && { keepSessionAgent: true }),
+      ...(payload.skillNames.length > 0 && { skills: { names: payload.skillNames, instructionFor: buildSkillMentionInstruction } }),
+    },
   );
 };
 
@@ -283,6 +294,8 @@ export function useQueuedMessageAutoSend(enabledOrOptions?: boolean | { enabled?
           modelID: resolved.modelID,
           agent: resolved.agent,
           variant: resolved.variant,
+          keepSessionModel: resolved !== captured || captured?.keepSessionModel === true,
+          keepSessionAgent: resolved !== captured || captured?.keepSessionAgent === true,
         });
         const queue = useMessageQueueStore.getState();
         queue.removeFromQueue(queue.locateQueuedMessage(target, payload.queuedMessageId), payload.queuedMessageId);

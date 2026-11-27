@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process"
 import process from "node:process"
 
 import { CdpClient, launchChrome, reservePort, resolveChrome, resolveProfileDir, wait } from "../perf/cdp.mjs"
+import { guardedCommand } from "./guard.mjs"
 import { prioritizeWindowsProcess } from "./windows-priority.mjs"
 
 const VIEWPORT = { width: 1440, height: 900, deviceScaleFactor: 1 }
@@ -65,6 +66,16 @@ const FIND_ELEMENTS = `(selector, text, exact, all, inView, pathText) => {
   return matches
 }`
 
+/** The `/api/...` path of a request address, without its query; null for anything else. */
+export const apiPathOf = (address) => {
+  try {
+    const { pathname } = new URL(address)
+    return pathname === "/api" || pathname.startsWith("/api/") ? pathname : null
+  } catch {
+    return null
+  }
+}
+
 export class Page {
   constructor(client) {
     this.client = client
@@ -72,6 +83,15 @@ export class Page {
     client.on("Runtime.exceptionThrown", ({ exceptionDetails }) => {
       this.consoleErrors.push(exceptionDetails.exception?.description?.split("\n")[0] ?? exceptionDetails.text)
     })
+    // What the page asked the server for, as `METHOD /api/...`: `--changed`
+    // selects the scenarios of a changed server file by them.
+    this.apiRequests = new Set()
+    const noteRequest = (method, url) => {
+      const path = apiPathOf(url)
+      if (path) this.apiRequests.add(`${method} ${path}`)
+    }
+    client.on("Network.requestWillBeSent", ({ request }) => noteRequest(request.method, request.url))
+    client.on("Network.webSocketCreated", ({ url }) => noteRequest("WS", url))
     this.sourceUpdates = []
     this.expectedLoads = 0
     client.on("Page.loadEventFired", () => {
@@ -98,6 +118,7 @@ export class Page {
     const page = new Page(client)
     await client.send("Page.enable")
     await client.send("Runtime.enable")
+    await client.send("Network.enable")
     await client.send("Emulation.setDeviceMetricsOverride", { ...VIEWPORT, mobile: false })
     await client.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "dark" }, { name: "prefers-reduced-motion", value: "reduce" }] })
     await client.send("Emulation.setFocusEmulationEnabled", { enabled: true })
@@ -356,8 +377,10 @@ export const startBrowser = async ({ chrome, headed = false, onSpawn }) => {
   const profile = resolveProfileDir(null, "verify")
   // A Windows SSH session or a Linux CI runner may have no input devices.
   // Desktop scenarios still use a mouse, including controls behind CSS (hover: hover).
+  // macOS does not nest sandboxes: the stand's replaces Chrome's own, and the
+  // pages it opens are the stand's.
   const pointerArgs = ["--blink-settings=primaryPointerType=4,availablePointerTypes=4,primaryHoverType=2,availableHoverTypes=2"]
-  const child = launchChrome({ chrome: executable, profileDir: profile.dir, port, headless: !headed, extraArgs: ["--lang=en-US", `--window-size=${VIEWPORT.width},${VIEWPORT.height}`, ...pointerArgs] })
+  const child = launchChrome({ chrome: executable, profileDir: profile.dir, port, headless: !headed, extraArgs: ["--lang=en-US", `--window-size=${VIEWPORT.width},${VIEWPORT.height}`, ...pointerArgs, "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1", "--proxy-server=http://127.0.0.1:9", "--proxy-bypass-list=localhost;127.0.0.1", ...(process.platform === "darwin" ? ["--no-sandbox"] : [])], wrap: guardedCommand })
   profile.removeAfter(child)
   const spawnFailed = new Promise((_, reject) => child.once("error", (error) => reject(new Error(`Chrome did not start: ${error.message}`))))
   const connecting = Promise.resolve().then(() => {

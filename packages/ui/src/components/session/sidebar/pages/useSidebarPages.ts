@@ -6,7 +6,9 @@ import { guestPackageIconSrc, resolveGuestIconName } from '@/lib/guests/icon';
 import { getRuntimeUrlResolver } from '@/lib/runtime-url';
 import type { ShortcutActionId } from '@/lib/shortcuts';
 import { useEnterpriseMode } from '@/stores/useEnterprisePolicyStore';
+import { useSessionDisplayStore } from '@/stores/useSessionDisplayStore';
 import { useUIStore } from '@/stores/useUIStore';
+import { orderSidebarPages } from './sidebarPageOrder';
 
 type BuiltinPageId = 'overview' | 'source-board' | 'scheduled' | 'archive' | 'stats' | 'integrations';
 
@@ -17,7 +19,7 @@ function builtinPageIcon(id: BuiltinPageId): IconName {
     case 'scheduled': return 'calendar-schedule';
     case 'archive': return 'archive';
     case 'stats': return 'bar-chart';
-    case 'integrations': return 'store-2';
+    case 'integrations': return 'apps-2-add';
   }
 }
 
@@ -32,6 +34,22 @@ export type SidebarPage = {
 };
 
 export const useSidebarPages = (enabled: boolean): readonly SidebarPage[] => {
+  const pages = useArrangedSidebarPages(enabled);
+  const hiddenPages = useSessionDisplayStore((state) => state.hiddenPages);
+  return React.useMemo(() => {
+    if (hiddenPages.length === 0) return pages;
+    const hidden = new Set(hiddenPages);
+    return pages.filter((page) => !hidden.has(page.id));
+  }, [hiddenPages, pages]);
+};
+
+export const useArrangedSidebarPages = (enabled: boolean): readonly SidebarPage[] => {
+  const pages = useAvailableSidebarPages(enabled);
+  const pageOrder = useSessionDisplayStore((state) => state.pageOrder);
+  return React.useMemo(() => (pageOrder.length === 0 ? pages : orderSidebarPages(pages, pageOrder)), [pageOrder, pages]);
+};
+
+const useAvailableSidebarPages = (enabled: boolean): readonly SidebarPage[] => {
   const { t } = useI18n();
   const overviewAvailable = useUIStore((state) => state.overviewFeatureAvailable);
   const isOverviewOpen = useUIStore((state) => state.isOverviewOpen);

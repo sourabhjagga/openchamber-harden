@@ -6,7 +6,7 @@ import { Icon } from '@/components/icon/Icon';
 import type { IconName } from '@/components/icon/icons';
 import { useEffectiveDirectory } from '@/hooks/useEffectiveDirectory';
 import { useI18n, type I18nKey } from '@/lib/i18n';
-import type { ExtensionWaitNotice, PageAnswerNotice, PullRequestNotice, SessionNotice } from '@/lib/opencode/session-notices';
+import type { ExtensionWaitNotice, LeadNotice, PageAnswerNotice, PullRequestNotice, SessionNotice } from '@/lib/opencode/session-notices';
 import { changeRequestCopy } from '@/lib/source-control/changeRequestCopy';
 import { changeRequestTermOfUrl, useRepositoryUrlMatcher } from '@/lib/source-control/repositoryUrlMatcher';
 import { cn } from '@/lib/utils';
@@ -14,7 +14,7 @@ import { ReasoningTimelineBlock } from './parts/ReasoningPart';
 
 const folderName = (path: string): string => path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || path;
 
-type FoldedSessionNotice = Exclude<SessionNotice, PullRequestNotice | ExtensionWaitNotice | PageAnswerNotice>;
+type FoldedSessionNotice = Exclude<SessionNotice, PullRequestNotice | ExtensionWaitNotice | PageAnswerNotice | LeadNotice>;
 
 const useNoticeTitle = (notice: FoldedSessionNotice): string => {
     const { t } = useI18n();
@@ -40,6 +40,7 @@ const PULL_REQUEST_EVENT_LABEL = {
     conflict: 'chat.sessionNotice.pullRequest.conflict',
     behind: 'chat.sessionNotice.pullRequest.behind',
     activity: 'chat.sessionNotice.pullRequest.activity',
+    'queue-removed': 'chat.sessionNotice.pullRequest.queueRemoved',
 } as const satisfies Record<PullRequestNotice['events'][number], I18nKey>;
 
 const ROW_TEXT_CLASS = 'typography-meta !text-[length:var(--text-meta)] !leading-5 sm:!leading-6 tracking-normal';
@@ -53,6 +54,7 @@ const PullRequestNoticeRow: React.FC<{ notice: PullRequestNotice }> = ({ notice 
     const changes = notice.events.map((event) => {
         if (event === 'checks-failed' && failedChecks) return t('chat.sessionNotice.pullRequest.checksFailedNames', { names: failedChecks });
         if (event === 'activity' && authors) return t('chat.sessionNotice.pullRequest.activityNames', { names: authors });
+        if (event === 'queue-removed' && notice.queueRemovalReason) return t('chat.sessionNotice.pullRequest.queueRemovedWithReason', { reason: notice.queueRemovalReason });
         return t(PULL_REQUEST_EVENT_LABEL[event]);
     }).join(' · ');
 
@@ -61,7 +63,7 @@ const PullRequestNoticeRow: React.FC<{ notice: PullRequestNotice }> = ({ notice 
             href={notice.url}
             target="_blank"
             rel="noopener noreferrer"
-            className="group/notice flex w-full min-w-0 items-center gap-1.5 rounded-xl py-1.5 ps-px pe-2 text-start focus-visible:outline-none"
+            className="group/notice flex w-full min-w-0 items-center gap-1.5 rounded-xl py-1.5 sm:py-1 ps-px pe-2 text-start focus-visible:outline-none"
             onClick={(event) => {
                 if (event.metaKey || event.ctrlKey || event.shiftKey) return;
                 event.preventDefault();
@@ -88,7 +90,7 @@ const PullRequestNoticeRow: React.FC<{ notice: PullRequestNotice }> = ({ notice 
 };
 
 const PlainNoticeLine: React.FC<{ icon: IconName; title: string }> = ({ icon, title }) => (
-    <div className="flex w-full min-w-0 items-center gap-1.5 py-1.5 ps-px pe-2">
+    <div className="flex w-full min-w-0 items-center gap-1.5 py-1.5 sm:py-1 ps-px pe-2">
         <span className="flex-shrink-0" style={{ color: 'var(--tools-icon)' }}>
             <Icon name={icon} className="h-3.5 w-3.5" />
         </span>
@@ -110,7 +112,7 @@ const ExtensionWaitNoticeRow: React.FC<{ notice: ExtensionWaitNotice; blockId: s
             presentation={{
                 icon: 'timer',
                 iconClassName: notice.outcome === 'ended' ? 'text-[var(--status-warning)]' : undefined,
-                title: notice.subject,
+                title: notice.scriptMinutes === undefined ? notice.subject : t('chat.waits.script', { minutes: notice.scriptMinutes }),
                 expandLabel: t('chat.sessionNotice.showDetails'),
                 collapseLabel: t('chat.sessionNotice.hideDetails'),
                 markdownVariant: 'assistant',
@@ -146,6 +148,37 @@ const PageAnswerNoticeRow: React.FC<{ notice: PageAnswerNotice; blockId: string 
     );
 };
 
+const LeadHandoverNoticeRow: React.FC<{ title: string }> = ({ title }) => {
+    const { t } = useI18n();
+    return <PlainNoticeLine icon="lead" title={t('chat.sessionNotice.leadHandover', { title })} />;
+};
+
+const LeadReplyNoticeRow: React.FC<{ notice: Extract<LeadNotice, { kind: 'lead-answer' }>; blockId: string }> = ({ notice, blockId }) => {
+    const { t } = useI18n();
+    const [single] = notice.answers;
+    if (single && notice.answers.length === 1 && notice.suggestions.length === 0) {
+        return <PlainNoticeLine icon="survey" title={t('chat.sessionNotice.leadAnswer', { question: single.question, answer: single.answer })} />;
+    }
+    const details = [
+        ...notice.answers.map(({ question, answer }) => `- ${question}\n  **${answer}**`),
+        ...notice.suggestions.map(({ item, accepted }) => `- ${item}\n  **${t(accepted ? 'chat.leadDigest.accepted' : 'chat.leadDigest.declined')}**`),
+    ].join('\n');
+    return (
+        <ReasoningTimelineBlock
+            text={details}
+            blockId={blockId}
+            presentation={{
+                icon: 'survey',
+                title: t('chat.sessionNotice.leadReply'),
+                expandLabel: t('chat.sessionNotice.showDetails'),
+                collapseLabel: t('chat.sessionNotice.hideDetails'),
+                markdownVariant: 'assistant',
+                maxHeightClassName: 'max-h-[60vh]',
+            }}
+        />
+    );
+};
+
 const FoldedNotice: React.FC<{ notice: FoldedSessionNotice; blockId: string }> = ({ notice, blockId }) => {
     const { t } = useI18n();
     const title = useNoticeTitle(notice);
@@ -171,5 +204,7 @@ export const SessionNoticeBlock: React.FC<{ notice: SessionNotice; blockId: stri
     if (notice.kind === 'pull-request') return <PullRequestNoticeRow notice={notice} />;
     if (notice.kind === 'extension-wait') return <ExtensionWaitNoticeRow notice={notice} blockId={blockId} />;
     if (notice.kind === 'page-answer') return <PageAnswerNoticeRow notice={notice} blockId={blockId} />;
+    if (notice.kind === 'lead-answer') return <LeadReplyNoticeRow notice={notice} blockId={blockId} />;
+    if (notice.kind === 'lead-handover') return <LeadHandoverNoticeRow title={notice.title} />;
     return <FoldedNotice notice={notice} blockId={blockId} />;
 };

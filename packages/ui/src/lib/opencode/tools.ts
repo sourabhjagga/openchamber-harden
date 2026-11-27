@@ -4,6 +4,8 @@ import { z } from "zod"
 import type { JsonValue, Metadata, ToolInput, ToolState } from "./model"
 import { opencodeNamespaceTool } from "./opencode-namespace-tools"
 import { normalizeToolName, type ToolName } from "./tool-name"
+import { commandPreview, labelPreview } from "./toolRowPreview"
+import { booleanish, optionalCount, optionalText } from "./toolInputSchemas"
 
 export { normalizeToolName, opencodeNamespaceTool, type ToolName }
 
@@ -66,13 +68,6 @@ export const isWebTool = (toolName: ToolName): boolean => WEB_TOOLS.has(normaliz
 export const isWebSearchTool = (toolName: ToolName): boolean => normalizeToolName(toolName) === OPENCODE_TOOLS.websearch
 
 
-const optionalText = z.string().trim().min(1).optional().catch(undefined)
-const optionalCount = z.number().int().nonnegative().optional().catch(undefined)
-
-const booleanish = z
-  .union([z.boolean(), z.enum(["true", "false"]).transform((value) => value === "true")])
-  .optional()
-  .catch(undefined)
 
 const inputSchema = z
   .object({
@@ -515,6 +510,9 @@ export function requestedSecretRun(toolName: ToolName, state: ToolState): Reques
   }
 }
 
+export const requestedSecretForget = (toolName: ToolName, state: ToolState): boolean => toolName === OPENCHAMBER_SECRET_TOOL && state.status === "running"
+  && forgetsSavedSecrets(openChamberCallSchema.parse(state.input ?? {}))
+
 export function requestedSecret(toolName: ToolName, state: ToolState): RequestedSecret | null {
   if (toolName !== OPENCHAMBER_SECRET_TOOL || state.status !== "running") return null
   const action = secretRunInputSchema.parse(state.input ?? {}).action
@@ -547,7 +545,6 @@ export type ToolDescription =
   | { kind: "files"; count: number; files: string[] }
   | { kind: "tools"; calls: Array<{ name: string; count: number; completed: boolean; actions: Array<{ action: string; count: number }> }>; overflow: number }
 
-const MAX_COMMAND_LENGTH = 100
 const MAX_DESCRIBED_TOOL_CALLS = 4
 const MAX_TEXT_LENGTH = 120
 
@@ -556,7 +553,7 @@ const OPENCHAMBER_SECRET_TOOL = "openchamber_secret"
 const OPENCHAMBER_WORKFLOW_TOOL = "openchamber_workflow"
 const OPENCHAMBER_IMAGE_TOOL = "openchamber_image"
 
-const OPENCHAMBER_TOOLS = new Set(["openchamber", "openchamber_schedule", "openchamber_web", "openchamber_memory", "openchamber_knowledge", "openchamber_notify", "openchamber_usage", OPENCHAMBER_RENDER_TOOL, OPENCHAMBER_IMAGE_TOOL, OPENCHAMBER_SECRET_TOOL, OPENCHAMBER_WORKFLOW_TOOL])
+const OPENCHAMBER_TOOLS = new Set(["openchamber", "openchamber_schedule", "openchamber_web", "openchamber_memory", "openchamber_knowledge", "openchamber_notify", "openchamber_usage", "openchamber_actions", OPENCHAMBER_RENDER_TOOL, OPENCHAMBER_IMAGE_TOOL, OPENCHAMBER_SECRET_TOOL, OPENCHAMBER_WORKFLOW_TOOL])
 
 export const isOpenChamberTool = (toolName: ToolName): boolean => OPENCHAMBER_TOOLS.has(normalizeToolName(toolName))
 
@@ -602,15 +599,18 @@ export const isShownInPlace = (toolName: ToolName, state: ToolState): boolean =>
   || generatedImagePaths(toolName, state).length > 0
   || requestedSecret(toolName, state) !== null
   || requestedSecretRun(toolName, state) !== null
+  || requestedSecretForget(toolName, state)
 )
 
 const openChamberCallSchema = z
   .object({
     action: optionalText,
     awaitAnswer: booleanish,
-    parameters: z.object({ awaitAnswer: booleanish }).optional().catch(undefined),
+    saved: booleanish,
+    parameters: z.object({ awaitAnswer: booleanish, saved: booleanish }).optional().catch(undefined),
   })
   .catch({})
+const forgetsSavedSecrets = (call: z.infer<typeof openChamberCallSchema>) => isSecretForget(call.action) && (call.parameters?.saved ?? call.saved) === true
 
 export type OpenChamberToolCall = { tool: string; action?: string; awaitsAnswer: boolean }
 
@@ -631,7 +631,7 @@ export function openChamberToolCall(toolName: ToolName, input: JsonValue | undef
   const parsed = openChamberCallSchema.parse(input ?? {})
   const spilledWait = tool === OPENCHAMBER_RENDER_TOOL ? spilledCallFields(input).awaitAnswer : undefined
   const waits = parsed.parameters?.awaitAnswer ?? parsed.awaitAnswer ?? spilledWait
-  const awaitsAnswer = (tool === OPENCHAMBER_SECRET_TOOL && !isSecretForget(parsed.action)) || waits === true
+  const awaitsAnswer = (tool === OPENCHAMBER_SECRET_TOOL && (!isSecretForget(parsed.action) || forgetsSavedSecrets(parsed))) || waits === true
   return { tool, action: parsed.action, awaitsAnswer }
 }
 
@@ -668,7 +668,7 @@ function describeOpencodeNamespaceTool(parsed: ParsedInput): ToolDescription | n
 
 function describeOpenChamberTool(parsed: ParsedInput, input: ToolInput | undefined): ToolDescription | null {
   const label = [parsed.action, secretDetail(parsed.action, input) ?? openChamberDetail(parsed)].filter(Boolean).join(" · ")
-  return label ? { kind: "text", value: label.slice(0, MAX_COMMAND_LENGTH) } : null
+  return label ? { kind: "text", value: labelPreview(label) } : null
 }
 
 const ACTION_PREFIX_BY_TOOL = new Map<string, string>(Object.entries({
@@ -759,7 +759,7 @@ function describeExecute(calls: ExecuteToolCall[], code: string | undefined): To
     counts.set(call.tool, entry)
   }
   if (counts.size === 0) {
-    return code ? { kind: "text", value: code.split("\n")[0].slice(0, MAX_COMMAND_LENGTH) } : null
+    return code ? { kind: "text", value: commandPreview(code) } : null
   }
   const named = [...counts.values()].slice(0, MAX_DESCRIBED_TOOL_CALLS)
   return { kind: "tools", calls: named, overflow: counts.size - named.length }
@@ -775,7 +775,7 @@ export function toolDescription(
 
   switch (name) {
     case OPENCODE_TOOLS.shell:
-      return parsed.command ? { kind: "text", value: parsed.command.split("\n")[0].slice(0, MAX_COMMAND_LENGTH) } : null
+      return parsed.command ? { kind: "text", value: commandPreview(parsed.command) } : null
 
     case OPENCODE_TOOLS.execute:
       return describeExecute(executeToolCalls(metadata), parsed.code)

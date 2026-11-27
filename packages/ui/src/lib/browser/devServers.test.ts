@@ -17,6 +17,17 @@ describe('dev server candidates', () => {
     expect(merged.find((entry) => entry.port === 4323)?.url).toBe('http://localhost:4323/__analytics');
   });
 
+  test('takes the address a running project action opened for its port', () => {
+    const merged = mergeDevServerCandidates({
+      announced: [],
+      actionUrls: ['http://dev-host:4321/'],
+      discovered,
+    });
+    expect(merged.find((entry) => entry.port === 4321)?.url).toBe('http://dev-host:4321/');
+    expect(merged.find((entry) => entry.port === 4321)?.announced).toBe(false);
+    expect(merged.find((entry) => entry.port === 3000)?.url).toBe('http://localhost:3000/');
+  });
+
   test('keeps a listening server whose announcement was mangled', () => {
     // A terminal wrapping ".../localhost:3000" mid-port yields port 300, which
     // parses fine and points nowhere.
@@ -34,6 +45,14 @@ describe('dev server candidates', () => {
       discovered,
     });
     expect(merged.map((entry) => entry.port)).not.toContain(9999);
+  });
+
+  test('carries what each port serves', () => {
+    const merged = mergeDevServerCandidates({
+      announced: [],
+      discovered: [{ ...discovered[0]!, page: { title: 'Shop', icon: null } }, { ...discovered[1]!, page: null }],
+    });
+    expect(merged.map((entry) => entry.page)).toEqual([{ title: 'Shop', icon: null }, null]);
   });
 
   test('lists servers that never announced themselves', () => {
@@ -140,6 +159,23 @@ describe('placing dev servers', () => {
       server(7000, '/elsewhere', true),
     ]);
     expect(placed.map((entry) => entry.port)).toEqual([7000, 6000, 5000, 3000, 4000]);
+  });
+
+  test('sets aside a port that answered without a web page, unless it announced itself', () => {
+    const placed = placeDevServerCandidates({
+      candidates: [
+        { ...server(3000), page: { title: 'Shop', icon: null } },
+        { ...server(4000), page: null },
+        { ...server(5000, undefined, true), page: null },
+        // Not heard back yet, or a server too old to probe: kept, as before probing existed.
+        server(6000),
+      ],
+      folders,
+      directory: '/wt/app/feature',
+    });
+    expect(placed.map((entry) => [entry.port, entry.notWebPage])).toEqual([
+      [5000, false], [3000, false], [4000, true], [6000, false],
+    ]);
   });
 
   test('counts the panel folder as a work folder when no list knows it', () => {

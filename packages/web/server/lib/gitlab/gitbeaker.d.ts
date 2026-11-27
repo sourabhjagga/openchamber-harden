@@ -44,11 +44,17 @@ declare module '@gitbeaker/rest' {
       show(projectId: ProjectId, number: number): Reply;
       allCommits(projectId: ProjectId, number: number, options?: Options): Reply;
       allDiffs(projectId: ProjectId, number: number, options?: Options): Reply;
+      showReviewers(projectId: ProjectId, number: number): Reply;
       create(projectId: ProjectId, head: string, base: string, title: string, options?: Options): Reply;
       edit(projectId: ProjectId, number: number, options: Options): Reply;
       merge(projectId: ProjectId, number: number, options?: Options): Reply;
+      rebase(projectId: ProjectId, number: number): Reply;
     };
-    readonly MergeRequestApprovals: { approve(projectId: ProjectId, number: number, options?: Options): Reply };
+    readonly MergeRequestApprovals: {
+      approve(projectId: ProjectId, number: number, options?: Options): Reply;
+      unapprove(projectId: ProjectId, number: number): Reply;
+      showConfiguration(projectId: ProjectId, options: { mergerequestIId: number }): Reply;
+    };
     readonly MergeRequestDiscussions: {
       all(projectId: ProjectId, number: number, options?: Options): Reply;
       show(projectId: ProjectId, number: number, threadId: string): Reply;

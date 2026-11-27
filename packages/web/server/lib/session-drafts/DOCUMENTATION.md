@@ -7,7 +7,7 @@ sidebar on the phone too and opens there with its attachments.
 ## Storage
 
 - `session-drafts.json` in the OpenChamber data directory: `{ version: 1,
-  drafts }`, each draft with its id, directory, project id, text, confirmed
+  drafts }`, each draft with its id, directory, project id, optional target folder id, `lead: true` when it starts a lead, text, confirmed
   mentions, attachments and times. A file that does not parse as a store is a
   500, never an empty list.
 - Attachment bytes live in `session-drafts/<draft id>/<attachment id>`. An
@@ -24,6 +24,12 @@ sidebar on the phone too and opens there with its attachments.
 - Request limits account for base64's extra third of attachment size. Client
   responses expose server paths only for path attachments and omit the private
   storage location of uploaded bytes.
+- A save decodes and measures every attachment before it writes the first one.
+  Cleanup runs only after a successful save, so bytes written before a 400 or
+  413 would stay on disk with no draft that owns them.
+- The byte limit covers new and kept attachments together, in any order, and
+  applies only to a save that adds bytes: a draft an older build stored over the
+  limit still saves its text.
 
 ## Routes
 

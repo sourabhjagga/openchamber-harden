@@ -17,8 +17,13 @@ export interface DictationFinishResult {
     text: string;
 }
 
+type StreamClient = Pick<DictationClient,
+    'isConnected' | 'startDictationStream' | 'sendDictationStreamChunk' | 'finishDictationStream'
+    | 'hasPendingFinish' | 'resendPendingFinish' | 'takeCompletedFinal' | 'cancelDictationStream'
+    | 'isStreamActive' | 'runtimeGeneration'>;
+
 export class DictationStreamSender {
-    private readonly client: DictationClient;
+    private readonly client: StreamClient;
     private readonly format: string;
     private readonly createDictationId: () => string;
     private getStartOptions: () => DictationStartOptions;
@@ -29,12 +34,17 @@ export class DictationStreamSender {
     private streamReady = false;
     private flushTimer: ReturnType<typeof setTimeout> | null = null;
     private drainWaiters: Array<() => void> = [];
+    private completedText: string | null = null;
+    private reopenOnNextSegment = false;
+    private releases = 0;
+    private releasedFrom = 0;
 
     private startGeneration = 0;
     private startPromise: Promise<void> | null = null;
+    private resumePromise: Promise<void> | null = null;
 
     constructor(params: {
-        client: DictationClient;
+        client: StreamClient;
         getStartOptions: () => DictationStartOptions;
         format?: string;
         createDictationId?: () => string;
@@ -58,28 +68,54 @@ export class DictationStreamSender {
     }
 
     clearAll(): void {
-        this.clearScheduledFlush();
-        this.dictationId = null;
-        this.sendSeq = 0;
+        this.cancel();
         this.segments = [];
-        this.streamReady = false;
-        this.startPromise = null;
-        this.startGeneration += 1;
     }
 
-    resetStreamForReplay(): void {
+    cancel(): void {
+        if (this.dictationId) {
+            this.client.cancelDictationStream(this.dictationId);
+        }
         this.clearScheduledFlush();
         this.dictationId = null;
         this.sendSeq = 0;
         this.streamReady = false;
+        this.completedText = null;
         this.startPromise = null;
+        this.resumePromise = null;
+        this.reopenOnNextSegment = false;
         this.startGeneration += 1;
+        this.resolveDrainWaiters();
+    }
+
+    markReleased(): void {
+        this.streamReady = false;
+        this.reopenOnNextSegment = true;
+        this.releases += 1;
+        this.releasedFrom = this.client.runtimeGeneration;
+        this.resolveDrainWaiters();
+    }
+
+    stopWaitingForDrain(): void {
+        this.resolveDrainWaiters();
     }
 
     enqueueSegment(base64Pcm: string): void {
         this.segments.push(base64Pcm);
 
+        if (this.reopenOnNextSegment) {
+            if (!this.startPromise) {
+                void this.reopenStream().catch(() => {
+                });
+            }
+            return;
+        }
         if (!this.client.isConnected) {
+            if (this.dictationId && this.client.isStreamActive(this.dictationId)
+                && !this.startPromise && !this.resumePromise) {
+                void this.resumeStream().catch(() => {
+                });
+            }
             return;
         }
 
@@ -119,6 +155,91 @@ export class DictationStreamSender {
         return sent;
     }
 
+    get runtimeChanged(): boolean {
+        return this.reopenOnNextSegment && this.client.runtimeGeneration !== this.releasedFrom;
+    }
+
+    private async reopenStream(): Promise<void> {
+        if (this.runtimeChanged) {
+            throw new Error('Runtime changed');
+        }
+        this.cancel();
+        const restart = this.restartStream();
+        const generation = this.startGeneration;
+        try {
+            await restart;
+        } catch (error) {
+            if (this.startGeneration === generation) {
+                this.reopenOnNextSegment = true;
+            }
+            throw error;
+        }
+    }
+
+    async resumeStream(): Promise<void> {
+        if (this.reopenOnNextSegment) {
+            return;
+        }
+        const dictationId = this.dictationId;
+        if (!dictationId) {
+            if (this.segments.length > 0) {
+                await this.restartStream();
+            }
+            return;
+        }
+        if (this.resumePromise) {
+            await this.resumePromise;
+            return;
+        }
+
+        const generation = this.startGeneration;
+        const resume = (async () => {
+            this.streamReady = false;
+            const { ackSeq } = await this.client.startDictationStream(
+                dictationId,
+                this.format,
+                this.getStartOptions(),
+            );
+            if (this.startGeneration !== generation || this.dictationId !== dictationId) {
+                return;
+            }
+            const completed = this.client.takeCompletedFinal(dictationId);
+            if (completed !== null) {
+                this.completedText = completed;
+                this.streamReady = false;
+                return;
+            }
+            this.sendSeq = ackSeq + 1;
+            this.streamReady = true;
+            this.flush();
+        })().catch((error) => {
+            if (this.startGeneration !== generation || this.dictationId !== dictationId) {
+                return;
+            }
+            this.streamReady = false;
+            throw error;
+        });
+
+        this.resumePromise = resume;
+        try {
+            await resume;
+        } finally {
+            if (this.resumePromise === resume) {
+                this.resumePromise = null;
+            }
+        }
+
+        if (this.startGeneration === generation && this.dictationId === dictationId
+            && this.streamReady && this.client.hasPendingFinish(dictationId)) {
+            try {
+                await this.waitForFlushDrain();
+            } catch {
+                return;
+            }
+            this.client.resendPendingFinish(dictationId);
+        }
+    }
+
     async restartStream(): Promise<void> {
         this.startGeneration += 1;
         const generation = this.startGeneration;
@@ -140,10 +261,11 @@ export class DictationStreamSender {
             this.flush();
         })()
             .catch((error) => {
-                if (this.startGeneration === generation && this.dictationId === dictationId) {
-                    this.dictationId = null;
-                    this.streamReady = false;
+                if (this.startGeneration !== generation || this.dictationId !== dictationId) {
+                    return;
                 }
+                this.dictationId = null;
+                this.streamReady = false;
                 throw error;
             })
             .finally(() => {
@@ -157,30 +279,58 @@ export class DictationStreamSender {
     }
 
     async finish(finalSeq: number): Promise<DictationFinishResult> {
+        if (this.reopenOnNextSegment) {
+            await this.reopenStream();
+        }
+        const releases = this.releases;
+        try {
+            return await this.finishStream(finalSeq);
+        } catch (error) {
+            if (this.releases === releases || !this.reopenOnNextSegment) {
+                throw error;
+            }
+            await this.reopenStream();
+            return this.finishStream(finalSeq);
+        }
+    }
+
+    private async finishStream(finalSeq: number): Promise<DictationFinishResult> {
+        if (finalSeq >= this.segments.length) {
+            throw new Error('Dictation cancelled');
+        }
         if (!this.dictationId) {
             await this.restartStream();
+        } else if (!this.client.isConnected || this.resumePromise) {
+            await this.resumeStream().catch(() => undefined);
         }
         if (this.startPromise) {
             await this.startPromise;
         }
 
         const dictationId = this.dictationId;
-        if (!dictationId || !this.streamReady) {
+        if (!dictationId) {
+            throw new Error('Failed to start dictation stream');
+        }
+        if (this.completedText !== null) {
+            const text = this.completedText;
+            this.completedText = null;
+            return { dictationId, text };
+        }
+        if (!this.streamReady) {
             throw new Error('Failed to start dictation stream');
         }
 
         this.flush();
         await this.waitForFlushDrain();
-        const result = await this.client.finishDictationStream(dictationId, finalSeq);
-        return { dictationId, text: result.text };
-    }
-
-    cancel(): void {
-        const dictationId = this.dictationId;
-        if (this.client.isConnected && dictationId) {
-            this.client.cancelDictationStream(dictationId);
+        if (this.dictationId !== dictationId || !this.streamReady) {
+            throw new Error('Dictation stream is gone');
         }
-        this.resetStreamForReplay();
+        const result = await this.client.finishDictationStream(dictationId, finalSeq);
+        if (this.dictationId === dictationId) {
+            this.dictationId = null;
+            this.streamReady = false;
+        }
+        return { dictationId, text: result.text };
     }
 
     private hasPendingSegments(): boolean {
@@ -188,7 +338,7 @@ export class DictationStreamSender {
     }
 
     private scheduleFlush(): void {
-        if (this.flushTimer) {
+        if (this.flushTimer || !this.streamReady || !this.dictationId) {
             return;
         }
         this.flushTimer = setTimeout(() => {

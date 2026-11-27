@@ -1,4 +1,6 @@
 import React from 'react';
+import { useSelectedTurnDiff } from '@/hooks/useSelectedTurnDiff';
+import { useLastTurnDiff } from './useLastTurnDiff';
 import type { DiffViewProps, DiffScope, FileEntry } from './diffView/types';
 import { ChangeRequestReviewContext } from '@/components/review/useChangeRequestReview';
 import { ReviewFlowDialog } from '@/components/session/ReviewFlowDialog';
@@ -28,6 +30,8 @@ import { useDiffViewFind } from './diffView/useDiffViewFind';
 import { useDiffViewEditor } from './diffView/useDiffViewEditor';
 import { DiffViewToolbar } from './diffView/DiffViewToolbar';
 import { MultiFileDiffEntry } from './diffView/MultiFileDiffEntry';
+import { StackedDiffWindow, STACKED_DIFF_WINDOW_THRESHOLD } from './diffView/StackedDiffWindow';
+import { useStackedLiveRows } from '@/hooks/useStackedLiveRows';
 import { getRuntimeKey } from '@/lib/runtime-switch';
 import { cn } from '@/lib/utils';
 import { ScrollableOverlay } from '@/components/ui/ScrollableOverlay';
@@ -70,12 +74,11 @@ export const DiffView: React.FC<DiffViewProps> = ({
     const rootDirectory = targetDirectory ?? panelDirectory;
     const runtimeKey = useGitStore((state) => state.runtimeKey);
     const {
-        gitDirectory: nestedGitDirectory, rootIsGitRepo, repositoryOptions, repositoriesKnown,
+        gitDirectory: nestedGitDirectory, rootIsGitRepo, nestedRepos, repositoryOptions, repositoriesKnown,
         unreadable,
     } = useNestedGitDirectory(rootDirectory ?? null, { enabled: visible, recheckOnOpen: true });
     const effectiveDirectory = nestedGitDirectory ?? rootDirectory;
     const binding = useRepositoryBinding(effectiveDirectory, sourceControl);
-    const openContextSurface = useUIStore((state) => state.openContextSurface);
     const openContextPanelTab = useUIStore((state) => state.openContextPanelTab);
     const requestWalkthroughTarget = useWalkthroughStore((state) => state.requestTarget);
     const { screenWidth, isMobile } = useDeviceInfo();
@@ -94,6 +97,7 @@ export const DiffView: React.FC<DiffViewProps> = ({
     const [pinnedStackedTarget, setPinnedStackedTarget] = React.useState<string | null>(null);
     const [expandedFiles, setExpandedFiles] = React.useState<Set<string>>(() => new Set());
     const [mountedStackedFiles, setMountedStackedFiles] = React.useState<Set<string>>(() => new Set());
+    const [liveStackedFiles, handleStackedLiveChange] = useStackedLiveRows();
     const [scrollRequestNonce, setScrollRequestNonce] = React.useState(0);
     const [fileDiffRefreshNonce, setFileDiffRefreshNonce] = React.useState<Map<string, number>>(() => new Map());
     const [workingTreeRevision, setWorkingTreeRevision] = React.useState(0);
@@ -122,16 +126,33 @@ export const DiffView: React.FC<DiffViewProps> = ({
     const openContextFileAtLine = useUIStore((state) => state.openContextFileAtLine);
     const panelSessionId = useSessionUIStore((state) => state.currentSessionId);
     const currentSessionId = foreign ? null : panelSessionId;
+    const { turnId, turnSessionId, reset: resetSelectedTurn } = useSelectedTurnDiff({
+        visible, isTurnScope: activeDiffScope === 'turn', currentSessionId, request: pendingTurnDiffFile,
+    });
+    const { count: latestTurnFileCount } = useLastTurnDiff(currentSessionId, rootDirectory ?? undefined, {
+        enabled: visible && Boolean(turnId), live: true,
+    });
     const diffWrapLines = diffWrapLinesStore;
     const forcedStaged = activeDiffScope === 'staged' ? true : activeDiffScope === 'working' ? false : null;
     const activeDiffStaged = forcedStaged ?? displayFileStaged;
     const isMobileLayout = isMobile || screenWidth <= 768;
+    const isTreeMode = diffFileListMode === 'tree' && !isMobileLayout;
     const showReviewAction = Boolean(currentSessionId) && activeDiffScope !== 'turn' && activeDiffScope !== 'commit' && activeDiffScope !== 'pr' && !isMobileLayout && !isVSCodeRuntime();
     const showWalkthroughAction = activeDiffScope !== 'turn' && !isMobileLayout && !isVSCodeRuntime();
     const showFileSidebar = !hideStackedFileSidebar && !isMobileLayout && screenWidth >= 1024;
     const diffScrollRef = React.useRef<HTMLElement | null>(null);
+    const diffContentRef = React.useRef<HTMLDivElement | null>(null);
     const diffRootRef = React.useRef<HTMLDivElement | null>(null);
     const fileSectionRefs = React.useRef(new Map<string, HTMLDivElement | null>());
+    const stackedRowRefs = React.useRef(new Map<string, HTMLDivElement>());
+    const registerStackedRow = React.useCallback((path: string, node: HTMLDivElement | null) => {
+        if (node) stackedRowRefs.current.set(path, node);
+        else stackedRowRefs.current.delete(path);
+    }, []);
+    const getFileSection = React.useCallback(
+        (path: string) => stackedRowRefs.current.get(path) ?? fileSectionRefs.current.get(path),
+        [],
+    );
     const pendingScrollTargetRef = React.useRef<string | null>(null);
     const pendingScrollFrameRef = React.useRef<number | null>(null);
     const shouldPinAfterAlignRef = React.useRef(false);
@@ -141,6 +162,19 @@ export const DiffView: React.FC<DiffViewProps> = ({
         const scrollRoot = diffScrollRef.current;
         if (!scrollRoot) return null;
         const rootTop = scrollRoot.getBoundingClientRect().top;
+        const stack = scrollRoot.querySelector('[data-stacked-diff-rows]');
+        if (stack && stackedRowRefs.current.size) {
+            let low = 0;
+            let high = stack.children.length - 1;
+            while (low < high) {
+                const middle = Math.ceil((low + high) / 2);
+                if (stack.children[middle].getBoundingClientRect().top <= rootTop) low = middle;
+                else high = middle - 1;
+            }
+            const row = stack.children[low];
+            const path = row?.getAttribute('data-stacked-diff-path');
+            if (path) return { path, topOffset: row.getBoundingClientRect().top - rootTop };
+        }
         const sections: Array<{ path: string; top: number }> = [];
         for (const [path, node] of fileSectionRefs.current) {
             if (node) sections.push({ path, top: node.getBoundingClientRect().top });
@@ -172,10 +206,11 @@ export const DiffView: React.FC<DiffViewProps> = ({
         prChangeRequestTerm, commitComparison, selectedCommitHash, branches, setBaseOverride, clearBaseOverride,
         qualifiedBranchBase, branchBaseSource, isBranchBaseResolved, showBranchOption, setComparisonRetryRevision,
         commentOrigin, changeRequestReview, reviewProvider, comparison, commitFiles, commitFilesError, branchFiles,
-        branchFilesError, fetchComparisonDiffEntry, loadFullComparisonDiff, comparisonDiffData, branchFileCount,
-        changedFiles, changedFilePathsKey } = useDiffViewComparisons({ currentSessionId, rootDirectory, visible,
+        branchFilesError, fetchComparisonDiffEntry, loadFullComparisonDiff, comparisonDiffData, comparisonRangeKey, branchFileCount,
+        comparisonPathRevisions, changedFiles, changedFilePathsKey } = useDiffViewComparisons({ currentSessionId: turnSessionId, rootDirectory, visible,
         activeDiffScope, status, effectiveDirectory, binding, setActiveDiffScope, onDiffScopeChange, fetchBranches, git,
-        isGitRepo, diffScope, expandedFiles, t,
+        isGitRepo, diffScope, turnId, expandedFiles,
+        liveStackedFiles: isTreeMode ? undefined : liveStackedFiles, t,
     });
     const {
         registerSectionRef, handleStackedEntryExpandedChange, handleExpandOrCollapseAll, getLayoutForFile,
@@ -184,7 +219,13 @@ export const DiffView: React.FC<DiffViewProps> = ({
         visible, diffScrollRef, fileSectionRefs, expandedFiles, lastScrollAnchorRef, changedFiles,
         diffFileLayout, diffLayoutPreference, screenWidth, cancelPendingScrollAlignment,
     });
-    useDiffViewRefresh({ visible, effectiveDirectory, setActiveDirectory, ensureStatus, git, runtimeKey, pendingScrollAnchorRestoreRef, captureScrollAnchor, lastScrollAnchorRef, clearDiffCache, setFileDiffRefreshNonce, setWorkingTreeRevision, fetchStatus, diffScrollRef, fileSectionRefs, fileDiffRefreshNonce });
+    useDiffViewRefresh({ visible, effectiveDirectory, setActiveDirectory, ensureStatus, git, runtimeKey, pendingScrollAnchorRestoreRef, captureScrollAnchor, lastScrollAnchorRef, clearDiffCache, setFileDiffRefreshNonce, setWorkingTreeRevision, fetchStatus, diffScrollRef, getFileSection, fileDiffRefreshNonce });
+    const scrollRequestContextKey = `${effectiveDirectory ?? ''}\0${activeDiffScope}`;
+    const branchBaseKey = branchBaseSource === 'chosen' ? qualifiedBranchBase : branchBaseSource && 'automatic';
+    const comparisonSelection = activeDiffScope === 'pr' ? selectedPr
+        : activeDiffScope === 'commit' ? selectedCommitHash
+        : activeDiffScope === 'branch' ? branchBaseKey : null;
+    const scrollComparisonKey = status && comparisonSelection ? JSON.stringify(comparisonSelection) : null;
     useDiffViewNavigation({ visible, activeDiffScope, pendingDiffScope,
         pendingDiffFile, setActiveDiffScope, setDisplayFile, setDisplayFileStaged, pendingDiffStaged, setPendingDiffFile,
         shouldPinAfterAlignRef, pendingScrollTargetRef, expandStackedFile, setScrollRequestNonce, targetFilePath,
@@ -192,10 +233,10 @@ export const DiffView: React.FC<DiffViewProps> = ({
     useDiffViewTurnNavigation({
         visible, activeDiffScope, setActiveDiffScope, setDisplayFile, setDisplayFileStaged,
         shouldPinAfterAlignRef, pendingScrollTargetRef, expandStackedFile, setScrollRequestNonce,
-        pendingTurnDiffFile, diffScope, currentSessionId, setPendingTurnDiffFile, turnDiffSettled, rootDirectory,
+        pendingTurnDiffFile, diffScope, panelSessionId: currentSessionId, setPendingTurnDiffFile, turnDiffSettled, rootDirectory,
         lastTurnDiffs, onDiffScopeChange,
-        effectiveDirectory, repositoriesKnown, rootIsGitRepo, repositoryOptions, selectNestedRepo, fetchStatus, git,
-        changedFiles,
+        effectiveDirectory, repositoriesKnown, rootIsGitRepo, nestedRepos, repositoryOptions, selectNestedRepo, fetchStatus, git,
+        changedFiles, files,
     });
     React.useEffect(() => {
         if (!displayFile) {
@@ -209,13 +250,20 @@ export const DiffView: React.FC<DiffViewProps> = ({
     }, [changedFiles, displayFile]);
     const closeReviewDialog = React.useCallback(() => setReviewDialogOpen(false), []);
     const { submitting: reviewFlowSubmitting, start: handleStartReviewFlow } = useReviewFlowStart(currentSessionId, rootDirectory, closeReviewDialog);
-    const { scrollToFile } = useDiffViewScrollAlignment({ fileSectionRefs, diffScrollRef,
+    const { scrollToFile } = useDiffViewScrollAlignment({ getFileSection, diffScrollRef, diffContentRef,
         pendingScrollTargetRef, visible, shouldPinAfterAlignRef,
         setPinnedStackedTarget, pendingScrollFrameRef, pinSelectedFileHeaderToTopOnNavigate, scrollRequestNonce,
+        requestContextKey: scrollRequestContextKey, comparisonKey: scrollComparisonKey,
     });
-    const isTreeMode = diffFileListMode === 'tree' && !isMobileLayout;
+    const windowStackedRows = !isTreeMode && changedFiles.length >= STACKED_DIFF_WINDOW_THRESHOLD;
+    const revealStackedFindFile = React.useCallback((path: string) => {
+        if (windowStackedRows) {
+            setMountedStackedFiles((previous) => previous.has(path) ? previous : new Set(previous).add(path));
+        }
+        scrollToFile(path);
+    }, [scrollToFile, windowStackedRows]);
     const { stackedEntryCount, stackedEntriesPending } = useDiffViewStackedEntries({
-        isTreeMode, effectiveDirectory, activeDiffScope, changedFiles, scrollRequestNonce,
+        enabled: !isTreeMode, windowed: windowStackedRows, effectiveDirectory, activeDiffScope, changedFiles, scrollRequestNonce,
     });
     const {
         fileTreeLayoutRef, draggingFileTree, fileTreeWidth,
@@ -229,18 +277,27 @@ export const DiffView: React.FC<DiffViewProps> = ({
     const {
         handleFullContextChange, diffFind, findReveal, registerViewerRef, handleFindWordRequest,
         findFocusNonce } = useDiffViewFind({ effectiveDirectory, git, diffHideWhitespace, getFileStaged, activeDiffScope,
-        lastTurnDiffData, comparisonDiffData, loadFullComparisonDiff, fetchComparisonDiffEntry, getLayoutForFile,
+        lastTurnDiffData, comparisonDiffData, comparisonRangeKey, comparisonPathRevisions, loadFullComparisonDiff, fetchComparisonDiffEntry, getLayoutForFile,
         changedFiles, workingTreeRevision, fileDiffRefreshNonce, isTreeMode, displayFile, setDisplayFile,
-        setDisplayFileStaged, expandStackedFile, scrollToFile, visible, diffRootRef,
+        setDisplayFileStaged, expandStackedFile, scrollToFile: revealStackedFindFile, cancelScrollHold: cancelPendingScrollAlignment, visible, diffRootRef,
     });
     const {
         handleHeaderLayoutChange, openingEditorFilePath, handleOpenInEditor,
         handleRetryComparisonDiff } = useDiffViewEditor({ setDiffLayoutForAllFiles, rootDirectory, effectiveDirectory,
         git, activeDiffStaged, setDiff, files, openContextFileAtLine, setComparisonRetryRevision,
     });
+    const pinnedStackedFiles = React.useMemo(() => {
+        const paths = new Set<string>();
+        if (pinnedStackedTarget) paths.add(pinnedStackedTarget);
+        if (diffFind.isOpen && findReveal) {
+            const file = changedFiles.find(({ path }) => isFindRevealFor(path, findReveal.key));
+            if (file) paths.add(file.path);
+        }
+        return paths;
+    }, [changedFiles, diffFind.isOpen, findReveal, pinnedStackedTarget]);
     const renderStackedDiffView = () => {
         if (!effectiveDirectory) return null;
-        const renderEntry = (file: FileEntry, isSingleFile = false) => {
+        const renderEntry = (file: FileEntry, isSingleFile = false, handles?: Pick<React.ComponentProps<typeof MultiFileDiffEntry>, 'retentionRef' | 'headerRef'>) => {
             const isExpanded = isSingleFile || expandedFiles.has(file.path);
             return (
                 <MultiFileDiffEntry
@@ -256,11 +313,12 @@ export const DiffView: React.FC<DiffViewProps> = ({
                     isMounted={isSingleFile || mountedStackedFiles.has(file.path) || file.path === pinnedStackedTarget}
                     onSelect={handleSelectFile}
                     onExpandedChange={handleStackedEntryExpandedChange}
+                    {...handles}
                     registerSectionRef={registerSectionRef}
                     registerViewerRef={registerViewerRef}
                     onFindWordRequest={handleFindWordRequest}
                     onFullContextChange={handleFullContextChange}
-                    findReveal={findReveal && isFindRevealFor(file.path, findReveal.key) ? findReveal : null}
+                    findReveal={diffFind.isOpen && findReveal && isFindRevealFor(file.path, findReveal.key) ? findReveal : null}
                     showOpenInEditorAction={showOpenInEditorAction && activeDiffScope !== 'turn' && !foreign && !(activeDiffScope === 'pr' && selectedPr?.linked)}
                     isOpeningInEditor={openingEditorFilePath === file.path}
                     onOpenInEditor={handleOpenInEditor}
@@ -328,16 +386,28 @@ export const DiffView: React.FC<DiffViewProps> = ({
                     <ScrollableOverlay
                         ref={diffScrollRef}
                         outerClassName="min-h-0 h-full"
-                        className="[overflow-anchor:none]"
                         disableHorizontal
                         observeMutations={false}
                         preventOverscroll
-                        data-diff-virtual-root
+                        data-diff-virtual-root={windowStackedRows ? 'windowed' : ''}
                     >
-                        <div className="flex flex-col [overflow-anchor:none] pb-16" data-diff-virtual-content>
+                        <div ref={diffContentRef} className="flex flex-col pb-16" data-diff-virtual-content>
                             {isTreeMode
                                 ? treeSelectedFile && renderEntry(treeSelectedFile, true)
-                                : (stackedEntriesPending ? changedFiles.slice(0, stackedEntryCount) : changedFiles).map((file) => renderEntry(file))}
+                                : (
+                                    <StackedDiffWindow
+                                        key={JSON.stringify([runtimeKey, effectiveDirectory])}
+                                        files={stackedEntriesPending ? changedFiles.slice(0, stackedEntryCount) : changedFiles}
+                                        windowed={windowStackedRows}
+                                        scrollRef={diffScrollRef}
+                                        expandedFiles={expandedFiles}
+                                        pinnedFiles={pinnedStackedFiles}
+                                        registerPlaceholder={registerStackedRow}
+                                        onActivate={handleStackedEntryExpandedChange}
+                                        onLiveChange={handleStackedLiveChange}
+                                        renderEntry={(file, handles) => renderEntry(file, false, handles)}
+                                    />
+                                )}
                         </div>
                     </ScrollableOverlay>
                 </div>
@@ -430,7 +500,7 @@ export const DiffView: React.FC<DiffViewProps> = ({
                 <button type="button" className="typography-ui-label text-primary hover:underline" onClick={retryTurnDiff}>{t('diffView.actions.retry')}</button>
             </div>;
         }
-        if (activeDiffScope === 'turn' && (!turnDiffLoaded || pendingTurnDiffFile) && currentSessionId) {
+        if (activeDiffScope === 'turn' && (!turnDiffLoaded || pendingTurnDiffFile) && turnSessionId) {
             return <div className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground">
                 <Icon name="loader-4" className="size-4 animate-spin" />{t('diffView.state.loadingChanges')}
             </div>;
@@ -463,7 +533,7 @@ export const DiffView: React.FC<DiffViewProps> = ({
             ? { source: selectedPr, context: pullRequestContext }
             : localSource);
         if (foreign && panelDirectory) openContextPanelTab(panelDirectory, { mode: 'walkthrough', targetDirectory: rootDirectory });
-        else openContextSurface(rootDirectory ?? directory, 'walkthrough');
+        else openContextPanelTab(rootDirectory ?? directory, { mode: 'walkthrough', targetDirectory: null });
     };
     return (
         <ChangeRequestReviewContext.Provider value={changeRequestReview}>
@@ -497,9 +567,10 @@ export const DiffView: React.FC<DiffViewProps> = ({
                         activeDiffScope !== 'all' ? (
                             <ChangeScopeSelector
                                 scope={activeDiffScope}
+                                historicalTurn={turnId ? { count: turnFileCount } : null}
                                 workingCount={workingFileCount}
                                 stagedCount={stagedFileCount}
-                                turnCount={turnFileCount}
+                                turnCount={turnId ? latestTurnFileCount : turnFileCount}
                                 branchCount={branchFileCount}
                                 commitCount={activeDiffScope === 'commit' ? commitFiles?.length ?? null : null}
                                 prCount={activeDiffScope === 'pr' ? comparison.files?.length ?? null : null}
@@ -507,6 +578,8 @@ export const DiffView: React.FC<DiffViewProps> = ({
                                 showBranchOption={showBranchOption}
                                 changeRequestTerm={prChangeRequestTerm}
                                 onScopeChange={(scope) => {
+                                    resetSelectedTurn();
+                                    setPendingTurnDiffFile(null);
                                     setActiveDiffScope(scope);
                                     onDiffScopeChange?.(scope);
                                 }}

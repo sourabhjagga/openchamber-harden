@@ -19,7 +19,7 @@ import type {
     SourceControlReadContext,
 } from '@/lib/api/types';
 import { getRuntimeKey } from '@/lib/runtime-switch';
-import { defaultSourceControlIdentities, resolveSourceControlIdentity } from '@/lib/source-control/identity';
+import { defaultSourceControlIdentities, gitRemoteOf, resolveSourceControlIdentity } from '@/lib/source-control/identity';
 import { unknownProviderDescriptor, type SourceControlProviderDescriptor } from '@/lib/source-control/providers/descriptor';
 import { useSourceControlProvider, useSourceControlProviderRegistry, useSourceControlProviders } from '@/lib/source-control/providers/registry';
 import { useRepositoryUrlMatcher } from '@/lib/source-control/repositoryUrlMatcher';
@@ -56,9 +56,9 @@ import { createListCache, createValueCache, useCachedList, useCachedValue, useRe
 import type { TrackerReferenceFilter } from './referencePickerItems';
 import { joinProjectPath } from '@/lib/source-control/projectPath';
 
-const repositoryLists = createListCache<RepositoryReference>();
-const repositoryAcrossLists = createListCache<AcrossReference>();
-const trackerLists = createListCache<TrackerItemSummary>();
+const repositoryLists = createListCache<RepositoryReference>((reference) => reference.url);
+const repositoryAcrossLists = createListCache<AcrossReference>((reference) => `${reference.directory}\n${reference.url}`);
+const trackerLists = createListCache<TrackerItemSummary>((item) => item.id);
 const trackerDetails = createValueCache<TrackerItem>();
 const repositoryDetails = createValueCache<RepositoryReferenceDetail>();
 
@@ -89,10 +89,7 @@ function repositoryHostsOf(
     for (const provider of read.binding?.providers ?? []) add({ provider: provider.provider, instance: provider.instance });
     const identities = [...knownIdentities, ...defaultIdentities];
     for (const remote of read.repository.remotes) {
-        const identity = resolveSourceControlIdentity(
-            { name: remote.name, fetchUrl: remote.fetch.displayUrl, pushUrl: remote.push.displayUrl },
-            identities,
-        );
+        const identity = resolveSourceControlIdentity(gitRemoteOf(remote), identities);
         if (identity) add(identity);
     }
     return [...found.values()];
@@ -124,7 +121,7 @@ function pickReadContext(
 
 const NO_DIRECTORIES: readonly string[] = [];
 
-function useRepositoryReadContexts(directories: readonly string[]): AcrossContexts {
+function useFolderReadStates(directories: readonly string[]): Array<{ directory: string; state: ReadContextState }> {
     const { sourceControl } = useRuntimeAPIs();
     const bindings = useRepositoryBindings(directories, sourceControl);
     const knownIdentities = useSourceControlAuthStore((state) => state.identities);
@@ -132,16 +129,32 @@ function useRepositoryReadContexts(directories: readonly string[]): AcrossContex
     const descriptors = useSourceControlProviders();
     const providersPending = useProvidersPending();
     return React.useMemo(() => {
-        if (directories.length === 0) return NO_ACROSS_CONTEXTS;
         const defaultIdentities = defaultSourceControlIdentities(descriptors);
-        return partitionAcrossContexts(directories.map((directory, index) => {
+        return directories.map((directory, index) => {
             const binding = bindings[index];
             if (!binding || providersPending) return { directory, state: null };
             const hostPending = repositoryHostsOf(binding.read, knownIdentities, defaultIdentities)
                 .some((host) => !authEntries[getSourceControlAuthKey(host)]?.hasChecked);
             return { directory, state: pickReadContext(binding, hostPending, descriptors) };
-        }), descriptors);
+        });
     }, [authEntries, bindings, descriptors, directories, knownIdentities, providersPending]);
+}
+
+function useRepositoryReadContexts(directories: readonly string[]): AcrossContexts {
+    const states = useFolderReadStates(directories);
+    const descriptors = useSourceControlProviders();
+    return React.useMemo(
+        () => (states.length === 0 ? NO_ACROSS_CONTEXTS : partitionAcrossContexts(states, descriptors)),
+        [descriptors, states],
+    );
+}
+
+export function useRepositoryFolderReadContexts(directories: readonly string[]): AcrossContexts['asked'] {
+    const states = useFolderReadStates(directories);
+    return React.useMemo(
+        () => states.flatMap(({ directory, state }) => (state && state !== 'missing' ? [{ directory, context: state }] : [])),
+        [states],
+    );
 }
 
 export function useRepositoryHost(directory: string | null): SourceControlIdentity | null {
@@ -358,7 +371,13 @@ export function useTrackerReferenceList(options: {
     return { ...list, items: live.items, followed: live.followed };
 }
 
-export function useRepositoryReferenceDetail(directory: string | null, reference: RepositoryReference | null, settled: boolean, revision: string | null = null) {
+export function useRepositoryReferenceDetail(
+    directory: string | null,
+    reference: RepositoryReference | null,
+    settled: boolean,
+    revision: string | null = null,
+    crossReferences = false,
+) {
     const { sourceControl } = useRuntimeAPIs();
     const context = useRepositoryReadContext(reference ? directory : null);
     const readable = useReferenceReadContext(context, reference?.linked === true);
@@ -369,23 +388,29 @@ export function useRepositoryReferenceDetail(directory: string | null, reference
     const number = reference?.number ?? 0;
     const kind = reference?.kind ?? 'issue';
     const key = directory && reference && readable
-        ? JSON.stringify([getRuntimeKey(), readContextCacheKey(readable), directory, kind, owner, repo, number])
+        ? JSON.stringify([getRuntimeKey(), readContextCacheKey(readable), directory, kind, owner, repo, number, crossReferences])
         : null;
     const fetch = React.useCallback(async (): Promise<RepositoryReferenceDetail> => {
         if (!readable || !reference) throw new Error('The repository is not available here');
-        if (!detailed) return fetchListBackedReferenceDetail(sourceControl, readable, reference);
-        const result = await sourceControl.referenceDetail(readable, kind === 'discussion' ? { owner, repo, number, kind } : { owner, repo, number });
+        if (!detailed) return fetchListBackedReferenceDetail(sourceControl, readable, reference, { crossReferences });
+        const result = await sourceControl.referenceDetail(
+            readable,
+            kind === 'discussion' ? { owner, repo, number, kind } : { owner, repo, number },
+            { includeReferences: crossReferences && kind !== 'discussion' },
+        );
         if (!result.connected) throw new Error(`${readable.provider} is not connected`);
         if (!result.detail) throw new Error('Not found');
-        return result.detail;
-    }, [detailed, kind, number, owner, readable, reference, repo, sourceControl]);
+        if (crossReferences || !result.detail.references) return result.detail;
+        const { references: _unasked, ...detail } = result.detail;
+        return detail;
+    }, [crossReferences, detailed, kind, number, owner, readable, reference, repo, sourceControl]);
     const latest = useCachedValue(repositoryDetails, key, fetch, settled);
     const pickedRevision = features.revisions && kind === 'pull' && !detailed ? revision : null;
     const revisionKey = key && pickedRevision ? JSON.stringify([key, pickedRevision]) : null;
     const fetchRevision = React.useCallback(async (): Promise<RepositoryReferenceDetail> => {
         if (!readable || !reference || !pickedRevision) throw new Error('The repository is not available here');
-        return fetchListBackedReferenceDetail(sourceControl, readable, reference, pickedRevision);
-    }, [pickedRevision, readable, reference, sourceControl]);
+        return fetchListBackedReferenceDetail(sourceControl, readable, reference, { revision: pickedRevision, crossReferences });
+    }, [crossReferences, pickedRevision, readable, reference, sourceControl]);
     const revisionDetail = useCachedValue(repositoryDetails, revisionKey, fetchRevision, settled);
     const refresh = React.useCallback(
         () => (key ? Promise.all([
@@ -503,7 +528,7 @@ export function readTrackerItemDetail(trackers: TrackerAPI, provider: string, it
     return trackerDetails.ensure(trackerDetailKey(provider, account, itemId), () => fetchTrackerItem(trackers, provider, itemId));
 }
 
-export function useTrackerItemDetail(item: { provider: string; id: string } | null, settled: boolean) {
+export function useTrackerItemDetail(item: { provider: string; id: string; identifier: string } | null, settled: boolean) {
     const { trackers } = useRuntimeAPIs();
     const provider = item?.provider ?? null;
     const itemId = item?.id ?? null;
@@ -532,5 +557,10 @@ export function useTrackerItemDetail(item: { provider: string; id: string } | nu
         () => (key ? trackerDetails.ensure(key, fetch, { force: true }).then(() => undefined, () => undefined) : Promise.resolve()),
         [fetch, key],
     );
-    return { detail, refresh, followed: live.followed };
+    const identifier = cached.status === 'ready' ? cached.value.identifier : item?.identifier ?? null;
+    const refreshFromHost = React.useCallback(async () => {
+        if (trackers && provider && identifier) await trackers.refreshItemReads(provider, identifier).catch(() => undefined);
+        await refresh();
+    }, [identifier, provider, refresh, trackers]);
+    return { detail, refresh, refreshFromHost, followed: live.followed };
 }

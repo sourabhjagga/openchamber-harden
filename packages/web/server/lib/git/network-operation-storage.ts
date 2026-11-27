@@ -55,7 +55,7 @@ const ERROR_CODES = new Set([
   'INVALID_REQUEST', 'NOT_FOUND', 'STALE_REPOSITORY', 'STALE_BINDING', 'STALE_CONFIG',
   'REMOTE_CHANGED', 'AUTHENTICATION_REQUIRED', 'AUTHENTICATION_FAILED', 'TRANSPORT_FAILED',
   'CONFLICT', 'CANCELLED', 'TIMEOUT', 'OUTCOME_UNKNOWN', 'RUNTIME_UNSUPPORTED', 'UNKNOWN',
-  'GIT_LFS_CLIENT_MISSING', 'CHECKOUT_TOO_LARGE',
+  'GIT_LFS_CLIENT_MISSING', 'CHECKOUT_TOO_LARGE', 'SUBMODULE_SOURCE_LOCAL', 'LFS_SOURCE_LOCAL',
 ]);
 const FAILURE_ERROR_CODES = new Set([
   'INVALID_REQUEST', 'AUTHENTICATION_REQUIRED', 'AUTHENTICATION_FAILED', 'TRANSPORT_FAILED',
@@ -169,7 +169,7 @@ const isSafeDisplayEndpoint = (value: unknown): value is string => {
     return (['https:', 'ssh:'].includes(endpoint.protocol) || (endpoint.protocol === 'http:' && isLoopbackHost(endpoint.hostname)))
       && !endpoint.username && !endpoint.password && !endpoint.search && !endpoint.hash
       && Boolean(endpoint.hostname && endpoint.pathname && endpoint.pathname !== '/')
-      && !/[\0-\x20\x7f\\]/.test(pathname)
+      && /^[\x20-\x5b\x5d-\x7e\u0080-\uffff]*$/.test(pathname)
       && pathname.split('/').slice(1).every((part) => part && part !== '.' && part !== '..');
   } catch {
     return false;

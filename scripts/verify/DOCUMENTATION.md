@@ -8,6 +8,7 @@ Sections: *Ownership*, *Running it*, *The feature map*, *Steps*, *Invariants*, *
 
 - `zones/*.json` is the feature map: per zone, its source files, its features (each with its own source files where they are narrower than the zone's) (what, how to reach, what proves it) and their scenarios as steps.
 - `vocabulary.json` names every part of the UI a step points at (`composer.send`, `sidebar.row`, `diff.added`) with its selector and one line saying what it is. It is the shared name for each thing, and the one place a selector changes when the markup does.
+- `server-routes.mjs` and `requests.mjs` select and record by server route (see *Running only what a change touches*).
 - `stand.mjs` starts and resets the isolated instance, `browser.mjs` drives Chrome, `steps.mjs` runs steps, `changed.mjs` picks the scenarios a change touches, `run.mjs` is the command.
 - `processes.mjs` owns process identities and recovery records under this checkout's `tmp/verify/owners`. `process-guardian.mjs` waits for the runner's pipe to close and reaps that run if its owner died without cleanup.
 
@@ -21,6 +22,8 @@ bun run verify -- --changed --base A..B --list   # what the commits between A an
 bun run verify                                   # every scenario
 bun run verify -- composer files.edit            # a zone, a feature, or one scenario id
 bun run verify -- --list composer                # the feature map, no run
+bun run verify -- --retry-failed                 # play a failed scenario once more; a pass then is reported as flaky
+bun run verify -- --shard 2/4                     # the second of four equal parts, for several machines
 bun run verify -- diff --keep                    # keep the stand up after the run
 bun run verify -- diff --attach tmp/verify/<run>/stand.json   # reuse a kept stand
 ```
@@ -59,11 +62,19 @@ start "" /b /wait /high bun run verify -- composer > C:\Users\openc\verify-compo
 | Anything else under `scripts/verify/`, or a file the runner loads from `scripts/` (the fixtures, the isolated server) | Every scenario |
 | A file a feature's `sources` list, or under a listed directory | That feature |
 | A file the sources of some features import, through their components and hooks, or a store or library (`packages/ui/src/{stores,sync,lib}`) that code imports | Those features; every scenario when more than half the features import it |
+| A server file (`packages/web/server/`) loaded by files that register routes or handle WebSocket upgrades | The features whose scenarios made requests to those routes, by `requests.json`, with the features that list or import the file |
+| A server file that loads most of those files (the server's wiring), one that serves only requests most features make or a socket most of them hold open, or a deleted one | Every scenario |
 | App code nothing above reaches | Nothing; listed as covered by no scenario |
 
 The output names the feature each file led to, and lists the changed app files no scenario covers: for those the net has nothing to say, and a green run proves nothing about them. A change that selects nothing exits without starting a stand. `--list` with `--changed` prints the selection and the map without running.
 
 The selection code is `changed.mjs`, tested without a stand in `changed.test.mjs`.
+
+`requests.json` holds, for each feature, the requests its scenarios made to the server, as `METHOD route`, and under `*` the requests more than half the features make (what every page reads when it loads). Every run writes the requests a scenario's page made into its `result.json`, and `node scripts/verify/requests.mjs <artifact folders>` turns the results of a full run (all its parts) into the file. A feature is recorded anew only when all its scenarios passed in those results; otherwise it keeps what it had and adds what was seen. A new route or a moved handler is picked up by the next recording; until then a server file serving only that route is printed as uncovered.
+
+### Where it runs by itself
+
+Pull requests play `--changed` against their base in four parts (`behavior-net` in `.github/workflows/oc-review.yml`), with `--retry-failed`. The check is not required. `.github/workflows/behavior-net.yml` plays the whole net every night on the default branch in six parts, and from those results rewrites `requests.json`; when the file differs it opens a pull request from `ci/net-requests`.
 
 ## The feature map
 
@@ -109,6 +120,7 @@ Every step waits up to 20 s (`"timeout"` in seconds changes it) and fails with w
 | Step | Does |
 |---|---|
 | `session.create` `as`, `title` | Creates a session in the project; `as` names the variable holding its id |
+| `session.seedMetadata` `session`, `patch` | Writes synthetic metadata through the stand's session API. `session` must name a session created in this scenario. Use for preconditions such as a lead's already-written digest. |
 | `session.send` `session`, `prompt`, `model`, `wait`, `goal` | Sends a prompt as another client would; waits for the answer unless `wait` is false; `goal` sends it as a goal the agent keeps working toward |
 | `session.idle`, `session.busy` `session` | Waits for the session's status |
 | `fixture.request` `session`, `prompt` | Waits until the fixture has an active model request for this session whose latest user message contains `prompt` |
@@ -129,6 +141,7 @@ Every step waits up to 20 s (`"timeout"` in seconds changes it) and fails with w
 | `see` `on`, `count`, `disabled`, `inView` | Waits until the element shows (exactly `count` of them; `count: 0` asserts none; `inView` on screen: some innermost element holding `text` intersects the viewport) |
 | `gone` `on` | Waits until no such element shows |
 | `steady` `on`, `count`, `ms` | Fails if the count changes during `ms` |
+| `above` `on`, `to` | Waits until the element's top is above that of `to` (an object with its own `on`, `text`, `index`): the order of sidebar sections and rows. Compares rendered elements by layout position, on screen or scrolled off |
 | `editor` `equals`, `contains`, `empty`, `caret` | Waits for the composer's text; `caret: "start"` or `"end"` also waits for the focused, collapsed cursor at that edge |
 | `terminal.expect` `on`, `contains` or `equals` | Selects the visible canvas grid with a real drag and copies it with Cmd/Ctrl+C until its text matches; replaces the clipboard |
 | `terminal.select` `on` | Selects the visible terminal grid with a real drag. Use before menu Copy because a previous keyboard Copy may clear the selection on the host. |
@@ -157,7 +170,7 @@ Every step waits up to 20 s (`"timeout"` in seconds changes it) and fails with w
 - Nothing touches the user's data: the stand runs from a fresh folder under `/private/tmp` on macOS or the OS temp directory elsewhere with its own `HOME`, `XDG_*` and `OPENCHAMBER_DATA_DIR`, and its processes get only `PATH`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`, `LANG` and `TERM` from the shell. Windows also keeps `SystemRoot`, `ComSpec`, `PATHEXT`, `TEMP` and `TMP`, and redirects `USERPROFILE`, `APPDATA` and `LOCALAPPDATA` into the stand. No provider key, token or app variable reaches it or `stand.json`. It refuses to start, and `--attach` refuses to run, when the server lists sessions of the checkout itself. Ports are free ones picked per run.
 - A `settings` step refuses a key that is not a profile setting (`scope: "profile"` in `settings-registry.json`), since the reset drops only those.
 - The reset deletes only sessions under the stand's folder; a server holding any other session is not this stand, and the reset refuses before deleting anything.
-- Every scenario starts from the same state: all sessions deleted, linked worktrees removed, unfinished rebases and merges cleared, the project's starting branch and commit restored with a clean index and tree, scenario branches and stashes removed, the repository configuration restored, the server's settings put back as they were when the stand started and the user's profile settings (Settings > Chat and the like) dropped back to the stand's, the sidebar's folders removed, a fresh browser context. A scenario's result does not depend on which ran before it, so one that changes a setting needs no step to change it back. Worktree cleanup refuses any linked directory outside the stand before removing anything. A failed Git reset rebuilds the fixture and records the reason as a failed scenario; later scenarios still run. Other reset failures also become scenario results.
+- Every scenario starts from the same state: all sessions deleted, linked worktrees removed, unfinished rebases and merges cleared, the project's starting branch and commit restored with a clean index and tree, saved drafts removed, scenario branches and stashes removed, the repository configuration restored, the server's settings put back as they were when the stand started and the user's profile settings (Settings > Chat and the like) dropped back to the stand's, the sidebar's folders removed, a fresh browser context. A scenario's result does not depend on which ran before it, so one that changes a setting needs no step to change it back. Worktree cleanup refuses any linked directory outside the stand before removing anything. A failed Git reset rebuilds the fixture and records the reason as a failed scenario; later scenarios still run. Other reset failures also become scenario results.
 - The model is the fixture provider, so answers are the same every run. `offline/no-answer` is a provider whose server refuses connections. No scenario calls a real model.
 - Tools run without asking, except a read of a `*.secret` file and a web fetch: those ask, so a scenario can raise a permission request by having the agent read such a file, or hold a session on the user with a scripted fetch.
 - A stopped run leaves nothing: the API, Vite, OpenCode, PTY daemons, fixture, Chrome and its helpers are tracked through OS process identities and the stand's isolated directories. Cleanup continues after a wrapper or group leader exits, escalates remaining processes, and removes the stand folder, Chrome profile and port-specific Vite cache only after the tree is gone. Failure in browser cleanup still runs stand cleanup. Startup errors and both runner signals take the same path.
@@ -166,6 +179,27 @@ Every step waits up to 20 s (`"timeout"` in seconds changes it) and fails with w
 - Steps act as a user does: real pointer and keys at element centres, the URL, files on disk, other clients through the CLI. Stores are not set from the page.
 
 ## Decisions
+
+### Why the stand has no network and not only fixture models
+
+OpenCode always offers its own hosted provider, and a scenario once sent its
+text to Big Pickle while the catalog reloaded. Choosing a fixture model in each
+scenario cannot prevent that, so nothing a stand starts can leave the machine.
+`network-guard.cjs` is preloaded into every Node and Bun process, refuses each
+outside connection and records a request to a model; the stand does not start
+until the OpenCode server has loaded it. Dead proxies cover native clients that
+honor them. On macOS `sandbox-exec` also refuses every way out for the server,
+Vite, the CLI and Chrome, which runs without its own sandbox there because
+macOS does not nest them. On Linux, CI included, `namespace.mjs` plays the whole
+run in a network namespace that holds only loopback, entered without root or
+through passwordless sudo; a run that can get neither does not start, and
+`--attach` does not work there. Windows has no such kernel rule: a native
+program that ignores proxies could still connect there, OpenCode cannot.
+
+A model request fails the scenario with its host and model, is never retried
+into a pass, and is still charged after the last scenario, once the server is
+down. `ripgrep.mjs` installs the ripgrep OpenCode would otherwise download;
+the runner fetches it once, checksum verified, into `tmp/verify-tools`.
 
 ### Why shell fixtures run JavaScript files
 
@@ -243,6 +277,8 @@ Sessions created and prompts sent through `openchamber session` reach the app th
 
 Every check polls until it holds or times out, and clicks and hovers wait until the target stops moving, stays the same node (a list or diff that re-renders its rows after opening replaces them in place), and is the topmost element at its centre. A fixed sleep either flakes on a slow machine or wastes time on a fast one; the few `pause` steps left are the behavior under test (a debounced draft save, the 1.2 s Git status cache).
 
+The phone switcher scenario sets the UI font size to 80 percent so the first title's centre falls inside the digest overlap. At the default size its centre is just below the covered part of the title.
+
 ### Why session-load retry fails only the message request
 
 The retry scenario blocks its target's message URL before the page opens, since desktop prefetch can otherwise load that session before the server stops. The session list and event transport stay available. Clearing the block and pressing Try again proves the recovery action; server restarts remain in the sync scenarios that prove reconnection.
@@ -257,13 +293,19 @@ A row drag (move a file, attach it to the chat) and a drop from the desktop are 
 
 ### Why the reset restores settings
 
-Some choices made in the app live on the server, not in the browser: Don't ask again on a file move turned off the confirmation for every later scenario, which then failed where it expected the dialog. The stand copies the server's settings files once it is up and the reset copies them back, so a scenario's choice ends with it.
+Some choices made in the app live on the server, not in the browser: Don't ask again on a file move turned off the confirmation for every later scenario, which then failed where it expected the dialog. The stand copies the server's `settings.json` once it is up and the reset puts it back, with the profile cut down to the stand's model in both files, so a scenario's choice ends with it.
+
+The server watches both files and treats the reset's write as an outside edit. Deleting `preferences.json` or copying a file over in place, as the reset once did, makes the server keep its last valid profile and drop every profile save until a valid file is back, and saves are refused until its watcher takes an edit in. So the reset replaces each file whole by a rename, never deletes the profile file, and waits until a save of the profile it wrote goes through before the scenario starts.
 
 ### Why the reset removes worktrees and their branches
 
 Deleting sessions leaves their worktrees behind. A repeat then creates a suffixed branch, while a selector for the original branch opens an empty old worktree's menu. Removing the stand's linked worktrees and non-main branches gives every scenario the same topology and names.
 
 The reset cleans the index and tree and checks out the starting branch before deleting scenario branches. A failed scenario can leave its branch checked out, so deleting branches first would stop the run. The starting commit and repository configuration come from stand creation, since resetting to `HEAD` preserves scenario commits and configuration edits.
+
+### Why the reset keeps the project's `.opencode` folder
+
+OpenCode watches a project's `.opencode` folder for agents, commands and skills. When the folder is removed and made again within moments, OpenCode 2.3.2 keeps its old list and stops noticing later changes: 24 of 25 such rounds on a stand never showed the new command, and none of 30 did when only the folder's contents were removed. A reset that cleaned the folder away, followed by a scenario writing a command into it, made `commands.edit.write-failure` fail about once in a full run, always after another scenario that had used the folder. The fixture project has the folder from the start, and the reset empties it without removing it. A reset that fails and rebuilds the whole fixture still replaces the folder, so scenarios after such a failure can miss what they write there until the stand restarts.
 
 ### Why a failed reset rebuilds the fixture
 
@@ -319,6 +361,20 @@ Session state and the config store are imported by the code of 50 to 63 features
 
 Writing scenarios edits a zone file and the vocabulary in nearly every commit. Running every scenario for that would make `--changed` a full run for all scenario work. A zone file selects its features whose scenarios differ from the base, the vocabulary the features whose steps use a changed name; the runner, the steps and the fixtures can break any scenario and select all of them.
 
+### Why server files are selected by recorded requests
+
+The UI reaches the server over HTTP, so the import walk never arrives at server code: with eight server files listed by hand, 690 of 769 server files selected nothing, the Git routes and the server's wiring among them, and the run was green without playing a scenario. A hand-kept list of server folders per zone would go stale with every new route. The page already shows which requests a scenario makes, and the server's code shows which file answers each path and what that file loads, so the link is recorded and derived: a path belongs to the most specific `/api` pattern a serving file names (or a constants file it imports), and a changed server file selects through every serving file that loads it. Type-only imports count here, since a route file is handed the modules it calls and names them by type. With the recording 145 files select nothing.
+
+The method is part of a recorded request because reading the settings is something every page does and writing them is what a few scenarios check; by path alone the settings routes selected either everything or nothing that saves a setting.
+
+A `settings` step saves through the runner, outside the page, so it records its own request (`PUT@step`): the page saves settings on every load, and without the mark the few features that check a saved setting would be lost among all of them.
+
+What this does not see: requests a scenario makes through the CLI (they reach the same session routes the page uses), requests the server passes on to OpenCode, and a module handed to a route file as a plain callback with no type import, such as the settings store given to the settings routes. A file like that is selected through whatever else loads it, and a feature that depends on it lists it in its `sources`. A route renamed or removed inside a file that stays selects by the file's remaining routes only; a deleted file selects everything. A file is given every path it names, also one it only lists (the realtime proxy's allowed targets), which can select more than it serves and never less.
+
+### Why the checks in CI retry a failed scenario and a local run does not
+
+Five full runs on CI runners gave two rare failures, a different scenario each time, none of which failed when played again. A pull request check that is red once in a few runs for reasons outside the change teaches people to ignore it. So CI plays a failed scenario once more and names it as flaky when it then passes; the run's log and `summary.json` list them, which is where a scenario that needs a better wait shows up. A local run stays strict: the person at the keyboard can look at the failure, and a flaky scenario found there is fixed, not retried.
+
 ### Why uncovered files are printed and not ignored
 
 A change whose files no feature reaches selects nothing and exits green. Without naming those files, that green reads as "checked"; the list says where the net has no scenario, so the change gets a scenario or a check of another kind.
@@ -341,9 +397,9 @@ Settings has its own URL, so a reload can restore the open Settings page. The MC
 
 Saving a timeout reloads the server definition and can close Advanced after the file has changed. The scenario reloads the page and reopens the server before changing Code mode, so callbacks from the earlier save cannot remove the next selector. The summary and field both have to show the saved timeout.
 
-### Why workflows wait for the saved switches
+### Why workflows wait for the saved settings
 
-The Workflow tool and approval switches change visually before their settings request finishes. A prompt from another client can reach the server while the tool is still disabled there. The scenarios read back the saved flags before sending that prompt. `settings expect` is read-only; `settings values` still refuses global fields.
+The Workflow tool switch and the approval choice change visually before their settings request finishes. A prompt from another client can reach the server while the tool is still disabled there. The scenarios read back the saved flags before sending that prompt. `settings expect` is read-only; `settings values` still refuses global fields.
 
 ### Why clipboard refusal changes the browser permission
 

@@ -1,4 +1,5 @@
 import React from 'react';
+import { useShallow } from 'zustand/react/shallow';
 
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -16,7 +17,8 @@ import {
 import { useProjectsStore } from '@/stores/useProjectsStore';
 import { useSessionUIStore } from '@/sync/session-ui-store';
 import { clearAnnouncedDevServers, useAnnouncedDevServers } from '@/lib/browser/announcedServers';
-import { browserUrlLabel } from '@/lib/browser/url';
+import { browserUrlLabel, isLoopbackUrl } from '@/lib/browser/url';
+import { runningProjectActionPreviewUrls, useTerminalStore } from '@/stores/useTerminalStore';
 import { isRemoteWebLoopbackUrl, isSpaceUnreachableFromHere } from '@/lib/browser/devTunnel';
 import { isCapacitorApp } from '@/lib/platform';
 import { isMobileSurfaceRuntime } from '@/lib/runtimeSurface';
@@ -48,6 +50,7 @@ export const BrowserEmptyState: React.FC<{
   const { t } = useI18n();
   const [discovery, setDiscovery] = React.useState<DevServerDiscovery>({ kind: 'loading' });
   const announced = useAnnouncedDevServers(directory);
+  const actionUrls = useTerminalStore(useShallow((state) => runningProjectActionPreviewUrls(state.sessions, directory)));
   const [remoteOnly] = React.useState(() => isUnreachableFromHere(directory));
   const [spaceUnreachable] = React.useState(() => isSpaceUnreachableFromHere(directory));
   const insideSpace = isSpaceDirectory(directory);
@@ -92,20 +95,22 @@ export const BrowserEmptyState: React.FC<{
   const candidates = React.useMemo(() => placeDevServerCandidates({
     candidates: mergeDevServerCandidates({
       announced,
+      actionUrls,
       discovered: discovery.kind === 'ready' ? discovery.servers : null,
     }),
     folders,
     directory,
-  }), [announced, directory, discovery, folders]);
+  }), [actionUrls, announced, directory, discovery, folders]);
   const hiddenPorts = useHiddenDevServerPorts();
   const [showOutsideWork, setShowOutsideWork] = React.useState(false);
   const visibleCandidates = React.useMemo(
     () => candidates.filter((candidate) => candidate.announced || (
-      !hiddenPorts.includes(candidate.port) && (showOutsideWork || !candidate.outsideWork)
+      !hiddenPorts.includes(candidate.port) && (showOutsideWork || (!candidate.outsideWork && !candidate.notWebPage))
     )),
     [candidates, hiddenPorts, showOutsideWork],
   );
   const hiddenCount = candidates.length - visibleCandidates.length;
+  const unreachableHere = (url: string): boolean => remoteOnly && isLoopbackUrl(url);
 
   return (
     <div className="absolute inset-0 flex flex-col items-center justify-center gap-5 overflow-hidden bg-background p-6 text-center">
@@ -116,13 +121,13 @@ export const BrowserEmptyState: React.FC<{
       </div>
 
       {candidates.length > 0 ? (
-        <div className="flex min-h-0 w-full max-w-sm flex-col gap-1">
+        <div className="flex min-h-0 w-full max-w-lg flex-col gap-1">
           <span className="shrink-0 typography-micro text-start text-muted-foreground">
             {announced.length > 0
               ? t('contextPanel.browser.devServers.justStarted')
               : t('contextPanel.browser.devServers.title')}
           </span>
-          {remoteOnly && !spaceUnreachable ? (
+          {!spaceUnreachable && visibleCandidates.some((candidate) => unreachableHere(candidate.url)) ? (
             <span className="shrink-0 pb-1 text-start typography-micro text-muted-foreground">
               {t('contextPanel.browser.devServers.remoteOnly')}
             </span>
@@ -134,10 +139,11 @@ export const BrowserEmptyState: React.FC<{
                   type="button"
                   variant="outline"
                   size={isMobileSurfaceRuntime() ? 'default' : 'sm'}
-                  className={cn('min-w-0 flex-1 justify-start gap-2', isMobileSurfaceRuntime() && 'min-h-11', remoteOnly && 'cursor-default opacity-60')}
-                  aria-disabled={remoteOnly || undefined}
+                  className={cn('min-w-0 flex-1 justify-start gap-2', isMobileSurfaceRuntime() && 'min-h-11', unreachableHere(candidate.url) && 'cursor-default opacity-60')}
+                  aria-disabled={unreachableHere(candidate.url) || undefined}
+                  title={candidate.page?.title ? [candidate.page.title, candidate.command].filter(Boolean).join(' · ') : undefined}
                   onClick={() => {
-                    if (remoteOnly) return;
+                    if (unreachableHere(candidate.url)) return;
                     clearAnnouncedDevServers(directory);
                     onOpen(candidate.url);
                   }}
@@ -151,14 +157,25 @@ export const BrowserEmptyState: React.FC<{
                     >
                       <Icon name="instance" className="size-3.5" aria-hidden="true" />
                     </span>
+                  ) : candidate.page?.icon ? (
+                    <img src={candidate.page.icon} alt="" className="size-3.5 shrink-0 object-contain" />
                   ) : (
                     <Icon name="global" className="size-3.5 shrink-0" aria-hidden="true" />
                   )}
-                  <span className="truncate">
-                    {browserUrlLabel(candidate.url) || candidate.url}
-                    <span className="typography-micro text-muted-foreground">{pathLabel(candidate.url)}</span>
-                  </span>
-                  {candidate.command ? (
+                  {candidate.page?.title ? (
+                    <>
+                      <span className="min-w-0 truncate" dir="auto">{candidate.page.title}</span>
+                      <span className="shrink-0 typography-micro text-muted-foreground" dir="ltr">
+                        {browserUrlLabel(candidate.url) || candidate.url}{pathLabel(candidate.url)}
+                      </span>
+                    </>
+                  ) : (
+                    <span className="truncate">
+                      {browserUrlLabel(candidate.url) || candidate.url}
+                      <span className="typography-micro text-muted-foreground">{pathLabel(candidate.url)}</span>
+                    </span>
+                  )}
+                  {candidate.command && !candidate.page?.title ? (
                     <span className="min-w-0 truncate typography-micro text-muted-foreground" dir="ltr" title={candidate.command}>
                       {candidate.command}
                     </span>

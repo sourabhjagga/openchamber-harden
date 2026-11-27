@@ -142,6 +142,8 @@ environment.respondSettings(async (_url, init) => {
 environment.respond(async (url, init) => {
   const directory = decodeURIComponent(new Headers(init?.headers).get('x-opencode-directory') ?? '') || url.searchParams.get('directory') || DIRECTORY;
   const providerKey = `${url.origin}:${directory}`;
+  // Every location here has activated its plugins.
+  if (url.pathname === '/api/plugin') return Response.json({ data: [{ source: { type: 'builtin' }, features: {}, state: { status: 'active' } }] });
   if (['/api/model', '/api/model/default', '/api/provider'].includes(url.pathname)) {
     let read = providerReads.get(providerKey);
     if (!read) {
@@ -672,6 +674,7 @@ describe('useConfigStore provider persistence', () => {
     expect(hydrated.directoryScoped[OTHER_DIRECTORY]?.providers.map((entry) => entry.id)).toEqual(['other-stale']);
 
     liveProviderId = 'fresh';
+    liveAgents = [testAgent('build')];
     await hydrated.initializeApp();
 
     const reloaded = useConfigStore.getState();
@@ -1198,65 +1201,61 @@ describe('useConfigStore provider persistence', () => {
     expect(state.currentVariant).toBe('high');
   });
 
-  test('[issue-5933] a manual model pick survives picking an agent that configures a model', () => {
-    const sessionId = 'ses_5933_manual_model_survives_agent';
+  test('[issue-3391] a model picked for one agent stays with it and never replaces another agent\'s pinned model', () => {
+    const sessionId = 'ses_3391_pick_stays_with_agent';
     useSessionUIStore.setState({ currentSessionId: sessionId });
     useConfigStore.setState({
       activeDirectoryKey: DIRECTORY,
-      providers: [
-        provider('openai', 'gpt-5.5', ['low', 'high']),
-        provider('anthropic', 'claude-3', ['low', 'high']),
+      providers: [provider('openai', 'sol'), provider('google', 'terra'), provider('anthropic', 'claude-3')],
+      agents: [
+        testAgent('build', { model: { providerID: 'openai', modelID: 'sol' } }),
+        testAgent('build-terra', { model: { providerID: 'google', modelID: 'terra' } }),
+        testAgent('plan'),
       ],
-      agents: [testAgent('plan', { model: { providerID: 'openai', modelID: 'gpt-5.5' } })],
-      settingsDefaultModel: 'openai/gpt-5.5',
-      // Restores also mark the model manual; the pending pick records intent.
+      currentAgentName: 'build',
       currentProviderId: 'anthropic',
       currentModelId: 'claude-3',
-      currentVariant: undefined,
+      selectionSource: 'manual',
+      directoryScoped: {},
+    });
+    // The least a pick records (the mobile list and the favorite-model shortcuts write only this).
+    useSelectionStore.getState().saveSessionModelSelection(sessionId, 'anthropic', 'claude-3');
+    useSelectionStore.getState().pickSessionModel(sessionId, 'anthropic', 'claude-3');
+
+    useConfigStore.getState().setAgent('build-terra');
+    expect(useConfigStore.getState().currentModelId).toBe('terra');
+    expect(useSelectionStore.getState().getAgentModelForSession(sessionId, 'build-terra')).toBe(null);
+    expect(useSelectionStore.getState().getSessionModelPick(sessionId)).toBe(null);
+    expect(useSelectionStore.getState().getSessionModelSelection(sessionId)).toEqual({ providerId: 'google', modelId: 'terra' });
+
+    useConfigStore.getState().setAgent('build');
+    expect(useConfigStore.getState().currentModelId).toBe('claude-3');
+
+    // An agent without a pinned model still carries the manual model (#2531).
+    useConfigStore.getState().setAgent('plan');
+    expect(useConfigStore.getState().currentModelId).toBe('claude-3');
+
+    useConfigStore.getState().setAgent('build-terra');
+    expect(useConfigStore.getState().currentModelId).toBe('terra');
+  });
+
+  test('[issue-3391] a draft model pick does not replace the next agent\'s pinned model', () => {
+    useSessionUIStore.setState({ currentSessionId: null });
+    useConfigStore.setState({
+      activeDirectoryKey: DIRECTORY,
+      providers: [provider('anthropic', 'claude-3'), provider('openai', 'gpt-5.5')],
+      agents: [testAgent('plan', { model: { providerID: 'openai', modelID: 'gpt-5.5' } })],
+      currentProviderId: 'anthropic',
+      currentModelId: 'claude-3',
       selectionSource: 'manual',
       directoryScoped: {},
     });
 
-    useSelectionStore.getState().pickSessionModel(sessionId, 'anthropic', 'claude-3');
-    // Picking an agent must not move the session off the model the user chose.
     useConfigStore.getState().setAgent('plan');
 
-    const state = useConfigStore.getState();
-    expect(state.currentProviderId).toBe('anthropic');
-    expect(state.currentModelId).toBe('claude-3');
-    expect(state.selectionSource).toBe('manual');
-    expect(useSelectionStore.getState().getAgentModelForSession(sessionId, 'plan')).toEqual({
-      providerId: 'anthropic',
-      modelId: 'claude-3',
-    });
+    expect(useConfigStore.getState().currentModelId).toBe('gpt-5.5');
+    expect(useConfigStore.getState().selectionSource).toBe('auto');
   });
-
-  for (const scenario of ['older override', 'undiscovered pinned model', 'restored selection', 'draft pick']) {
-    test(`[issue-5933] model precedence with ${scenario}`, () => {
-      const sessionId = 'ses_5933_precedence';
-      useSessionUIStore.setState({ currentSessionId: scenario === 'draft pick' ? null : sessionId });
-      useConfigStore.setState({
-        activeDirectoryKey: DIRECTORY,
-        providers: [provider('anthropic', 'claude-3', ['low', 'high']), provider('openai', 'gpt-5.5')],
-        agents: [testAgent('plan', { model: {
-          providerID: 'openai', modelID: scenario === 'undiscovered pinned model' ? 'not-discovered' : 'gpt-5.5',
-        } })],
-        settingsDefaultModel: 'openai/gpt-5.5',
-        currentProviderId: 'anthropic', currentModelId: 'claude-3', selectionSource: 'manual',
-        currentVariant: 'high', currentVariantSelection: { override: 'high', inherited: 'low' },
-      });
-      const selection = useSelectionStore.getState();
-      if (scenario === 'older override') selection.saveAgentModelForSession(sessionId, 'plan', 'openai', 'gpt-5.5');
-      if (scenario !== 'restored selection') selection.pickSessionModel(sessionId, 'anthropic', 'claude-3');
-      else selection.saveSessionModelSelection(sessionId, 'anthropic', 'claude-3');
-
-      useConfigStore.getState().setAgent('plan');
-
-      expect(useConfigStore.getState().currentModelId).toBe(scenario === 'restored selection' ? 'gpt-5.5' : 'claude-3');
-      expect(useConfigStore.getState().selectionSource).toBe(scenario === 'restored selection' ? 'auto' : 'manual');
-      expect(useConfigStore.getState().currentVariant).toBe(scenario === 'restored selection' ? undefined : 'high');
-    });
-  }
 
   test('[issue-4601] the settings effort stays with the settings model', () => {
     const sessionId = 'ses_4601_settings_effort';
@@ -2398,8 +2397,18 @@ describe('useConfigStore provider persistence', () => {
     const newAgents = deferred<TestAgent[]>();
     let providerReads = 0;
     let agentReads = 0;
-    getProvidersForConfigImpl = () => ++providerReads === 1 ? providers.promise : newProviders.promise;
-    listAgentsImpl = () => ++agentReads === 1 ? agents.promise : newAgents.promise;
+    const replacementProviderRead = deferred<void>();
+    const replacementAgentRead = deferred<void>();
+    getProvidersForConfigImpl = () => {
+      if (++providerReads === 1) return providers.promise;
+      replacementProviderRead.resolve();
+      return newProviders.promise;
+    };
+    listAgentsImpl = () => {
+      if (++agentReads === 1) return agents.promise;
+      replacementAgentRead.resolve();
+      return newAgents.promise;
+    };
     const providerBefore = getProvidersCalls;
     const agentBefore = listAgentsCalls;
     const triggers = Array.from({ length: 8 }, () => [
@@ -2409,7 +2418,7 @@ describe('useConfigStore provider persistence', () => {
     providers.resolve(providerResponse('old'));
     agents.resolve([{ name: 'build', mode: 'primary' }]);
     await Promise.all(triggers.slice(0, 2));
-    for (let index = 0; index < 20; index += 1) await Promise.resolve();
+    await Promise.all([replacementProviderRead.promise, replacementAgentRead.promise]);
     expect(getProvidersCalls - providerBefore).toBe(2);
     expect(listAgentsCalls - agentBefore).toBe(2);
     newProviders.resolve(providerResponse('live'));
@@ -2461,6 +2470,7 @@ describe('useConfigStore provider persistence', () => {
 
   test('a worktree left while its catalog was incomplete is read again on return', async () => {
     const worktree = '/workspace/starting-worktree';
+    liveAgents = [testAgent('build')];
     let pluginRegistered = false;
     const requested: Array<string | null | undefined> = [];
     getProvidersForConfigImpl = async (directory) => {
@@ -2484,6 +2494,7 @@ describe('useConfigStore provider persistence', () => {
 
   test('a read that began before the catalog changed does not make the worktree fresh', async () => {
     const worktree = '/workspace/slow-worktree';
+    liveAgents = [testAgent('build')];
     const slowRead = deferred<TestProviderResponse>();
     let reads = 0;
     getProvidersForConfigImpl = async (directory) => {
@@ -2618,6 +2629,7 @@ describe('useConfigStore provider persistence', () => {
 
   test('a directory activation stops after a runtime switch during its provider wait', async () => {
     const pending = deferred<TestProviderResponse>();
+    liveAgents = [testAgent('build')];
     getProvidersForConfigImpl = () => pending.promise;
     const activation = useConfigStore.getState().activateDirectory(DIRECTORY);
     switchRuntimeEndpoint({ apiBaseUrl: 'https://activation-next.example', runtimeKey: 'activation-next' });
@@ -2628,7 +2640,7 @@ describe('useConfigStore provider persistence', () => {
     expect(useConfigStore.getState().providers).toEqual([]);
   });
 
-  test('a saved default the live catalog no longer lists gives way without being cleared', async () => {
+  test('a saved default the live catalog no longer lists stands instead of a model nobody chose', async () => {
     liveAgents = [testAgent('build')];
     liveProviderId = 'sidecar';
     persistedOpenChamberSettings = { defaultModel: 'sidecar/default' };
@@ -2638,7 +2650,7 @@ describe('useConfigStore provider persistence', () => {
 
     expect(useConfigStore.getState().settingsDefaultModel).toBe('sidecar/default');
     expect(useConfigStore.getState().currentProviderId).toBe('sidecar');
-    expect(useConfigStore.getState().currentModelId).toBe('sidecar-model');
+    expect(useConfigStore.getState().currentModelId).toBe('default');
   });
 
   test('a live catalog without the project default selects the global default (provider removed)', async () => {
@@ -2698,7 +2710,7 @@ describe('useConfigStore provider persistence', () => {
     expect(useConfigStore.getState()).toMatchObject({ currentProviderId: 'agent', currentModelId: 'pinned' });
   });
 
-  test('with neither configured default in the live catalog the last chat pick and fallback skip missing models too', async () => {
+  test('with every named model gone from the live catalog the first one stands and Big Pickle is not chosen', async () => {
     liveAgents = [testAgent('build')];
     projectsState.projects[0] = { ...projectsState.projects[0], defaultModel: 'removed/chosen' };
     persistedOpenChamberSettings = { defaultModel: 'removed/global' };
@@ -2707,7 +2719,34 @@ describe('useConfigStore provider persistence', () => {
 
     await useConfigStore.getState().loadProviders({ directory: DIRECTORY });
     await useConfigStore.getState().loadAgents({ directory: DIRECTORY });
-    expect(useConfigStore.getState()).toMatchObject({ currentProviderId: 'opencode', currentModelId: 'big-pickle' });
+    expect(useConfigStore.getState()).toMatchObject({ currentProviderId: 'removed', currentModelId: 'chosen' });
+  });
+
+  const reloadCases: Array<[string, NonNullable<typeof persistedOpenChamberSettings>, string | undefined, 'chosen' | 'zen' | undefined]> = [
+    ['settings default', { defaultModel: 'perf/chosen' }, undefined, undefined],
+    ['OpenCode config model', {}, 'perf/chosen', undefined],
+    ['last chat pick', {}, undefined, 'chosen'],
+    ['settings default over a Zen last pick', { defaultModel: 'perf/chosen' }, undefined, 'zen'],
+  ];
+  for (const [name, settings, opencodeDefaultModel, lastPick] of reloadCases) test(`a reload that lists only the built-in provider keeps the ${name}`, async () => {
+    liveAgents = [testAgent('build')];
+    persistedOpenChamberSettings = settings;
+    useConfigStore.setState({ opencodeDefaultModel });
+    if (lastPick === 'chosen') useUIStore.getState().setLastSelectedModel('perf', 'chosen');
+    if (lastPick === 'zen') useUIStore.getState().setLastSelectedModel('opencode', 'big-pickle');
+    const full = {
+      providers: [providerInfo('opencode'), providerInfo('perf')],
+      models: [model('opencode', 'big-pickle'), model('perf', 'chosen')],
+      default: { providerID: 'perf', id: 'chosen' },
+    };
+    for (const listing of [full, providerResponse('opencode', 'big-pickle'), full]) {
+      getProvidersForConfigImpl = async () => listing;
+      await useConfigStore.getState().loadProviders({ directory: DIRECTORY, fresh: true });
+      await useConfigStore.getState().loadAgents({ directory: DIRECTORY });
+      useConfigStore.setState({ opencodeDefaultModel });
+      useConfigStore.getState().applyDefaultModelAgentSelection();
+      expect(useConfigStore.getState()).toMatchObject({ currentProviderId: 'perf', currentModelId: 'chosen' });
+    }
   });
 
   test('an empty live catalog keeps the configured default', async () => {
@@ -3941,6 +3980,252 @@ describe('useConfigStore provider persistence', () => {
       expect(await resolving).toBeNull();
     });
   });
+
+  describe('Chats defaults', () => {
+    const CHAT_DIR = '/workspace/.config/openchamber/chats/2026-11-18/session-a';
+
+    beforeEach(async () => {
+      const { ensureChatsRootDirectory } = await import('@/lib/chatDirectories');
+      await ensureChatsRootDirectory();
+      useConfigStore.setState({ chatsDefaultModel: undefined, chatsDefaultVariant: undefined, chatsDefaultAgent: undefined });
+    });
+
+    test('a chat folder starts on the Chats defaults, and a project folder still on its own', () => {
+      projectsState.projects[0] = { ...projectsState.projects[0], defaultModel: 'live/live-model', defaultAgent: 'build' };
+      useConfigStore.setState({
+        activeDirectoryKey: CHAT_DIR,
+        providers: [provider('chat', 'chat-model', ['high', 'low']), provider('live')],
+        agents: [testAgent('build'), testAgent('plan')],
+        settingsDefaultModel: 'live/live-model',
+        settingsDefaultAgent: 'build',
+        chatsDefaultModel: 'chat/chat-model',
+        chatsDefaultVariant: 'high',
+        chatsDefaultAgent: 'plan',
+      });
+
+      useConfigStore.getState().applyDefaultModelAgentSelection();
+      expect(useConfigStore.getState()).toMatchObject({ currentProviderId: 'chat', currentModelId: 'chat-model', currentVariant: 'high', currentAgentName: 'plan' });
+
+      useConfigStore.setState({ activeDirectoryKey: DIRECTORY });
+      useConfigStore.getState().applyDefaultModelAgentSelection();
+      expect(useConfigStore.getState()).toMatchObject({ currentProviderId: 'live', currentModelId: 'live-model', currentAgentName: 'build' });
+    });
+
+    test('a Chats root inside a registered checkout never takes that project\'s defaults', () => {
+      projectsState.projects.push({ id: 'home', path: '/workspace', label: 'Home', defaultModel: 'live/live-model', defaultAgent: 'plan' });
+      useConfigStore.setState({
+        activeDirectoryKey: CHAT_DIR,
+        providers: [provider('chat', 'chat-model'), provider('live')],
+        agents: [testAgent('build'), testAgent('plan'), testAgent('review')],
+        chatsDefaultModel: 'chat/chat-model',
+        chatsDefaultAgent: 'review',
+      });
+
+      useConfigStore.getState().applyDefaultModelAgentSelection();
+      expect(useConfigStore.getState()).toMatchObject({ currentModelId: 'chat-model', currentAgentName: 'review' });
+
+      useConfigStore.setState({ chatsDefaultModel: undefined, chatsDefaultAgent: undefined, settingsDefaultModel: 'chat/chat-model' });
+      useConfigStore.getState().applyDefaultModelAgentSelection();
+      expect(useConfigStore.getState()).toMatchObject({ currentModelId: 'chat-model', currentAgentName: 'build' });
+    });
+
+    test('a Chats agent with no model anywhere survives a settings load over a global agent', async () => {
+      useConfigStore.setState({
+        activeDirectoryKey: CHAT_DIR,
+        agents: [testAgent('build'), testAgent('plan')],
+        settingsDefaultAgent: 'build',
+        chatsDefaultAgent: 'plan',
+      });
+      useConfigStore.getState().applyDefaultModelAgentSelection();
+      expect(useConfigStore.getState().currentAgentName).toBe('plan');
+
+      persistedOpenChamberSettings = { defaultAgent: 'build', chatsDefaultAgent: 'plan' };
+      await useConfigStore.getState().loadSessionDefaults();
+
+      expect(useConfigStore.getState().currentAgentName).toBe('plan');
+    });
+
+    test('a chat folder that is not active reads the Chats thinking level and defaults', async () => {
+      persistedOpenChamberSettings = { defaultModel: 'chat/global-model', defaultVariant: 'low', defaultAgent: 'build', chatsDefaultModel: 'chat/chat-model', chatsDefaultVariant: 'high', chatsDefaultAgent: 'plan' };
+      await useConfigStore.getState().loadSessionDefaults();
+      getProvidersForConfigImpl = async () => ({
+        providers: [providerInfo('chat')],
+        models: [model('chat', 'chat-model', ['high', 'low']), model('chat', 'global-model')],
+        default: { providerID: 'chat', id: 'global-model' },
+      });
+      listAgentsImpl = async () => [testAgent('build'), testAgent('plan')];
+
+      expect(useConfigStore.getState().getDefaultVariantForModel('chat', 'chat-model', CHAT_DIR)).toBe('high');
+      expect(await useConfigStore.getState().resolveDirectoryDefaultSelection(CHAT_DIR))
+        .toEqual({ agentName: 'plan', providerId: 'chat', modelId: 'chat-model', variant: 'high' });
+    });
+
+    test('switching to an agent with no model of its own keeps the scope default model over the global one', () => {
+      projectsState.projects[0] = { ...projectsState.projects[0], defaultModel: 'project/project-model' };
+      useConfigStore.setState({
+        activeDirectoryKey: CHAT_DIR,
+        providers: [provider('chat', 'chat-model'), provider('live'), provider('project', 'project-model')],
+        agents: [testAgent('build'), testAgent('plan')],
+        settingsDefaultModel: 'live/live-model',
+        chatsDefaultModel: 'chat/chat-model',
+      });
+      useConfigStore.getState().applyDefaultModelAgentSelection();
+      useConfigStore.getState().setAgent('plan');
+      expect(useConfigStore.getState()).toMatchObject({ currentModelId: 'chat-model', currentAgentName: 'plan' });
+
+      useConfigStore.setState({ activeDirectoryKey: DIRECTORY, currentAgentName: 'build', agentSelectionSource: 'auto' });
+      useConfigStore.getState().applyDefaultModelAgentSelection();
+      useConfigStore.getState().setAgent('plan');
+      expect(useConfigStore.getState()).toMatchObject({ currentModelId: 'project-model', currentAgentName: 'plan' });
+    });
+
+    test('switching agents in an existing session still falls back to the New sessions model', () => {
+      useConfigStore.setState({
+        activeDirectoryKey: CHAT_DIR,
+        providers: [provider('chat', 'chat-model'), provider('live')],
+        agents: [testAgent('build'), testAgent('plan')],
+        settingsDefaultModel: 'live/live-model',
+        chatsDefaultModel: 'chat/chat-model',
+        currentAgentName: 'build',
+        agentSelectionSource: 'auto',
+        selectionSource: 'auto',
+      });
+      useSessionUIStore.setState({ currentSessionId: 'ses_existing_chat' });
+      try {
+        useConfigStore.getState().setAgent('plan');
+        expect(useConfigStore.getState()).toMatchObject({ currentModelId: 'live-model', currentAgentName: 'plan' });
+      } finally {
+        useSessionUIStore.setState({ currentSessionId: null });
+      }
+    });
+
+    test('an empty Chats thinking level falls back to the New sessions one only for the same model', () => {
+      useConfigStore.setState({
+        activeDirectoryKey: CHAT_DIR,
+        providers: [provider('chat', 'chat-model', ['high', 'low']), provider('live', 'live-model', ['high', 'low'])],
+        agents: [testAgent('build')],
+        settingsDefaultModel: 'chat/chat-model',
+        settingsDefaultVariant: 'low',
+        chatsDefaultModel: 'chat/chat-model',
+      });
+      useConfigStore.getState().applyDefaultModelAgentSelection();
+      expect(useConfigStore.getState()).toMatchObject({ currentModelId: 'chat-model', currentVariant: 'low' });
+
+      useConfigStore.setState({ settingsDefaultModel: 'live/live-model' });
+      useConfigStore.getState().applyDefaultModelAgentSelection();
+      expect(useConfigStore.getState()).toMatchObject({ currentModelId: 'chat-model', currentVariant: undefined });
+    });
+
+    test('switching agents keeps the New sessions thinking level an empty Chats level inherits', () => {
+      useConfigStore.setState({
+        activeDirectoryKey: CHAT_DIR,
+        providers: [provider('chat', 'chat-model', ['high', 'low'])],
+        agents: [testAgent('build'), testAgent('plan')],
+        settingsDefaultModel: 'chat/chat-model',
+        settingsDefaultVariant: 'high',
+        chatsDefaultModel: 'chat/chat-model',
+      });
+      useConfigStore.getState().applyDefaultModelAgentSelection();
+      expect(useConfigStore.getState()).toMatchObject({ currentModelId: 'chat-model', currentVariant: 'high' });
+      useConfigStore.getState().setAgent('plan');
+      expect(useConfigStore.getState()).toMatchObject({ currentModelId: 'chat-model', currentAgentName: 'plan', currentVariant: 'high' });
+    });
+
+    test('a Chats thinking level change reaches a draft that picked the Chats model by hand', () => {
+      useConfigStore.setState({
+        activeDirectoryKey: CHAT_DIR,
+        providers: [provider('chat', 'chat-model', ['high', 'low']), provider('live', 'live-model', ['high', 'low'])],
+        agents: [testAgent('build')],
+        chatsDefaultModel: 'chat/chat-model',
+        chatsDefaultVariant: 'high',
+      });
+      const draftBefore = useSessionUIStore.getState().newSessionDraft;
+      useSessionUIStore.setState({ currentSessionId: null, newSessionDraft: { ...draftBefore, open: true, target: 'chat' } });
+      try {
+        useConfigStore.getState().applyDefaultModelAgentSelection();
+        useConfigStore.getState().setProvider('live');
+        useConfigStore.getState().setProvider('chat');
+        useConfigStore.getState().setModel('chat-model');
+        useConfigStore.getState().setChatsDefaultVariant('low');
+        expect(useConfigStore.getState()).toMatchObject({ currentModelId: 'chat-model', selectionSource: 'manual', currentVariant: 'low' });
+
+        useConfigStore.getState().setCurrentVariantOverride('high', 'low');
+        useConfigStore.getState().setChatsDefaultVariant(undefined);
+        expect(useConfigStore.getState()).toMatchObject({ currentModelId: 'chat-model', currentVariant: 'high' });
+      } finally {
+        useSessionUIStore.setState({ newSessionDraft: draftBefore });
+      }
+    });
+
+    test('a Chats default change keeps the model, agent and thinking level picked in an open chat draft', () => {
+      useConfigStore.setState({
+        activeDirectoryKey: CHAT_DIR,
+        providers: [provider('chat', 'chat-model', ['high', 'low']), provider('live', 'live-model', ['high', 'low'])],
+        agents: [testAgent('build'), testAgent('plan'), testAgent('review')],
+        chatsDefaultModel: 'chat/chat-model',
+        chatsDefaultAgent: 'build',
+      });
+      const draftBefore = useSessionUIStore.getState().newSessionDraft;
+      useSessionUIStore.setState({ currentSessionId: null, newSessionDraft: { ...draftBefore, open: true, target: 'chat' } });
+      try {
+        useConfigStore.getState().applyDefaultModelAgentSelection();
+        useConfigStore.getState().setAgent('plan', { keepModel: true });
+        useConfigStore.getState().setChatsDefaultAgent('review');
+        useConfigStore.getState().setChatsDefaultModel('live/live-model');
+        expect(useConfigStore.getState()).toMatchObject({ currentAgentName: 'plan', agentSelectionSource: 'manual', currentModelId: 'live-model', selectionSource: 'auto' });
+
+        useConfigStore.getState().setCurrentVariantOverride('high', undefined);
+        useConfigStore.getState().setChatsDefaultVariant('low');
+        expect(useConfigStore.getState()).toMatchObject({ currentModelId: 'live-model', currentVariant: 'high', currentAgentName: 'plan' });
+
+        useConfigStore.getState().setProvider('chat');
+        useConfigStore.getState().setModel('chat-model');
+        useConfigStore.getState().setChatsDefaultModel('live/live-model');
+        useConfigStore.getState().setChatsDefaultAgent('build');
+        const state = useConfigStore.getState();
+        expect(state).toMatchObject({ currentProviderId: 'chat', currentModelId: 'chat-model', selectionSource: 'manual', currentAgentName: 'plan' });
+        expect(state.directoryScoped[CHAT_DIR]).toMatchObject({ currentModelId: 'chat-model', currentAgentName: 'plan' });
+      } finally {
+        useSessionUIStore.setState({ newSessionDraft: draftBefore });
+      }
+    });
+
+    test('an open chat draft takes the Chats defaults before its folder is active, and follows a Chats edit', async () => {
+      projectsState.projects[0] = { ...projectsState.projects[0], defaultModel: 'live/live-model', defaultAgent: 'build' };
+      useConfigStore.setState({
+        activeDirectoryKey: DIRECTORY,
+        providers: [provider('chat', 'chat-model'), provider('live')],
+        agents: [testAgent('build'), testAgent('plan')],
+        chatsDefaultModel: 'chat/chat-model',
+        chatsDefaultAgent: 'plan',
+      });
+      const draftBefore = useSessionUIStore.getState().newSessionDraft;
+      useSessionUIStore.setState({ currentSessionId: null, newSessionDraft: { ...draftBefore, open: true, target: 'chat' } });
+      try {
+        useConfigStore.getState().applyDefaultModelAgentSelection();
+        expect(useConfigStore.getState()).toMatchObject({ currentModelId: 'chat-model', currentAgentName: 'plan' });
+
+        useConfigStore.getState().setChatsDefaultModel('live/live-model');
+        expect(useConfigStore.getState().currentModelId).toBe('live-model');
+
+        useConfigStore.setState({ activeDirectoryKey: '__global__', currentModelId: '', currentAgentName: 'build' });
+        persistedOpenChamberSettings = { chatsDefaultModel: 'chat/chat-model', chatsDefaultAgent: 'plan' };
+        useConfigStore.getState().setSettingsDefaultModel(undefined);
+        await useConfigStore.getState().loadSessionDefaults();
+        expect(useConfigStore.getState()).toMatchObject({ currentModelId: 'chat-model', currentAgentName: 'plan' });
+
+        useSessionUIStore.setState({ newSessionDraft: { ...draftBefore, open: true, target: 'project' } });
+        useConfigStore.setState({ activeDirectoryKey: DIRECTORY });
+        useConfigStore.getState().applyDefaultModelAgentSelection();
+        useConfigStore.getState().setChatsDefaultModel('live/live-model');
+        expect(useConfigStore.getState()).toMatchObject({ currentModelId: 'live-model', currentAgentName: 'build', selectionSource: 'auto' });
+        useConfigStore.getState().setChatsDefaultModel('chat/chat-model');
+        expect(useConfigStore.getState().currentModelId).toBe('live-model');
+      } finally {
+        useSessionUIStore.setState({ newSessionDraft: draftBefore });
+      }
+    });
+  });
 });
 
 describe('ttsChunkedMode default', () => {
@@ -4862,5 +5147,48 @@ describe('voice endpoint path settings', () => {
 
     expect(useConfigStore.getState().sttEndpointPath).toBe('/speech_to_text');
     expect(localStorage.getItem('sttEndpointPath')).toBe('/speech_to_text');
+  });
+});
+
+describe('voice key provider settings', () => {
+  beforeEach(() => {
+    storage = new Map<string, string>();
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: makeStorage() });
+    useConfigStore.setState({ openaiCompatibleKeyProvider: undefined, sttKeyProvider: undefined });
+  });
+
+  test('starts with no choice, so the provider whose address matches can be selected', () => {
+    expect(useConfigStore.getState().openaiCompatibleKeyProvider).toBeUndefined();
+    expect(useConfigStore.getState().sttKeyProvider).toBeUndefined();
+  });
+
+  test('keeps the custom server choice in local storage, and none as a choice of its own', () => {
+    useConfigStore.getState().setOpenaiCompatibleKeyProvider('gateway');
+    expect(useConfigStore.getState().openaiCompatibleKeyProvider).toBe('gateway');
+    expect(localStorage.getItem('openaiCompatibleKeyProvider')).toBe('gateway');
+
+    useConfigStore.getState().setOpenaiCompatibleKeyProvider('');
+    expect(useConfigStore.getState().openaiCompatibleKeyProvider).toBe('');
+    expect(localStorage.getItem('openaiCompatibleKeyProvider')).toBe('');
+  });
+
+  test('keeps the stt choice in local storage, apart from the speech choice', () => {
+    useConfigStore.getState().setSttKeyProvider('gateway');
+
+    expect(useConfigStore.getState().sttKeyProvider).toBe('gateway');
+    expect(localStorage.getItem('sttKeyProvider')).toBe('gateway');
+    expect(useConfigStore.getState().openaiCompatibleKeyProvider).toBeUndefined();
+    expect(localStorage.getItem('openaiCompatibleKeyProvider')).toBeNull();
+  });
+
+  test('the stt choice of one instance, including None, does not carry over to an instance with no choice', () => {
+    switchRuntimeEndpoint({ apiBaseUrl: 'https://stt-choice-a.example', runtimeKey: 'stt-choice-a' });
+    useConfigStore.getState().setSttKeyProvider('');
+    expect(useConfigStore.getState().sttKeyProvider).toBe('');
+
+    switchRuntimeEndpoint({ apiBaseUrl: 'https://stt-choice-b.example', runtimeKey: 'stt-choice-b' });
+
+    expect(useConfigStore.getState().sttKeyProvider).toBeUndefined();
+    expect(localStorage.getItem('sttKeyProvider')).toBeNull();
   });
 });

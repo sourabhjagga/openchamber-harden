@@ -1,3 +1,4 @@
+export type { SourceControlReviewState, SourceControlReviewSummary } from './source-control-reviews.ts';
 
 export const BROWSER_PROVIDER_PATH = '/browser-control';
 
@@ -209,7 +210,6 @@ export const readBrowserProviderRequest = (body: string): BrowserProviderRequest
   return { requestId, action, parameters, context: readContext(context) } as BrowserProviderRequest;
 };
 
-
 export const SOURCE_CONTROL_PROVIDER_PATH = '/source-control';
 export const SOURCE_CONTROL_PROVIDER_WIRE_VERSION = 1;
 
@@ -231,7 +231,7 @@ export const SOURCE_CONTROL_PROVIDER_METHODS = [
   'readChangeRequestFile',
   'liveSummaries',
   'readChangeRequestHead',
-  'resolveChangeRequestSource',
+  'resolveChangeRequestSource', 'reviewState',
   'mutation.resolveTarget',
   'mutation.perform',
   'mutation.reconcile',
@@ -302,8 +302,7 @@ export type SourceControlMutationTarget = {
   project: SourceControlProjectRef;
   number?: number;
   head?: string;
-  base?: string;
-  headSha?: string;
+  base?: string; headSha?: string;
 };
 
 export type SourceControlMutationResolution = { providerTarget: SourceControlJsonObject; target: SourceControlMutationTarget };
@@ -322,15 +321,15 @@ export type SourceControlProviderInputs = {
   changeRequestStatus: ReadInput & { branch: string; force: boolean };
   listChangeRequests: ListInput;
   changeRequestContext: ReadInput & RevisionInput & {
-    number: number; project?: SourceControlProjectSelector; includeDiff: boolean; includeCIDetails: boolean; includeTimeline: boolean;
+    number: number; project?: SourceControlProjectSelector; includeDiff: boolean; includeCIDetails: boolean; includeTimeline: boolean; includeReferences?: boolean;
   };
   listIssues: ListInput;
-  getIssue: ReadInput & { number: number; project?: SourceControlProjectSelector };
+  getIssue: ReadInput & { number: number; project?: SourceControlProjectSelector; includeReferences?: boolean };
   issueComments: ReadInput & { number: number; project?: SourceControlProjectSelector };
   projectUpstream: ReadInput;
   projectBranches: ReadInput & { project: SourceControlProjectSelector };
   listLabels: ReadInput & { project: SourceControlProjectSelector };
-  listReviewerCandidates: ReadInput & { project: SourceControlProjectSelector };
+  listReviewerCandidates: ReadInput & { project: SourceControlProjectSelector; role?: 'assignee' | 'reviewer' };
   readChangeRequestPatch: ReadInput & RevisionInput & { number: number; sourceRepo?: { owner: string; repo: string } };
   readChangeRequestFile: ReadInput & RevisionInput & {
     number: number; sourceRepo?: { owner: string; repo: string }; path: string; previousPath?: string; status?: string;
@@ -340,11 +339,13 @@ export type SourceControlProviderInputs = {
     issueRefs: Array<{ owner: string; repo: string; number: number }>;
   };
   readChangeRequestHead: ReadInput & { number: number };
-  resolveChangeRequestSource: ReadInput & { project: SourceControlProjectRef; number: number; expectedHeadSha: string };
+  resolveChangeRequestSource: ReadInput & { project: SourceControlProjectRef; number: number; expectedHeadSha: string }; reviewState: ReadInput & { number: number; project?: SourceControlProjectSelector };
   'mutation.resolveTarget': { context: SourceControlJsonObject; kind: string; input: SourceControlJsonObject; replayOf?: SourceControlJsonObject };
   'mutation.perform': MutationStepInput;
   'mutation.reconcile': MutationStepInput;
 };
+
+export type { SourceControlChangeRequestContext, SourceControlReviewerState } from './source-control-reviewers.ts';
 
 export type SourceControlNumericForgeUser = { id: number; login: string; name?: string; email?: string; avatarUrl?: string };
 export type SourceControlStringForgeUser = { id: string; login: string; name?: string; email?: string; avatarUrl?: string };
@@ -374,8 +375,7 @@ export type SourceControlMutationResult = {
   ready?: boolean;
   draft?: boolean;
   commented?: boolean;
-  failureStatus?: number;
-  failureCode?: string;
+  failureStatus?: number; failureCode?: string;
 };
 export type SourceControlReconcileData = {
   state: 'succeeded' | 'failed' | 'outcome-unknown';

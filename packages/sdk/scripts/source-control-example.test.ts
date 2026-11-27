@@ -7,7 +7,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { startExampleService } from './fixtures/example-service';
-import { FAKE_FORGE_FORK, FAKE_FORGE_STRANGER, startFakeForge, type FakeForge } from '../examples/source-control-provider/fake-forge';
+import { FAKE_FORGE_FORK, FAKE_FORGE_OWNER, FAKE_FORGE_REPO, FAKE_FORGE_STRANGER, startFakeForge, type FakeForge } from '../examples/source-control-provider/fake-forge';
+import { readReferences } from '../examples/source-control-provider/service/references';
+import { readReviews } from '../examples/source-control-provider/service/reviewer-states';
 import { sourceControlProviderSchemasV1 as schemas } from '../src/service-provider-schemas';
 import {
   OPENCHAMBER_HOST_CALLBACK_URL,
@@ -159,6 +161,64 @@ describe('source-control provider example', () => {
     expect(await call('listLabels', { ...read(), project: { owner: 'mona', name: 'teapot' } })).toMatchObject({ ok: false, error: { status: 501 } });
   });
 
+  test('the timeline references the host asked for, mapped and deduped', async () => {
+    const detail = await data('getIssue', { ...read(), number: 1, includeReferences: true });
+    expect(field(detail, 'references')).toEqual([{
+      kind: 'pull', number: 2, url: `${forge.origin}/mona/teapot/pulls/2`, createdAt: '2026-10-03T10:00:00Z',
+      title: 'Steep longer', repo: 'mona/teapot', author: { login: 'octo', avatarUrl: 'https://avatars.example.com/octo.png' },
+    }]);
+    expect(Object.hasOwn(await data('getIssue', { ...read(), number: 1 }), 'references')).toBe(false);
+
+    const context = await data('changeRequestContext', {
+      ...read(), number: 2, includeDiff: false, includeCIDetails: false, includeTimeline: true, includeReferences: true,
+    });
+    expect(field(context, 'references')).toEqual([
+      { kind: 'issue', number: 5, url: `${forge.origin}/mona/kettle/issues/5`, createdAt: '2026-10-02T10:00:00Z', title: 'Steam wand', repo: 'mona/kettle', author: { login: 'mona' } },
+      { kind: 'issue', number: 1, url: `${forge.origin}/mona/teapot/issues/1`, createdAt: '2026-10-06T10:00:00Z', title: 'Kettle whistles too early', repo: 'mona/teapot', author: { login: 'mona' } },
+    ]);
+    expect(field(context, 'reviewerStates')).toContainEqual({ user: { id: '9', username: 'ann' }, state: 'approved' });
+    expect(Object.hasOwn(await data('changeRequestContext', {
+      ...read(), number: 2, includeDiff: false, includeCIDetails: false, includeTimeline: true,
+    }), 'references')).toBe(false);
+  });
+
+  test('a recent mention past a first timeline page of ordinary events is still read', async () => {
+    const comment = { type: 'comment', created_at: '2026-10-01T10:00:00Z' };
+    const mention = { type: 'issue_ref', created_at: '2026-10-09T10:00:00Z', ref_issue: { number: 9, html_url: `${forge.origin}/mona/teapot/issues/9` } };
+    const pages = [Array(50).fill(comment), Array(50).fill(comment), [comment, mention]];
+    const asked: number[] = [];
+    const references = await readReferences(async (page) => {
+      asked.push(page);
+      return { data: pages[page - 1] ?? [], total: 102 };
+    });
+    expect(references).toEqual([{ kind: 'issue', number: 9, url: mention.ref_issue.html_url, createdAt: mention.created_at }]);
+    expect(asked.sort()).toEqual([1, 2, 3]);
+  });
+
+  test('a stalled timeline gives up its references instead of the whole detail', async () => {
+    expect(await readReferences(() => new Promise(() => undefined), 10)).toEqual([]);
+  });
+
+  test('a short review page with more after it does not end the roster', async () => {
+    const reviews = await readReviews(2, async (page) => ({
+      data: page === 1 ? [{ user: { id: 9, login: 'ann' }, state: 'APPROVED' }] : page === 2 ? [{ user: { id: 10, login: 'bob' }, state: 'APPROVED' }] : [],
+      total: 4,
+    }), 1_000);
+    expect(reviews?.map((review) => review.user?.login)).toEqual(['ann', 'bob']);
+  });
+
+  test('a stalled second review page drops partial reviewer states', async () => {
+    const asked: number[] = [];
+    const reviews = await readReviews(1, async (page) => {
+      asked.push(page);
+      return page === 1
+        ? { data: [{ user: { id: 9, login: 'ann' }, state: 'APPROVED' }], total: 2 }
+        : new Promise(() => undefined);
+    }, 10);
+    expect(asked).toEqual([1, 2]);
+    expect(reviews).toBeNull();
+  }, 500);
+
   test('a pull request\'s diff, split per file in its context, and both sides of a changed file', async () => {
     const patch = await data('readChangeRequestPatch', { ...read(), number: 2 });
     expect(field(patch, 'meta')).toEqual({ owner: 'mona', repo: 'teapot', number: 2 });
@@ -206,6 +266,56 @@ describe('source-control provider example', () => {
     })).toMatchObject({ ok: false, error: { status: 409 } });
   });
 
+  test('dismisses and restores a review it lists, and reads each back from the forge', async () => {
+    const readContext = () => data('changeRequestContext', {
+      ...read(), number: 2, includeDiff: false, includeCIDetails: false, includeTimeline: true,
+    });
+    const reviewOf = async (id: string) => (
+      await fetch(`${forge.origin}/api/v1/repos/mona/teapot/pulls/2/reviews/${id}`, { headers: { authorization: 'token good' } })
+    ).json();
+    const context = await readContext();
+    // Mona owns the repository, so the example offers the dismissal Gitea would let her make.
+    expect(field(context, 'canDismissReviews')).toBe(true);
+    const reviews = field(context, 'reviews');
+    expect(reviews).toContainEqual({ id: '402', state: 'changes_requested', author: { login: 'bob' }, submittedAt: '2026-10-01T10:01:00Z' });
+    expect(reviews).toContainEqual(expect.objectContaining({ id: '404', state: 'dismissed', author: { login: 'dee' } }));
+
+    const before = forge.writes.length;
+    const step = async (input: SourceControlJsonObject) => {
+      const resolved = await data('mutation.resolveTarget', { context: mutationContext({ number: 2 }), kind: 'change-request-review-dismiss', input });
+      const call = {
+        route: '/pr/review/dismiss', kind: 'change-request-review-dismiss', input,
+        resolved: { providerTarget: field(resolved, 'providerTarget'), target: field(resolved, 'target') },
+      };
+      expect(await data('mutation.perform', call)).toEqual({});
+      return data('mutation.reconcile', call);
+    };
+
+    expect(await step({ reviewId: '402', dismissed: true, message: 'Addressed in the rewrite' })).toEqual({ state: 'succeeded', result: {} });
+    expect(await reviewOf('402')).toMatchObject({ id: 402, dismissed: true });
+    expect(field(await readContext(), 'reviews')).toContainEqual(expect.objectContaining({ id: '402', state: 'dismissed' }));
+
+    expect(await step({ reviewId: '402', dismissed: false })).toEqual({ state: 'succeeded', result: {} });
+    expect(await reviewOf('402')).toMatchObject({ id: 402, dismissed: false });
+    expect(field(await readContext(), 'reviews')).toContainEqual(expect.objectContaining({ id: '402', state: 'changes_requested' }));
+    expect(forge.writes.length).toBe(before + 2);
+
+    // Ann's review reads back without a dismissal flag, so a restart cannot call a restore of it done.
+    const restart = await data('mutation.resolveTarget', { context: mutationContext({ number: 2 }), kind: 'change-request-review-dismiss', input: {} });
+    expect(await data('mutation.reconcile', {
+      route: '/pr/review/dismiss', kind: 'change-request-review-dismiss', input: { reviewId: '401', dismissed: false },
+      resolved: { providerTarget: field(restart, 'providerTarget'), target: field(restart, 'target') },
+    })).toEqual({ state: 'outcome-unknown' });
+
+    // A review that is not on this pull request is refused before anything is written.
+    const resolved = await data('mutation.resolveTarget', { context: mutationContext({ number: 2 }), kind: 'change-request-review-dismiss', input: {} });
+    expect(await call('mutation.perform', {
+      route: '/pr/review/dismiss', kind: 'change-request-review-dismiss', input: { reviewId: '9999', dismissed: true, message: 'x' },
+      resolved: { providerTarget: field(resolved, 'providerTarget'), target: field(resolved, 'target') },
+    })).toMatchObject({ ok: false, error: { status: 409, code: 'SOURCE_CONTROL_MUTATION_TARGET_INVALID' } });
+    expect(forge.writes.length).toBe(before + 2);
+  });
+
   test('mutations: resolve, write once, and reconcile from what the forge shows', async () => {
     const before = forge.writes.length;
     const create = await data('mutation.resolveTarget', {
@@ -243,6 +353,24 @@ describe('source-control provider example', () => {
       context: mutationContext({ number: 3, headSha: 'c'.repeat(40) }), kind: 'change-request-merge', input: { method: 'merge' },
     });
     expect(stale).toMatchObject({ ok: false, error: { status: 409, code: 'SOURCE_CONTROL_MUTATION_TARGET_MISMATCH' } });
+  });
+
+  test('a pull request context names each reviewer\'s state, and leaves the field out when there is none', async () => {
+    const context = await data('changeRequestContext', {
+      ...read(), number: 2, includeDiff: false, includeCIDetails: false, includeTimeline: true,
+    });
+    expect(field(context, 'reviewerStates')).toEqual([
+      { user: { id: '9', username: 'ann' }, state: 'approved' },
+      { user: { id: '10', username: 'bob' }, state: 'changes_requested' },
+      // A dismissed approval is no longer an approval, though it sits on the
+      // second page of reviews, after an approval on the first.
+      { user: { id: '12', username: 'dee' }, state: 'pending' },
+      { user: { id: '11', username: 'cid' }, state: 'pending' },
+    ]);
+    const none = await data('changeRequestContext', {
+      ...read(), number: 3, includeDiff: false, includeCIDetails: false, includeTimeline: true,
+    });
+    expect(field(none, 'reviewerStates')).toBeNull();
   });
 
   test('a comment is edited or deleted only on the item it belongs to', async () => {
@@ -346,5 +474,131 @@ describe('source-control provider example', () => {
       expect(answer).toMatchObject({ ok: false, error: { status: 409, code: 'SOURCE_CONTROL_MUTATION_REMOTE_MISMATCH' } });
     }
     expect(forge.writes.length).toBe(before + 1);
+  });
+
+  test('answers a failed route with a fixed message instead of the request text', async () => {
+    const answer = await fetch(`${forge.origin}/api/v1/repos/${FAKE_FORGE_OWNER}/${FAKE_FORGE_REPO}/issues/1/comments`, {
+      method: 'POST',
+      headers: { authorization: 'token good', 'content-type': 'application/json' },
+      body: '{"body": reflectedmarker}',
+    });
+    const text = await answer.text();
+    expect(answer.status).toBe(500);
+    expect(text).not.toContain('reflectedmarker');
+    expect(JSON.parse(text)).toEqual({ message: 'The fake forge could not handle this request.' });
+    expect(answer.headers.get('content-type')).toBe('application/json');
+  });
+});
+
+describe('source-control provider review drafts', () => {
+  const read = () => ({ context: {}, directory: repository, remote: 'origin' });
+  const mutationContext = (target: SourceControlJsonObject) => ({
+    directory: repository, primaryRemote: 'origin', repositoryId: 'repo-1', bindingRevision: 1,
+    target: { repositoryId: 'repo-1', bindingRevision: 1, primaryRemote: 'origin', project: { id: '1', owner: 'mona', name: 'teapot' }, ...target },
+  });
+  const stepFor = async (number: number, kind: string, input: SourceControlJsonObject, route: string) => {
+    const resolution = await data('mutation.resolveTarget', { context: mutationContext({ number }), kind, input });
+    return {
+      route, kind, input,
+      resolved: { providerTarget: field(resolution, 'providerTarget'), target: field(resolution, 'target') },
+    };
+  };
+
+  test('finds the viewer\'s pending review on a second page of reviews', async () => {
+    const state = await data('reviewState', { ...read(), number: 6 });
+    expect(field(state, 'draft', 'id')).toBe('701');
+  });
+
+  test('reads past a first page that another viewer\'s hidden pending review left short', async () => {
+    const answer = await fetch(`${forge.origin}/api/v1/repos/mona/teapot/pulls/6/reviews?page=1&limit=50`, {
+      headers: { authorization: 'token good' },
+    });
+    // The forge counted zoe's pending review, then hid it from this page.
+    expect(answer.headers.get('x-total-count')).toBe('51');
+    expect(await answer.json()).toHaveLength(49);
+    expect(field(await data('reviewState', { ...read(), number: 6 }), 'draft', 'id')).toBe('701');
+    // The draft still exists, so a discard replay cannot report success.
+    const discard = await stepFor(6, 'change-request-review-discard', {}, '/pr/review/discard');
+    expect(await data('mutation.reconcile', discard)).toEqual({ state: 'outcome-unknown' });
+  });
+
+  test('keeps a draft review pending on the pull request until it is discarded', async () => {
+    const initial = await data('reviewState', { ...read(), number: 3 });
+    expect(initial).toEqual({
+      connected: true, viewerIsAuthor: true, headSha: 'd'.repeat(40), draft: null, threads: [], truncated: false,
+    });
+
+    const before = forge.writes.length;
+    const create = await stepFor(3, 'change-request-review-comment', {
+      position: { path: 'README.md', side: 'new', line: 2 }, body: 'Draft one',
+    }, '/pr/review/comment');
+    expect(await data('mutation.perform', create)).toEqual({});
+    const createOld = await stepFor(3, 'change-request-review-comment', {
+      position: { path: 'README.md', side: 'old', line: 1 }, body: 'Draft on the old side',
+    }, '/pr/review/comment');
+    expect(await data('mutation.perform', createOld)).toEqual({});
+    expect(forge.writes.slice(before)).toEqual([
+      { method: 'POST', path: '/api/v1/repos/mona/teapot/pulls/3/reviews' },
+      { method: 'POST', path: '/api/v1/repos/mona/teapot/pulls/3/reviews' },
+    ]);
+    const opened = await data('reviewState', { ...read(), number: 3 });
+    expect(field(opened, 'draft', 'body')).toBe('\u200b');
+    expect(field(opened, 'draft', 'comments')).toEqual([
+      { id: '501', path: 'README.md', side: 'new', line: 2, startLine: null, body: 'Draft one', author: { login: 'mona' } },
+      { id: '502', path: 'README.md', side: 'old', line: 1, startLine: null, body: 'Draft on the old side', author: { login: 'mona' } },
+    ]);
+
+    const update = await stepFor(3, 'change-request-review-comment-update', { commentId: '501', body: 'Draft edited' }, '/pr/review/comment/update');
+    expect(await data('mutation.perform', update)).toEqual({});
+    expect(forge.writes.at(-1)).toEqual({ method: 'PATCH', path: '/api/v1/repos/mona/teapot/issues/comments/501' });
+    expect(field(await data('reviewState', { ...read(), number: 3 }), 'draft', 'comments', 0, 'body')).toBe('Draft edited');
+
+    // Gitea answers 204 to that DELETE and keeps the comment, so the service refuses before
+    // writing anything; with no write sent, the host reports the refusal instead of an unknown outcome.
+    const remove = await stepFor(3, 'change-request-review-comment-delete', { commentId: '501' }, '/pr/review/comment/delete');
+    const writesBeforeDelete = forge.writes.length;
+    const refused = await call('mutation.perform', remove);
+    expect(refused.ok).toBe(false);
+    expect(refused.ok ? null : refused.error).toMatchObject({ status: 422, message: expect.stringContaining('cannot remove one review comment') });
+    expect(forge.writes.length).toBe(writesBeforeDelete);
+    expect(field(await data('reviewState', { ...read(), number: 3 }), 'draft', 'comments')).toHaveLength(2);
+
+    const discard = await stepFor(3, 'change-request-review-discard', {}, '/pr/review/discard');
+    expect(await data('mutation.perform', discard)).toEqual({});
+    expect(await data('mutation.reconcile', discard)).toEqual({ state: 'succeeded', result: {} });
+    expect(field(await data('reviewState', { ...read(), number: 3 }), 'draft')).toBeNull();
+  });
+
+  test('saves a comment on one line and refuses a range before writing to the forge', async () => {
+    const before = forge.writes.length;
+    const single = await stepFor(8, 'change-request-review-comment', {
+      position: { path: 'README.md', side: 'new', line: 2 }, body: 'One line',
+    }, '/pr/review/comment');
+    expect(await data('mutation.perform', single)).toEqual({});
+    expect(forge.writes.slice(before)).toEqual([{ method: 'POST', path: '/api/v1/repos/mona/teapot/pulls/8/reviews' }]);
+    expect(field(await data('reviewState', { ...read(), number: 8 }), 'draft', 'comments')).toEqual([
+      { id: expect.any(String), path: 'README.md', side: 'new', line: 2, startLine: null, body: 'One line', author: { login: 'mona' } },
+    ]);
+
+    const range = await stepFor(8, 'change-request-review-comment', {
+      position: { path: 'README.md', side: 'new', startLine: 1, line: 3 }, body: 'Three lines',
+    }, '/pr/review/comment');
+    const refused = await call('mutation.perform', range);
+    expect(refused.ok).toBe(false);
+    expect(refused.ok ? null : refused.error.message).toContain('one line only');
+    expect(forge.writes.length).toBe(before + 1);
+    expect(field(await data('reviewState', { ...read(), number: 8 }), 'draft', 'comments')).toHaveLength(1);
+  });
+
+  test('reads a review list longer than its scan as a failure, never as no draft', async () => {
+    const state = await call('reviewState', { ...read(), number: 7 });
+    expect(state.ok).toBe(false);
+    expect(state.ok ? null : state.error.message).toContain('more reviews than this Git host scans');
+
+    const before = forge.writes.length;
+    const discard = await stepFor(7, 'change-request-review-discard', {}, '/pr/review/discard');
+    expect((await call('mutation.perform', discard)).ok).toBe(false);
+    expect(await data('mutation.reconcile', discard)).toEqual({ state: 'outcome-unknown' });
+    expect(forge.writes.length).toBe(before);
   });
 });

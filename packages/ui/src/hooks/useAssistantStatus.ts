@@ -211,6 +211,13 @@ const OPENCHAMBER_STATUS = new Map(Object.entries<ToolActionStatus>({
     },
     openchamber_notify: { fallback: 'chat.agentStatus.notify' },
     openchamber_usage: { fallback: 'chat.agentStatus.usage' },
+    openchamber_actions: {
+        fallback: 'chat.agentStatus.actions',
+        actions: {
+            'actions.run': 'chat.agentStatus.actions.run',
+            'actions.stop': 'chat.agentStatus.actions.stop',
+        },
+    },
     openchamber_render: { fallback: 'chat.agentStatus.render' },
     openchamber_image: { fallback: 'chat.agentStatus.image' },
     openchamber_secret: { fallback: 'chat.agentStatus.secret', actions: { 'secret.run': 'chat.agentStatus.secretRun' } },
@@ -472,9 +479,16 @@ export const getActiveAssistantContext = (messages: Message[], sessionModel?: Mo
     const sessionProviderId = sessionModel?.providerID.trim() ?? '';
     const sessionModelId = sessionModel?.id.trim() ?? '';
     const nextTurnModel = sessionProviderId && sessionModelId ? { providerId: sessionProviderId, modelId: sessionModelId } : null;
+    // external: https://github.com/anomalyco/opencode/issues/65550 session.compaction.started carries no model, and the compactor can differ from the thread's.
+    let newestCompaction: 'running' | 'settled' | null = null;
     for (let index = messages.length - 1; index >= 0; index -= 1) {
         const message = messages[index];
+        if (message?.role === 'compaction' && newestCompaction === null) {
+            newestCompaction = message.status === 'running' ? 'running' : 'settled';
+        }
         if (message?.role !== 'assistant') continue;
+
+        if (newestCompaction === 'running') return { assistantId: message.id, model: null };
 
         if (message.time.completed !== undefined && hasNewerPrompt(messages, index)) {
             return { assistantId: message.id, model: nextTurnModel };

@@ -11,6 +11,7 @@ import type { ContextPanelMode, PluginContextPanelMode } from '@/lib/surfaces/mo
 import type { MobileWorkspaceTab } from '@/lib/mobileWorkspaceTabs';
 import type { ContextZone, ContextZonePlacement, MovedZoneViews } from '@/lib/workspace/zones';
 import type { WorkStatusPanelSectionId } from '@/components/chat/work-status/sections';
+import type { CommentLocationRequest } from '@/lib/commentLocation';
 import type { StateCreator } from 'zustand';
 
 export type PendingDiffScope = 'working' | 'staged' | 'turn' | 'branch' | 'commit' | 'pr';
@@ -19,7 +20,7 @@ type MermaidRenderingMode = 'svg' | 'ascii';
 
 type UserMessageRenderingMode = 'markdown' | 'plain';
 
-type ActivityRenderMode = 'collapsed' | 'summary';
+type ActivityRenderMode = 'collapsed' | 'grouped' | 'summary';
 
 export type SessionRetentionAction = 'archive' | 'delete';
 
@@ -36,6 +37,8 @@ export type MobileKeepScreenAwake = 'off' | 'working' | 'always';
 export type FileEditorKeymap = 'default' | 'vim';
 
 export type LargeTextPasteBehavior = 'ask' | 'attach' | 'inline' | 'inline-double-paste';
+
+export type DocumentAttachBehavior = 'ask' | 'save' | 'convert';
 
 export type ChatWidth = 'default' | 'wider' | 'full';
 
@@ -80,6 +83,13 @@ export type ContextPanelDirectoryState = {
   touchedAt: number;
 };
 
+export type ContextZoneReturnEntry = {
+  tabId: string;
+  mode: ContextPanelMode;
+};
+
+export type ContextZoneReturnStacks = Record<string, Partial<Record<ContextZone, ContextZoneReturnEntry[]>>>;
+
 type PendingFileNavigation = {
   path: string;
   line: number;
@@ -106,6 +116,7 @@ export interface UIStore {
   sidebarFoldedForExpandedZone: boolean;
   sidebarWidth: number;
   contextPanelByDirectory: Record<string, ContextPanelDirectoryState>;
+  contextZoneReturnStack: ContextZoneReturnStacks;
   contextRailOrder: string[];
   contextRailHiddenSurfaces: string[];
   mobileWorkspaceTabOrder: string[];
@@ -116,6 +127,7 @@ export interface UIStore {
   fileTreeSide: 'left' | 'right';
   contextEditorVisible: boolean;
   contextEditorTreeWidth: number;
+  gitSidebarWidth: number;
   contextZoneSizes: Partial<Record<ContextZone, number>>;
   contextZoneExpandedChatSizes: Partial<Record<ContextZone, number>>;
   workStatusExpandedSections: Record<string, boolean>;
@@ -134,7 +146,8 @@ export interface UIStore {
   pendingDiffFile: string | null;
   pendingDiffStaged: boolean;
   pendingDiffScope: PendingDiffScope | null;
-  pendingTurnDiffFile: { file: string; sessionId: string | null } | null;
+  pendingCommentLocation: CommentLocationRequest | null;
+  pendingTurnDiffFile: { file: string; sessionId: string | null; turnId?: string; panelSessionId: string | null } | null;
   pendingFileNavigation: PendingFileNavigation | null;
   pendingFileFocusPath: string | null;
   isMobile: boolean;
@@ -288,6 +301,7 @@ export interface UIStore {
   agentNotifyToolEnabled: boolean;
   agentUsageToolEnabled: boolean;
   agentTerminalToolEnabled: boolean;
+  agentActionsToolEnabled: boolean;
   agentImageToolEnabled: boolean;
   agentImageModel: string;
   agentMemoryDreamingEnabled: boolean;
@@ -297,6 +311,7 @@ export interface UIStore {
   agentSecretToolEnabled: boolean;
   agentWorkflowToolEnabled: boolean;
   agentWorkflowAutoApprove: boolean;
+  agentWorkflowAutoApproveLeads: boolean;
   isolatedSpacesEnabled: boolean;
   permissionDefaultMode: PermissionMode;
   agentMemoryFeatureAvailable: boolean;
@@ -308,6 +323,7 @@ export interface UIStore {
   projectKnowledgePlanRequest: { projectContextId: string; planId: string } | null;
   inputSpellcheckEnabled: boolean;
   largeTextPasteBehavior: LargeTextPasteBehavior;
+  documentAttachBehavior: DocumentAttachBehavior;
   enterToSend: boolean;
   enterToSendConfigured: boolean;
   mobileReturnKeySends: boolean;
@@ -318,6 +334,7 @@ export interface UIStore {
   selectionApprovalText: string;
   showToolFileIcons: boolean;
   showTurnChangedFiles: boolean;
+  keepEarlierReplies: boolean;
   timeFormatPreference: TimeFormatPreference;
   weekStartPreference: WeekStartPreference;
   desktopWindowControlsPosition: DesktopWindowControlsPosition;
@@ -345,10 +362,12 @@ export interface UIStore {
   toggleContextEditorTree: () => void;
   toggleContextEditor: () => void;
   setContextEditorTreeWidth: (width: number) => void;
+  setGitSidebarWidth: (width: number) => void;
   openContextSurface: (directory: string, mode: ContextPanelMode) => void;
-  openContextPanelTab: (directory: string, tab: ContextPanelTabDescriptor, options?: { reveal?: boolean }) => void;
+  openContextPanelTab: (directory: string, tab: ContextPanelTabDescriptor, options?: { reveal?: boolean; recordReturn?: boolean }) => void;
   openTrackerItem: (directory: string, item: { url: string; key: string; label: string; targetDirectory: string | null }) => string | null;
   openContextDiff: (directory: string, filePath: string, staged?: boolean, scope?: PendingDiffScope | null) => void;
+  openCommentLocation: (request: CommentLocationRequest) => void;
   openContextFile: (directory: string, filePath: string, options?: { preview?: boolean; expanded?: boolean }) => void;
   pinContextPanelTab: (directory: string, tabID: string) => void;
   openContextFileAtLine: (directory: string, filePath: string, line: number, column?: number, options?: { preview?: boolean }) => void;
@@ -365,7 +384,12 @@ export interface UIStore {
   closeContextFile: (directory: string, filePath: string) => void;
   closeContextPanelTabs: (directory: string, tabIds: readonly string[]) => void;
   closeContextPanel: (directory: string) => void;
-  closeContextZone: (directory: string, zone: ContextZone) => void;
+  toggleContextPanel: (directory: string) => void;
+  closeContextZone: (
+    directory: string,
+    zone: ContextZone,
+    options?: { returnToPrevious?: boolean; eligibleTabIds?: ReadonlySet<string> },
+  ) => void;
   toggleContextPanelExpanded: (directory: string, zone?: ContextZone) => void;
   setContextZoneSize: (zone: ContextZone, size: number) => void;
   setContextZoneExpandedChatSize: (zone: ContextZone, size: number) => void;
@@ -389,7 +413,8 @@ export interface UIStore {
   setSessionSwitcherOpen: (open: boolean) => void;
   setSessionDropdownOpen: (open: boolean) => void;
   setPendingDiffFile: (filePath: string | null, staged?: boolean, scope?: PendingDiffScope | null) => void;
-  setPendingTurnDiffFile: (request: { file: string; sessionId: string | null } | null) => void;
+  setPendingCommentLocation: (location: CommentLocationRequest | null) => void;
+  setPendingTurnDiffFile: (request: { file: string; sessionId: string | null; turnId?: string; panelSessionId: string | null } | null) => void;
   setPendingFileNavigation: (navigation: PendingFileNavigation | null) => void;
   setPendingFileFocusPath: (path: string | null) => void;
   navigateToDiff: (filePath: string, staged?: boolean, scope?: PendingDiffScope | null) => void;
@@ -555,6 +580,7 @@ export interface UIStore {
   setAgentNotifyToolEnabled: (value: boolean) => void;
   setAgentUsageToolEnabled: (value: boolean) => void;
   setAgentTerminalToolEnabled: (value: boolean) => void;
+  setAgentActionsToolEnabled: (value: boolean) => void;
   setAgentImageToolEnabled: (value: boolean) => void;
   setAgentImageModel: (value: string) => void;
   setAgentMemoryDreamingEnabled: (value: boolean) => void;
@@ -575,6 +601,7 @@ export interface UIStore {
   clearProjectKnowledgePlanRequest: () => void;
   setInputSpellcheckEnabled: (value: boolean) => void;
   setLargeTextPasteBehavior: (value: LargeTextPasteBehavior) => void;
+  setDocumentAttachBehavior: (value: DocumentAttachBehavior) => void;
   setEnterToSend: (value: boolean) => void;
   setMobileReturnKeySends: (value: boolean) => void;
   setEnterToSendConfigured: (value: boolean) => void;
@@ -585,6 +612,7 @@ export interface UIStore {
   setSelectionApprovalText: (value: string) => void;
   setShowToolFileIcons: (value: boolean) => void;
   setShowTurnChangedFiles: (value: boolean) => void;
+  setKeepEarlierReplies: (value: boolean) => void;
   setTimeFormatPreference: (value: TimeFormatPreference) => void;
   setWeekStartPreference: (value: WeekStartPreference) => void;
   setDesktopWindowControlsPosition: (value: DesktopWindowControlsPosition) => void;

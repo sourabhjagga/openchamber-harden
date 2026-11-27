@@ -95,6 +95,10 @@ stores own durable state and shared caches.
   or returning to navigation cannot re-enter a remembered page. Header Back and
   Android Back follow the same page-list-item ladder; the shell handles only a
   press at its root when it owns Back.
+- The phone Settings list keeps its offset per instance while a page replaces
+  it. Its search results are their own list, so clearing the search returns the
+  list where it was. A split page keeps its item list mounted under the open
+  item instead of unmounting it, so Back returns to the item list where it was.
 - Settings links and search open the owning page before revealing an item. The
   reveal retries for a bounded number of frames because detail pages load late.
 - Tracker lookup accepts only the linked item. When issue and change-request
@@ -141,9 +145,13 @@ stores own durable state and shared caches.
 - Bounded metadata retries advance only on external request-state transitions.
   Attempt counters and inline starter functions cannot retrigger the effect;
   changing directories resets exhaustion in the first render.
-- Range-cache reservations prevent duplicate reads, release on cleanup and reject
-  stale completions. Range changes hide old values immediately with a stable
-  empty map; equivalent path revisions cannot cancel pending reads.
+- Range-cache reservations prevent duplicate reads, release when their path
+  leaves the request and reject stale completions by request identity. Range
+  changes hide old values immediately with a stable empty map; equivalent path
+  revisions cannot cancel pending reads. Completed entries whose path is no
+  longer requested are kept up to `RANGE_CACHE_IDLE_ENTRIES`, oldest dropped
+  first, so scrolling an expanded list does not retain every patch it read.
+  A hidden view requests nothing and keeps what it holds until it shows again.
 - Content polling confirms changed text with a second read before applying it,
   so a half-written file stays out of the editor. A failed read leaves the change
   pending for retry; metadata comparison tolerates sub-millisecond mtime jitter.
@@ -233,6 +241,12 @@ edge, or past it, the editor scrolls and the range follows. The click that
 ends a drag lands on whatever the pointer ended over, so each view's
 click-outside handler skips it (`isDragReleaseClick`) and the range stays.
 
+A text selection in the `FilesView` editor gets a Comment action from
+`comments/useCodeSelectionComment.tsx`: `useFileComments` passes the Files
+view's visibility as the scope that closes the action when it changes.
+`useFileEditorExtensions` adds the stable extension to the editor, so a scope
+change does not reconfigure the editor.
+
 ### Why a comment's annotation keeps one DOM node
 
 Pierre keys its annotation wrappers by index in the list, so an annotation that comes or goes rebuilds every one after it. A card is portalled into its annotation's node, so a new node would unmount the card and drop its height for a frame, which moves the diff and the scroll. `renderAnnotation` hands back the same node per annotation id, and the open comment field goes last in the list, so opening or closing it shifts nothing.
@@ -301,10 +315,11 @@ the base being resolved until the base is known; it moves to the working tree
 only once the branch is known to have no base, so the view never switches
 under the person a moment after opening (it used to open on the working tree
 and jump to Branch when the base arrived). The Git view and the pull request
-view take the same base for a new pull request and for updates
-(`useBranchPullRequestBase`): a base chosen for the branch, its open pull
-request's target, or the parent it was made on (a lower layer of a stack),
-and the worktree's own guess only when none of those answers. The Git view,
+view take the same base for a new pull request, for updates and for the
+target Re-integrate commits starts on (`useBranchPullRequestBase`): a base
+chosen for the branch, its open pull request's target, or the parent the
+server recorded or detected (a lower layer of a stack, the branch a restack
+landed on), and the worktree's own guess only when none of those answers. The Git view,
 Changes, mobile Changes and Walkthrough each ask for the branch's pull request
 themselves (`hooks/useBranchPullRequestRequest.ts`) while shown: the base
 prefers its target, and the Git header's pull request chip reads the same
@@ -318,6 +333,27 @@ working or staged diff.
 The comparison picker puts the bound remote's default branch first, without
 changing automatic base detection. Other remotes' defaults keep their place:
 a base on a remote other than the bound one is rejected.
+
+The pull request picker (`git/PullRequestComparisonSelector.tsx`: Changes,
+Walkthrough and mobile Changes) and the Git panel's list
+(`git/PullRequestListPanel.tsx`) share one filter icon,
+`git/PullRequestFilterButton.tsx`, over the panel in
+`components/references/referenceFilterPanel.tsx`. The filter and its list read
+belong to `usePullRequestComparison`. Both start at Open, so the default read
+asks for open pull requests only; All, Closed and Merged read `state=all`, and
+every page of that list keeps the state (`pullRequestListState`). On a provider
+with `advancedSearch`, a status qualifier in the search text decides the status
+as it does on the board: the host ignores the state sent with it, so the status
+group is disabled and names the qualifier, and no loaded row is dropped for its
+status. The filter
+narrows the loaded rows on the client, so a page can hold no match: Load more,
+a failed page's error and its Retry stay reachable then. Repository, author and
+label choices come from the loaded rows, and a chosen one stays listed after
+the rows that carried it are gone. The filter belongs to the folder, branch and
+repository it was chosen in, and the picker drops it with its search text when
+it closes. The filter sits inside the picker's `Command`, so the picker stops
+its key presses there: Enter on the icon would otherwise pick the highlighted
+pull request.
 
 A status read re-reads the Branch file list (one request). Each expanded file
 re-reads its patch only when its own `revision` from that listing moved
@@ -513,8 +549,8 @@ re-renders every row.
 
 The Files editor's row (`renderFileToolbar`, an `ActionToolbar`) has the actions
 the open file's type allows, the same in every mode. The row itself keeps save
-state, the mode toggle (and HTML annotation), find, comment on the file and
-full screen; go to line, symbols, line wrap, read aloud, the file's own actions
+state, the mode toggle (and HTML annotation), find and comment on the file;
+go to line, symbols, line wrap, read aloud, the file's own actions
 (open in app, copy contents, copy path, download) and auto-save live in "More
 actions". With every action on the row it ran to a dozen icons, most of them
 rarely used (maintainer, 2026-10-28). A tool the current mode cannot run opens
@@ -608,9 +644,11 @@ A percentage max-height inside auto-height wrappers let the inner viewport grow 
 
 ## Last turn scope
 
-`useLastTurnDiff` reads the last turn's per-file diff from OpenCode
+`useLastTurnDiff` reads a turn's per-file diff from OpenCode
 (`GET /api/session/:id/diff`), which compares the turn's first and last step
-snapshots. The answer moves when a step is added, when the newest step finishes
+snapshots. It reads the newest turn by default; a historical selection passes
+that turn's user-message ID as `from`. The newest turn's answer moves when a
+step is added, when the newest step finishes
 (its end snapshot is recorded then) and when the session goes idle, so those
 three key the refetch. The desktop Diff view reads it in every scope while
 shown, so the scope picker's Last turn count is current before the user picks
@@ -619,25 +657,63 @@ scope a running turn is not read, and its count shows as unknown until the
 turn ends. A failed read keeps its own error and retry, and another session's
 turn never shows while this one's loads.
 
-A changed-file chip under a reply opens Last turn, but the chip comes from the
-turn's tool calls and the scope from its snapshots, so they can disagree:
-snapshots are off, the project folder is no git repository (a repository nested
-in it still gets the edits), or a step took no snapshot. Each click therefore
-asks once (`pendingTurnDiffFile`, dropped when another session is on screen)
-whether the file is in the turn's diff. Until the list answers the session's
-current state the view shows loading; a failed read keeps its error and retry.
-A file that is there is expanded and scrolled to, on every click, since the
-chip's absolute path only matches the relative list through this request.
-A file that is not there opens Changed instead, in the repository holding the
-file, read afresh, expanded. A repository the picker drops again ends the
-attempt on the repository left on screen. Picking Last turn by hand asks
-nothing and stays there, empty or not. The phone's Changes surface
-(`apps/MobileChangesSurface.tsx`) answers the same way and opens the file's own
-diff screen, since it has no expanded list to scroll. VS Code has no Diff view
-panel: the chip reads the turn's diff once and opens the file's patch in the
-editor's own diff (`editor.openDiff` with `patch`; a file the turn deleted shows
-its old content against an empty side). A file the list does not hold opens as
-it is, and a failed read shows an error toast.
+A changed-file chip under a completed reply opens that reply's turn diff,
+scoped to its session and directory. Under the newest reply that is Last turn
+itself; an older reply's chip opens a selection of its own, labelled with the
+chip row's title (Changed files) and its own count, while Last turn in the
+picker keeps the latest turn's count. The chip comes from the turn's tool calls
+and the diff from its snapshots, so they can disagree: snapshots are off, the
+project folder is no git repository (a nested repository still gets the edits),
+or a step took no snapshot. Each click asks once (`pendingTurnDiffFile`)
+whether the file is in the selected turn's diff. The request carries the
+originating session even when another session is on screen (a pinned chat), and
+the selection persists after the request is consumed. The originating session
+only reads the turn; the panel's own session at the click owns the request and
+the selection it leaves, so a panel that moves to another session drops both,
+and the fallback to Changed below keeps going after the scope leaves the turn.
+Picking a scope drops a pending chip request as well as the selection, on
+desktop and mobile; so does picking a repository in mobile Changes. OpenCode
+reads a turn's range only from a user message, so an older reply whose display
+group a notice opened (a compaction, a wake) keeps static chips. Until the list answers the
+selected turn's state the view shows loading; a failed read keeps its error
+and retry. A listed file is expanded and scrolled to on every click, since
+the chip's absolute path only matches the relative list through this request.
+
+On desktop, a file missing from the turn diff opens Changed in the repository
+holding it, read afresh and expanded. Only a file inside a project that is not a
+repository, once discovery finds no repository in the project holding it, opens
+in the editor instead (`files/openChangedFileWithoutRepository.ts`): there is no
+working-tree diff for it. Unknown or failed discovery, a file outside the
+project and a repository-owned file the list misses (a staged-only entry) keep
+the Changed path. The open checks the file with a stat first, since the
+optional read answers a deleted file with an empty success: a deleted file
+shows the not-found toast, an empty one opens. The read belongs to the click
+that started it, from the click through discovery to the read: a newer chip
+click, leaving the session or the runtime (even to return) drops it without
+a tab, focus change or toast. A repository the picker drops again ends the
+attempt on the repository left on screen.
+
+Picking Last turn by hand clears the historical selection and shows the newest
+turn, empty or not. The phone's Changes surface (`apps/MobileChangesSurface.tsx`)
+opens the selected turn's file diff when a repository holds it. When the status
+read for the directory succeeds and the working list still has no entry, the
+phone opens a file inside the chip's session folder itself, scoped to that
+folder, and brings the Files surface forward: a project that is no repository
+and a repository-owned file the working list misses (a committed file) land
+there. A failed status read, failed repository discovery in a project that is no
+repository (its Retry stays reachable), a file outside the session folder and a file the
+open refuses end on the working-tree Changes list. The status answer and the
+file read belong to the tap that started them: a newer tap, hiding or leaving
+Changes, or picking a scope or repository drops them without a tab, toast or
+switch to Files; an iPad side panel counts as hidden once it starts closing.
+A failed status read the tap started ends on the list; a failed one it joined
+in flight is followed by one more read, since the joined one belongs to an
+earlier caller. VS Code has no
+Diff view panel: the chip reads its turn's diff once with full context and
+opens the file in the editor's own diff (`editor.openDiff` with `patch` and
+`snapshot`), both sides built from that patch, so later edits or a later
+deletion on disk never change what an older chip shows. A file the list does
+not hold opens as it is, and a failed read shows an error toast.
 
 ### Why the click is a one-shot request and not derived from the tab
 
@@ -650,6 +726,48 @@ fallback from the tab would send that person back to Changed every time.
 A read of a running step makes OpenCode capture a fresh working-copy snapshot.
 Reading on every step only to keep a count current would cost one capture per
 step of every turn while the panel is open on another scope.
+
+### Why the phone opens the file itself
+
+Desktop opens the editor only for a non-repository project whose file no
+repository holds, because its Changed view can read the repository's working
+tree afresh and show the file there. The phone's Changes surface shows a
+working-tree or turn diff and has no view of the file itself for a file neither
+list holds, so a repository-owned committed file would land on a list without
+it. The phone opens the file in the Files surface and comes forward with it,
+only when the open actually happened: a file the open refuses, such as a
+deleted one or binary content or one too large, shows its toast over the
+Changes list. Until the answer is known the chip's screen stays on loading,
+since showing the working list first flashed it before the file appeared.
+
+## Where a review comment reopens
+
+A comment's opener in the chat (`components/comments/useOpenCommentSource.ts`)
+sends a comparison comment to the git tab as a `CommentLocationRequest`
+(`lib/commentLocation.ts`): runtime, repository folder, file, line, side and
+the comparison itself. `GitView` takes it the moment the tab is on screen for
+that folder (`hooks/useTakenCommentLocation.ts`), so it leaves the shared store
+at once and never fires on a later visit, and hands it to
+`UnifiedReviewScopeView`, which answers it (`git/useReviewScopeCommentJump.ts`):
+it opens the change request, the commit by hash (past the history's first page
+too) or the branch against the recorded base, waits until that comparison is on
+screen, reveals the file and scrolls its viewer to the line. The file is loaded
+whole, because a comment's line can sit outside the hunks a patch carries.
+
+The jump ends when the line is reached, and drops instead of guessing when the
+comparison cannot be shown: the tab shows another repository than the one the
+comment was read in (the origin's `directory`; older comments name only the
+chat's folder), another branch is checked out, the recorded base is gone (no
+other base stands in for it), the change request's head moved on a host that
+serves only its current patch, the scope changes, the person picks another
+comparison, the tab is hidden, or the comparison fails or answers without the
+file. A recorded head is sent as a revision read only to hosts that keep
+revisions; elsewhere it only identifies the patch. A recorded base stays on screen while the person stays on the branch
+scope and is never written as the branch's saved base. Mobile Changes answers
+the same request through `hooks/useMobileChangesCommentNavigation.ts`, and
+shows the nested-repository state when the comment's repository is not the one
+on screen. `DiffView`, which only renders another folder's comparison, takes no
+such request.
 
 ## Pull request comparisons
 
@@ -725,7 +843,7 @@ unsaved, so an empty editor never stays stuck open.
 Files view takes the same comment from its toolbar, as a `file` draft beside
 its line comments. Its editor and cards sit between the toolbar and the
 scroller, so they stay on screen at any scroll; the CodeMirror line widgets
-filter those drafts out, and the fullscreen overlay shows them while it is open.
+filter those drafts out.
 Changes hands its PR source to walkthrough; walkthrough's Changes action opens
 PR mode with the shared selection. Picking a PR never generates a walkthrough.
 
@@ -772,6 +890,16 @@ A row under each hunk covered no code, but it striped the diff with empty
 bands and cost 2.25rem per hunk. An overlay shown at rest covered the code it
 acts on. Shown only while the user points at the hunk, it covers that line's
 end only then, and the diff keeps its rhythm.
+
+### Why the hovered line outlives its hunk anchors
+
+A refresh withdraws the anchors while the old diff stays on screen, then
+rebuilds the Pierre instance, which reports no line for a resting pointer. The
+viewer therefore listens for line hover without anchors too, keeps the line and
+matches it again when anchors arrive. Listening only while anchors exist lost
+a pointer that came to rest during the refresh: the buttons stayed hidden until
+it moved. The viewer's wrapper clears the line on pointer leave, because the
+rebuilt instance reports no leave for a line it never saw entered.
 
 ## Sticky horizontal scrollbar
 
@@ -898,6 +1026,13 @@ reports `exited`, so a tab whose process ended while the panel was closed goes
 away when it is shown. VS Code has neither tabs nor the setting and keeps the
 exited terminal.
 
+A tab started from a command in a reply (a `terminal` tab in command mode) is
+the exception: it never closes on its own, whatever the setting, since its
+output is the point of running it. When its server session is gone (a server
+restart, a close from another client), the tab stays exited with its command mode and output instead of
+going back to idle, which would start an interactive shell in it; a reload
+restores it exited too (`stores/DOCUMENTATION.md`).
+
 In the desktop app Cmd/Ctrl+W closes the shown terminal tab the same way,
 without asking, so a command still running in it ends. The key goes through
 `lib/closeTabTarget.ts`: Settings or a full page covering the chat closes
@@ -943,15 +1078,13 @@ A context zone opens, closes, expands and is dragged over an animation
 (`lib/layoutAnimation.ts`). Work a surface does inside it shows as dropped
 frames, so the heavy part waits for the end or is spread over frames.
 
-### Why the stacked diff list mounts a batch of entries per frame
+### Why the stacked diff list mounts entries in batches or near the viewport
 
-`DiffView` mounts the first `STACKED_ENTRIES_FIRST` file entries and then
-`STACKED_ENTRIES_PER_FRAME` more on each frame until the list is complete. All
-at once, the first open of an 88-file change was one 100 to 120 ms frame. A
-request to scroll to a file mounts every entry in that commit, because its
-entry may be past the limit and the alignment waits only 20 frames for it.
-Virtualizing the list was the alternative; it changes the scroller, the
-sticky headers and find, for a cost paid once per list.
+An 88-file change took a 100 to 120 ms frame when all entries mounted together.
+Smaller lists spread that one-time cost over frames. At 1,000 files and above,
+mounting every full entry can exhaust renderer memory even if every file is
+collapsed. The list keeps lightweight rows for scroll and keyboard navigation
+and mounts full entries near the viewport or while their state is in use.
 
 ### Why a file that arrives mid-animation renders after it
 

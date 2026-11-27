@@ -131,10 +131,15 @@ PDF iframes also start with an opaque origin under the packaged UI protocol. The
 
 The preload bridge exposes desktop-only APIs to the web UI through `window.__OPENCHAMBER_DESKTOP__`. Privileged commands are checked in `main.mjs`, not only in the UI.
 
-Confirmed chat application links use the local-page-gated `desktop_open_external_url`
-command and the OS protocol handler. `external-url-policy.mjs` validates schemes
-again in main, with the same exclusions as the shared UI classifier. Native
-opening failures do not fall back to a browser window for application links.
+Confirmed chat application links and mail links clicked in chat use the local-page-gated
+`desktop_open_external_url` command and the OS protocol handler. Preload exposes
+`openExternal` only on local pages, so remote-served pages cannot reach it.
+`external-url-policy.mjs` validates schemes again in main, with the same exclusions
+as the shared UI classifier, and admits `mailto:` only with RFC 6068 compose headers.
+Native opening failures do not fall back to a browser window for application or mail links.
+Automatic popup and navigation fallbacks in main and Mini Chat windows
+(`window-navigation-guards.mjs`) open only normalized `http:` and `https:` URLs
+externally; every other scheme is refused without calling `shell.openExternal`.
 
 Native menu actions reach the renderer as one DOM event per click. Main must not also send them over IPC: preload turns every IPC emit into a call to its bridge listeners and a DOM event, so the action would run again. Update-check notifications go over IPC only, for the same reason.
 
@@ -215,7 +220,7 @@ IPC results if its endpoint changes while the read is pending.
 | `app-cache.mjs` | Help > Clear Cache: drops the HTTP cache only, keeps site storage (device settings, pinned sessions, login cookies), reloads windows |
 | `session-link-gate.mjs` | Whether the main window's current document listens for session links: it does once it asks for its pending links, or after a fallback delay for a remote page that never asks. Until then links wait in the queue |
 | `pairing-deep-link.mjs` | Validates an `openchamber://connect` pairing link for the confirmation prompt. After the user confirms, the main window's renderer redeems it (`desktop_take_pending_host_actions`) with the same code as Import Link, so relay-only links pair over the E2EE tunnel. `openchamber://host/<id>` for a host with a relay leg goes through the same queue |
-| `remote-page-policy.mjs` | What remote-safe IPC accepts from and returns to another server's page: splash colour parsing, host list without credentials |
+| `remote-page-policy.mjs` | What remote-safe IPC accepts from and returns to another server's page: the commands remote pages may invoke, splash colour parsing, tray locale codes, host list without credentials |
 | `shell-environment.mjs` | Asynchronous login-shell environment discovery and shared one-shot probe |
 | `windows-app-discovery.mjs` | Windows "Open in": which apps are installed, their icons, and launch candidates. Every `where.exe` and PowerShell lookup is awaited, because a synchronous spawn per candidate froze the window for the whole scan |
 | `linux-app-discovery.mjs` | Linux "Open in": installed FreeDesktop entries, their icons, launch candidates and the chain that runs them. The generic "Terminal" id tries `xdg-terminal-exec` first with `--dir=<path>`, the only spelling the reference implementation parses. The binary runs only after its file, or the file a packaged launcher forwards to, shows support for `--dir=`, and `--print-id` runs bounded only where that file lists it, because older versions ignore that flag and `--help` and open a terminal. Explicit apps reach it only after their own entry fails. Every terminal candidate starts in the project directory; entries get it as an argument through `%f`/`%F` or a known working-directory option. A single-instance terminal without either opens in its own directory. A candidate that exits non-zero within 1 second counts as failed and the chain moves on (#6092) |
@@ -409,7 +414,7 @@ The AppImage launcher also prepends its own directories to `PATH`, `LD_LIBRARY_P
 
 Linux updates are supported when the packaged app runs from a writable AppImage or from an installed `.deb` or `.rpm`. electron-updater picks its installer from `resources/package-type`, which electron-builder writes into the packages: the AppImage is replaced in place by electron-updater. A package is downloaded by electron-updater but installed by `linux-package-install.mjs`: one `pkexec` call running `apt install` for a `.deb`, or the first of `zypper`/`dnf`/`yum`/`rpm` for an `.rpm`, so the system asks for the administrator password once. It runs asynchronously because electron-updater's installers use `spawnSync`, which freezes every window through the prompt and the install, and because its dpkg path retries a cancelled `dpkg -i` with `apt-get install -f`, a second prompt. Package installs relaunch through `linux-relaunch.mjs` instead of `app.relaunch()`: Chromium starts the relaunched process with `no_new_privs`, which every later `pkexec` refuses ("must be setuid root"), so the next update would fail without a prompt. A failed install after the backend stopped, a cancelled prompt included, relaunches the current version on every platform. Update checks, downloads, and installation report an actionable error when neither an AppImage nor a package type is found, or the AppImage is invalid or read-only; a missing release feed (`latest-linux.yml` 404 before the first Linux publish) is treated as “no update available”. Authenticated Web clients connected to the embedded Desktop Host use this same `electron-updater` check, download, and restart flow rather than a package-manager command, except on a `.deb` or `.rpm` host: its password prompt would appear only on the host's screen while its server is down, so the check reports `installBlocked: 'desktop-host'` and the install route refuses with 409, and clients tell the user to update on that computer. Release builds keep `latest-linux.yml` (x64) and `latest-linux-arm64.yml` separate; each lists that architecture's AppImage, `.deb` and `.rpm`, each updater takes the file of its own format, and `verify-update-manifest.mjs` checks every listed file against its bytes before upload. Linux updates download full files (no `.blockmap` differential channel yet).
 
-`desktop_restart` does not answer the renderer before the install is decided. On the apply-update path it calls `quitAndInstall()` and keeps the IPC call open until the app quits or `autoUpdater` emits `error`, which the platform installers do asynchronously (a rejected code signature, or a Squirrel session disabled by an earlier failure). A failed install rejects the IPC call and rolls back the quit/install flags. A failure before backend shutdown leaves the app running; one after it relaunches the current version, because the in-process server does not restart in place. A Linux package install runs its own async install in place of `quitAndInstall()` and detaches the `error` listener first, so an unrelated update-check error during the password prompt cannot relaunch the app under a running install. A still-running app after the grace period resolves the call. The installer grace period starts after backend cleanup, so a slow terminal shutdown cannot remove the error listener before installation begins.
+`desktop_restart` does not answer the renderer before the install is decided. On the apply-update path, including a countdown that reaches zero, it calls `quitAndInstall()` and keeps the IPC call open until the app quits or `autoUpdater` emits `error`, which the platform installers do asynchronously (a rejected code signature, or a Squirrel session disabled by an earlier failure). A failed install rejects the IPC call and rolls back the quit/install flags. A failure before backend shutdown leaves the app running; one after it relaunches the current version, because the in-process server does not restart in place. A Linux package install runs its own async install in place of `quitAndInstall()` and detaches the `error` listener first, so an unrelated update-check error during the password prompt cannot relaunch the app under a running install. A still-running app after the grace period resolves the call. The installer grace period starts after backend cleanup, so a slow terminal shutdown cannot remove the error listener before installation begins.
 
 ### Updater End-to-End Fixture
 
@@ -458,6 +463,19 @@ opens on macOS, Windows and Linux. It shares the readouts' 15-second freshness
 window and works while the main window is hidden or minimized without revealing
 it. The menu can open with cached usage; the renderer pushes a new tray snapshot
 when the fetch lands. No quota timer runs for the tray.
+
+The tray menu and tooltip use `tray-locales.mjs`, sharing locale normalization
+and common actions with `menu-locales.mjs`. The controller seeds the initial
+empty menu in the preferred locale before the renderer sends live state.
+The controller retains its last snapshot so `desktop_set_tray_locale` can rebuild
+labels immediately, even while session activity is idle. That command is
+remote-safe and accepts only a locale the tray has labels for, so a window
+loading its UI from a remote instance moves the tray to its language while
+`desktop_set_locale` (native menus) stays local-only. Only the window that
+published the snapshot the tray shows relabels it; a Mini Chat or another
+window's locale is kept and applied when that window publishes next. The renderer resolves
+instance and quota fallback text again when its dictionary loads; user-provided
+host and session names remain literal.
 
 ## Bundled OpenCode server
 
@@ -571,6 +589,12 @@ The server (`packages/web/server/lib/fs/ripgrep.js`) looks for ripgrep in this o
   drops session cookies (no expiry) on quit, and many sign-ins live in one, so
   before quitting they are rewritten with an expiry (`browser-panel-cookies.mjs`),
   as Chrome keeps them when it continues where you left off.
+  Pages see a plain Chrome user agent, without the `OpenChamber/` and
+  `Electron/` tokens, because some sites refuse Electron. Google's sign-in
+  hosts (`accounts.google.com`, `accounts.youtube.com`) are the exception:
+  Google rejects an embedded browser that claims to be Chrome ("This browser
+  or app may not be secure") and lets one that names Electron through, so
+  requests to those hosts get the `Electron/` token back in their header.
 - `window.open` from a page in that session (`browserPanelWindowOpenTarget`): a
   scripted popup opens as a sandboxed child window of the app window, keeping
   `window.opener`, so a Google, GitHub or SSO sign-in can post its result back;
@@ -584,8 +608,11 @@ The server (`packages/web/server/lib/fs/ripgrep.js`) looks for ripgrep in this o
   same as a target=_blank link, so the session's preload (`browser-panel-preload.cjs`, exposes nothing) marks every
   `window.open` that keeps its opener as a popup. A link aimed at a new tab is
   noopener by default and becomes a panel tab
-  (`openchamber:browser-panel-open-tab` to the renderer). Pages of an
-  isolated space keep everything in place, so nothing leaves the space's session.
+  (`openchamber:browser-panel-open-tab` to the renderer). The event carries
+  Electron's referrer URL and policy for the new tab's first load; a renderer
+  older than the shell ignores it. Pages of an isolated space keep everything in
+  place, so nothing leaves the space's session; a link loaded in place sends the
+  same referrer.
   Popups close with the window that opened them and do not count as app windows
   when closing the last one hides the app on macOS.
 
@@ -609,7 +636,7 @@ Add new native capabilities in this order:
 
 1. Add or update the `preload.mjs` bridge only if a new renderer-facing shape is needed.
 2. Add the real command handling in `main.mjs` under `openchamber:invoke`.
-3. Gate privileged commands in main process logic so remote pages cannot access local filesystem or shell capabilities. A command added to `COMMANDS_SAFE_FOR_REMOTE` takes input from, and answers, another server's page: parse what it stores and strip credentials from what it returns (`remote-page-policy.mjs`). Splash colours, for example, end up in the trusted splash page, and `desktop_hosts_get` hands remote pages the host list without tokens or auth headers.
+3. Gate privileged commands in main process logic so remote pages cannot access local filesystem or shell capabilities. A command added to `COMMANDS_SAFE_FOR_REMOTE` (`remote-page-policy.mjs`) takes input from, and answers, another server's page: parse what it stores and strip credentials from what it returns (`remote-page-policy.mjs`). Splash colours, for example, end up in the trusted splash page, and `desktop_hosts_get` hands remote pages the host list without tokens or auth headers.
 4. Keep shared UI runtime contracts in `packages/ui` and server/runtime APIs in `packages/web` when the behavior is not inherently native.
 
 ## Update channels and Canary

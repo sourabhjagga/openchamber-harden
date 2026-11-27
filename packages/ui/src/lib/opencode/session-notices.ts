@@ -8,15 +8,17 @@ import { readDispatchedSessionResult } from "./dispatched-session"
 import { readWorkflowReport } from "@/lib/workflows/report"
 import { readShareAnswer } from "@/lib/share-pages/answer"
 import type { Message, Metadata, Part, ToolPart } from "./model"
+import { LEAD_ANSWER_METADATA_KEY, leadReplySchema } from "@/lib/sessionLead"
 import { isSubagentCancellationNote, readSubagentRun } from "./subagent-run"
 
 const pullRequestNoticeSchema = z.object({
   kind: z.literal("pull-request"),
   url: z.string().min(1),
   number: z.number(),
-  events: z.array(z.enum(["merged", "closed", "checks-failed", "checks-passed", "conflict", "behind", "activity"])).min(1),
+  events: z.array(z.enum(["merged", "closed", "checks-failed", "checks-passed", "conflict", "behind", "activity", "queue-removed"])).min(1),
   failedChecks: z.array(z.string()),
   authors: z.array(z.string()),
+  queueRemovalReason: z.string().optional(),
   text: z.string(),
 })
 
@@ -28,6 +30,7 @@ const extensionWaitNoticeSchema = z.object({
   outcome: z.enum(["fired", "ended"]),
   summary: z.string(),
   timerMinutes: z.number().optional(),
+  scriptMinutes: z.number().optional(),
   text: z.string(),
 })
 
@@ -46,6 +49,16 @@ const pageAnswerNoticeSchema = z.object({
 
 export type PageAnswerNotice = z.infer<typeof pageAnswerNoticeSchema>
 
+const leadAnswerNoticeSchema = z.object({
+  kind: z.literal("lead-answer"),
+  answers: z.array(z.object({ question: z.string(), answer: z.string() })),
+  suggestions: z.array(z.object({ item: z.string(), accepted: z.boolean() })),
+  text: z.string(),
+})
+const leadHandoverNoticeSchema = z.object({ kind: z.literal("lead-handover"), title: z.string(), text: z.string() })
+
+export type LeadNotice = z.infer<typeof leadAnswerNoticeSchema> | z.infer<typeof leadHandoverNoticeSchema>
+
 export type SessionNotice =
   | { kind: "plugin"; label: string; text: string }
   | { kind: "restart"; text: string }
@@ -54,6 +67,7 @@ export type SessionNotice =
   | PullRequestNotice
   | ExtensionWaitNotice
   | PageAnswerNotice
+  | LeadNotice
 
 const HIDDEN_DESCRIPTIONS = new Set(["ACP embedded context"])
 
@@ -72,7 +86,7 @@ const readMove = (message: Extract<Message, { role: "system" }>): SessionNotice 
   return { kind: "moved", folder, text: message.text }
 }
 
-const pullRequestWakeSchema = pullRequestNoticeSchema.pick({ url: true, events: true }).extend({
+const pullRequestWakeSchema = pullRequestNoticeSchema.pick({ url: true, events: true, queueRemovalReason: true }).extend({
   source: z.literal("openchamber-pr-watch"),
   failedChecks: z.array(z.string()).default([]),
   authors: z.array(z.string()).default([]),
@@ -83,8 +97,10 @@ const readPullRequestWake = (text: string, metadata: Metadata): PullRequestNotic
   const parsed = pullRequestWakeSchema.safeParse(metadata)
   const number = text.match(PULL_REQUEST_NUMBER)?.[1]
   if (!parsed.success || !number) return undefined
-  const { url, events, failedChecks, authors } = parsed.data
-  return { kind: "pull-request", url, number: Number(number), events, failedChecks, authors, text }
+  const { url, events, failedChecks, authors, queueRemovalReason } = parsed.data
+  const notice: PullRequestNotice = { kind: "pull-request", url, number: Number(number), events, failedChecks, authors, text }
+  if (queueRemovalReason) notice.queueRemovalReason = queueRemovalReason
+  return notice
 }
 
 const extensionWaitWakeSchema = extensionWaitNoticeSchema.pick({ subject: true, outcome: true, summary: true }).extend({
@@ -98,10 +114,11 @@ const readExtensionWaitWake = (text: string, metadata: Metadata): ExtensionWaitN
   const parsed = extensionWaitWakeSchema.safeParse(metadata)
   if (!parsed.success) return undefined
   const { subject, outcome, summary, extension, type, minutes } = parsed.data
-  const builtInTimer = extension === null && type === "timer" && minutes !== undefined
-  return builtInTimer
-    ? { kind: "extension-wait", subject, outcome, summary, timerMinutes: minutes, text }
-    : { kind: "extension-wait", subject, outcome, summary, text }
+  if (extension === null && minutes !== undefined) {
+    if (type === "timer") return { kind: "extension-wait", subject, outcome, summary, timerMinutes: minutes, text }
+    if (type === "script") return { kind: "extension-wait", subject, outcome, summary, scriptMinutes: minutes, text }
+  }
+  return { kind: "extension-wait", subject, outcome, summary, text }
 }
 
 const pageAnswerWakeSchema = z.object({
@@ -139,9 +156,21 @@ const readPageAnswerWake = (text: string, metadata: Metadata): PageAnswerNotice 
   return { kind: "page-answer", title, outcome, summary, details, text }
 }
 
+const leadReplyMetadataSchema = z.object({ [LEAD_ANSWER_METADATA_KEY]: leadReplySchema })
+const leadHandoverMetadataSchema = z.object({ source: z.literal("openchamber-lead-handover"), title: z.string() })
+
+const readLeadNotice = (text: string, metadata: Metadata): LeadNotice | undefined => {
+  const reply = leadReplyMetadataSchema.safeParse(metadata).data?.[LEAD_ANSWER_METADATA_KEY]
+  if (reply) return { kind: "lead-answer", answers: reply.answers, suggestions: reply.suggestions, text }
+  const handover = leadHandoverMetadataSchema.safeParse(metadata).data
+  return handover ? { kind: "lead-handover", title: handover.title, text } : undefined
+}
+
 export function readSessionNotice(message: Message): SessionNotice | undefined {
   if (message.role === "system") return readMove(message)
   if (message.role !== "synthetic") return undefined
+  const lead = readLeadNotice(message.text, message.metadata ?? {})
+  if (lead) return lead
   const description = message.description?.trim()
   if (!description) return undefined
   const metadata = message.metadata ?? {}
@@ -171,6 +200,8 @@ const noticeSchema = z.discriminatedUnion("kind", [
   pullRequestNoticeSchema,
   extensionWaitNoticeSchema,
   pageAnswerNoticeSchema,
+  leadAnswerNoticeSchema,
+  leadHandoverNoticeSchema,
 ])
 
 const noticePartMetadataSchema = z.object({ [NOTICE_METADATA_KEY]: noticeSchema })

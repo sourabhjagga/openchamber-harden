@@ -148,6 +148,7 @@ export const ComposerDictation: React.FC<ComposerDictationProps> = ({
     } = dictation;
     const recordingBlink = useWaitingBlink(status === 'recording');
 
+    const shown = supported && (dictationEnabled || status !== 'idle');
     const isModelDownloading = status === 'recording' && errorReason === 'model_download_in_progress';
     const downloadPercent = useModelDownloadProgress(isModelDownloading);
 
@@ -196,10 +197,11 @@ export const ComposerDictation: React.FC<ComposerDictationProps> = ({
     }, [status, onActiveChange]);
 
     React.useEffect(() => {
-        if (!supported || !dictationEnabled) return;
+        if (!shown) return;
         const marker = composerMarkerRef.current;
         const onToggle = (event: Event) => {
-            const requestedForm = (event as CustomEvent<{ composer?: HTMLFormElement }>).detail?.composer;
+            const detail = (event as CustomEvent<{ composer?: HTMLFormElement; startOnly?: boolean }>).detail;
+            const requestedForm = detail?.composer;
             if (requestedForm && (!marker || !requestedForm.contains(marker))) return;
             const targetForm = requestedForm
                 ?? document.activeElement?.closest('form')
@@ -209,20 +211,20 @@ export const ComposerDictation: React.FC<ComposerDictationProps> = ({
             event.stopImmediatePropagation();
             if (statusRef.current === 'idle') {
                 startRecording();
-            } else if (statusRef.current === 'recording') {
+            } else if (statusRef.current === 'recording' && !detail?.startOnly) {
                 confirmWith(dictationAutoSend ? 'send' : 'insert');
             }
         };
         window.addEventListener('openchamber:dictation-toggle', onToggle);
         return () => window.removeEventListener('openchamber:dictation-toggle', onToggle);
-    }, [supported, dictationEnabled, startRecording, confirmWith, dictationAutoSend]);
+    }, [shown, startRecording, confirmWith, dictationAutoSend]);
 
     React.useEffect(() => {
         const marker = composerMarkerRef.current;
         return () => {
             if (recordingOwner === marker) recordingOwner = null;
         };
-    }, [supported, dictationEnabled]);
+    }, [shown]);
 
     React.useEffect(() => {
         if (status !== 'recording') {
@@ -321,7 +323,7 @@ export const ComposerDictation: React.FC<ComposerDictationProps> = ({
         }
     }, [isActiveStatus]);
 
-    if (!supported || !dictationEnabled) {
+    if (!shown) {
         return null;
     }
 

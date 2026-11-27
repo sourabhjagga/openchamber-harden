@@ -25,7 +25,7 @@ type PersistedChatDraftEnvelope = {
   drafts: Record<string, PersistedChatDraft>;
 };
 
-const STORAGE_KEY = 'openchamber.chatDrafts.v2';
+export const CHAT_DRAFTS_STORAGE_KEY = 'openchamber.chatDrafts.v2';
 const MAX_DRAFTS = 50;
 const storage = getDeferredSafeStorage();
 const deletionListeners = new Set<(identity: ChatDraftIdentity) => void>();
@@ -58,7 +58,7 @@ export const getChatDraftIdentityKey = (identity: ChatDraftIdentity): string =>
   JSON.stringify([identity.runtimeKey, identity.directory, identity.sessionId]);
 
 const readEnvelope = (): PersistedChatDraftEnvelope => {
-  const raw = storage.getItem(STORAGE_KEY);
+  const raw = storage.getItem(CHAT_DRAFTS_STORAGE_KEY);
   if (raw === cachedRawEnvelope && cachedEnvelope) return cachedEnvelope;
   try {
     const parsed = JSON.parse(raw ?? '') as Partial<PersistedChatDraftEnvelope>;
@@ -82,7 +82,7 @@ const readEnvelope = (): PersistedChatDraftEnvelope => {
     cachedEnvelope = { version: 2, drafts };
     return cachedEnvelope;
   } catch {
-    storage.removeItem(STORAGE_KEY);
+    storage.removeItem(CHAT_DRAFTS_STORAGE_KEY);
     cachedRawEnvelope = null;
     cachedEnvelope = { version: 2, drafts: {} };
     return cachedEnvelope;
@@ -94,7 +94,7 @@ const writeEnvelope = (envelope: PersistedChatDraftEnvelope): void => {
   cachedRawEnvelope = serialized;
   cachedEnvelope = envelope;
   countSyncPersistenceSerialization(serialized);
-  storage.setItem(STORAGE_KEY, serialized);
+  storage.setItem(CHAT_DRAFTS_STORAGE_KEY, serialized);
 };
 
 export const readChatDraft = (identity: ChatDraftIdentity | null): ChatDraftSnapshot => {
@@ -105,9 +105,20 @@ export const readChatDraft = (identity: ChatDraftIdentity | null): ChatDraftSnap
     : { text: '', confirmedMentions: new Set() };
 };
 
+const ownSlotWorkDrafts = new Set<string>();
+
+export const keepWorkDraftOwnSlot = (workDraftId: string): void => {
+  ownSlotWorkDrafts.add(workDraftId);
+};
+
+export const workDraftKeepsOwnSlot = (workDraftId: string | null | undefined): boolean => (
+  Boolean(workDraftId && ownSlotWorkDrafts.has(workDraftId))
+);
+
 export const readChatDraftClaimingFolderDraft = (identity: ChatDraftIdentity | null): ChatDraftSnapshot => {
   const saved = readChatDraft(identity);
-  if (!identity || workDraftIdOfComposerKey(identity.sessionId) === null || saved.text) return saved;
+  const workDraftId = workDraftIdOfComposerKey(identity?.sessionId);
+  if (!identity || workDraftId === null || saved.text || workDraftKeepsOwnSlot(workDraftId)) return saved;
   const folderIdentity = { ...identity, sessionId: null };
   const folderDraft = readChatDraft(folderIdentity);
   if (!folderDraft.text) return saved;

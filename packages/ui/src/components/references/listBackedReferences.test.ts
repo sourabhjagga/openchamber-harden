@@ -120,6 +120,10 @@ describe('list-backed references', () => {
           commits: [{ sha: 'aaa', headline: 'first', authorName: 'Sam', committedAt: '2025-12-31', url: null }],
           commitsComplete: false,
           verdicts: [{ state: 'approved', createdAt: '2026-01-15', url: 'v' }],
+          reviewerStates: [
+            { user: { ...identity, id: '7', username: 'ann', avatarUrl: 'https://gitlab.com/ann.png' }, state: 'approved' },
+            { user: { ...identity, id: '8', username: 'bo' }, state: 'pending' },
+          ],
         };
       },
     }), context, page.items[0]!);
@@ -130,6 +134,92 @@ describe('list-backed references', () => {
     expect(detail.pull).toMatchObject({ additions: 5, deletions: 1, changedFiles: 2, checks: { state: 'success' } });
     // Only the newest commits came, so the total is unknown.
     expect(detail.pull).toMatchObject({ commits: [{ sha: 'aaa', headline: 'first', author: null, authorName: 'Sam' }], commitTotal: null });
+    expect(detail.pull?.reviewerStates).toEqual([
+      { id: '7', login: 'ann', avatarUrl: 'https://gitlab.com/ann.png', state: 'approved' },
+      { id: '8', login: 'bo', state: 'pending' },
+    ]);
+  });
+
+  test('the Board preview reads an issue, and its mentions, through issueGet', async () => {
+    const page = await fetchListBackedReferencePage(reads(), context, provider, 'issue', DEFAULT_REPOSITORY_FILTER, '', null);
+    if (page.kind !== 'page' || !page.items[0]) throw new Error('expected a page');
+    let askedReferences: boolean | undefined;
+    const detail = await fetchListBackedReferenceDetail(reads({
+      issueGet: async (_context, _number, _project, options) => {
+        askedReferences = options?.includeReferences;
+        return {
+          ...issue,
+          references: [{
+            kind: 'issue', number: 9, title: 'Elsewhere', url: 'https://gitlab.com/group/sub/app/-/issues/9',
+            repo: 'group/sub/app', createdAt: '2026-01-03T00:00:00Z', author: { login: 'sam' }, willCloseTarget: false,
+          }],
+        };
+      },
+      issueComments: async () => [{ ...identity, id: 'c1', url: 'u', body: 'A note', createdAt: '2026-01-02T00:00:00Z' }],
+    }), context, page.items[0], { crossReferences: true });
+
+    expect(askedReferences).toBe(true);
+    expect(detail.comments.map((comment) => comment.body)).toEqual(['A note']);
+    expect(detail.references).toEqual([{
+      kind: 'issue', number: 9, title: 'Elsewhere', url: 'https://gitlab.com/group/sub/app/-/issues/9',
+      repo: 'group/sub/app', createdAt: '2026-01-03T00:00:00Z', author: { login: 'sam' }, willCloseTarget: false,
+    }]);
+  });
+
+  test('a failed mention read keeps the comments, and a failed comment read still fails', async () => {
+    const page = await fetchListBackedReferencePage(reads(), context, provider, 'issue', DEFAULT_REPOSITORY_FILTER, '', null);
+    if (page.kind !== 'page' || !page.items[0]) throw new Error('expected a page');
+    const note = { ...identity, id: 'c1', url: 'u', body: 'A note', createdAt: '2026-01-02T00:00:00Z' };
+    const detail = await fetchListBackedReferenceDetail(reads({
+      issueGet: async () => { throw new Error('timeline unavailable'); },
+      issueComments: async () => [note],
+    }), context, page.items[0], { crossReferences: true });
+    expect(detail.comments.map((comment) => comment.body)).toEqual(['A note']);
+    expect(detail).not.toHaveProperty('references');
+    // Nobody read the set, so it is unknown and not empty.
+    expect(detail).not.toHaveProperty('assignees');
+
+    await expect(fetchListBackedReferenceDetail(reads({
+      issueComments: async () => { throw new Error('comments unavailable'); },
+    }), context, page.items[0], { crossReferences: true })).rejects.toThrow('comments unavailable');
+  });
+
+  test('previews outside the Board read the issue for its state, and never ask for mentions', async () => {
+    const issues = await fetchListBackedReferencePage(reads(), context, provider, 'issue', DEFAULT_REPOSITORY_FILTER, '', null);
+    const pulls = await fetchListBackedReferencePage(reads(), context, provider, 'pull', DEFAULT_REPOSITORY_FILTER, '', null);
+    if (issues.kind !== 'page' || !issues.items[0] || pulls.kind !== 'page' || !pulls.items[0]) throw new Error('expected pages');
+    let issueReads = 0;
+    let askedReferences: boolean | undefined;
+    const quiet = reads({
+      issueGet: async () => { issueReads += 1; return issue; },
+      changeRequestContext: async (_context, _number, options) => {
+        askedReferences = options?.includeReferences;
+        // A provider may send mentions nobody asked for.
+        return {
+          identity, project, changeRequest: mergeRequest, issueComments: [], reviewComments: [], files: [],
+          references: [{ kind: 'issue', number: 9, url: 'https://gitlab.com/group/sub/app/-/issues/9', createdAt: null }],
+        };
+      },
+    });
+    await fetchListBackedReferenceDetail(quiet, context, issues.items[0]);
+    const pullDetail = await fetchListBackedReferenceDetail(quiet, context, pulls.items[0]);
+    expect(issueReads).toBe(1);
+    expect(askedReferences).toBeUndefined();
+    expect(pullDetail).not.toHaveProperty('references');
+    await fetchListBackedReferenceDetail(quiet, context, pulls.items[0], { crossReferences: true });
+    expect(askedReferences).toBe(true);
+  });
+
+  test('an issue read carries the assignee set, an empty one included, and leaves one the host did not answer unknown', async () => {
+    const page = await fetchListBackedReferencePage(reads(), context, provider, 'issue', DEFAULT_REPOSITORY_FILTER, '', null);
+    if (page.kind !== 'page' || !page.items[0]) throw new Error('expected a page');
+    const reference = page.items[0];
+    const read = (answer: Issue) => fetchListBackedReferenceDetail(reads({ issueGet: async () => answer }), context, reference);
+    const assigned = await read({ ...issue, assignees: [{ ...identity, id: '7', username: 'ann' }], writeAccess: false });
+    expect(assigned.assignees).toMatchObject([{ id: '7', login: 'ann' }]);
+    expect(assigned.writeAccess).toBe(false);
+    expect((await read({ ...issue, assignees: [] })).assignees).toEqual([]);
+    expect(await read(issue)).not.toHaveProperty('assignees');
   });
 
   test('a GitLab note carries its id and write capabilities into the preview', async () => {
@@ -143,6 +233,8 @@ describe('list-backed references', () => {
       }),
     }), context, page.items[0]);
     expect(detail.comments[0]).toMatchObject({ id: 'n1', canUpdate: true, canDelete: false });
+    // A host that says nothing about reviewer state leaves the field absent.
+    expect(detail.pull).not.toHaveProperty('reviewerStates');
 
     // A note the host says nothing about keeps its id and no capabilities, so the buttons stay.
     const silent = await fetchListBackedReferenceDetail(reads({
@@ -160,7 +252,7 @@ describe('list-backed references', () => {
   test('a thread reads as its first note with the answers under it', async () => {
     const page = await fetchListBackedReferencePage(reads(), context, provider, 'pull', DEFAULT_REPOSITORY_FILTER, '', null);
     if (page.kind !== 'page' || !page.items[0]) throw new Error('expected a page');
-    const thread = (first: boolean) => ({ id: 'abc', resolved: true, resolvable: true, first });
+    const thread = (first: boolean) => ({ id: 'abc', resolved: true, resolvable: true, first, canResolve: true, canReply: true });
     const detail = await fetchListBackedReferenceDetail(reads({
       changeRequestContext: async () => ({
         identity, project, changeRequest: mergeRequest,
@@ -175,7 +267,45 @@ describe('list-backed references', () => {
       }),
     }), context, page.items[0]);
     expect(detail.comments.map((comment) => comment.body)).toEqual(['Rename', 'Plain', 'Orphan']);
-    expect(detail.comments[0]?.thread).toMatchObject({ id: 'abc', resolved: true, canResolve: true, canReply: true, replies: [{ body: 'Done' }] });
+    expect(detail.comments[0]?.thread).toMatchObject({ id: 'abc', resolved: true, outdated: false, canResolve: true, canReply: true, replies: [{ body: 'Done' }] });
+  });
+
+  test('keeps an outdated thread, drops its old line, and leaves unknown permissions to the host', async () => {
+    const page = await fetchListBackedReferencePage(reads(), context, provider, 'pull', DEFAULT_REPOSITORY_FILTER, '', null);
+    if (page.kind !== 'page' || !page.items[0]) throw new Error('expected a page');
+    // No canResolve or canReply: a permission read that failed or ran past 100 threads.
+    const outdated = { id: 'abc', resolved: false, resolvable: true, first: true, outdated: true };
+    const denied = { id: 'def', resolved: false, resolvable: true, first: true, canResolve: false, canReply: false };
+    const detail = await fetchListBackedReferenceDetail(reads({
+      changeRequestContext: async () => ({
+        identity, project, changeRequest: mergeRequest,
+        issueComments: [],
+        reviewComments: [
+          { ...identity, id: 'n1', url: 'u1', body: 'Old', createdAt: '2026-01-01', path: 'a.ts', line: 2, thread: outdated },
+          { ...identity, id: 'n2', url: 'u2', body: 'Locked', createdAt: '2026-01-02', path: 'a.ts', line: 3, thread: denied },
+        ],
+        files: [],
+      }),
+    }), context, page.items[0]);
+    expect(detail.comments[0]?.line).toBeNull();
+    expect(detail.comments[0]?.thread).toMatchObject({ outdated: true, canResolve: true, canReply: true });
+    expect(detail.comments[1]?.thread).toMatchObject({ canResolve: false, canReply: false });
+  });
+
+  test("carries the context's reviews, and leaves them out when the host does not send them", async () => {
+    const page = await fetchListBackedReferencePage(reads(), context, provider, 'pull', DEFAULT_REPOSITORY_FILTER, '', null);
+    if (page.kind !== 'page' || !page.items[0]) throw new Error('expected a page');
+    const reviews = [
+      { id: 'R1', state: 'approved' as const, author: { login: 'mona' }, submittedAt: null },
+      { id: 'R2', state: 'dismissed' as const, author: { login: 'hubot' }, submittedAt: '2026-01-02T00:00:00Z' },
+    ];
+    const detail = await fetchListBackedReferenceDetail(reads({
+      changeRequestContext: async () => ({ identity, project, changeRequest: mergeRequest, issueComments: [], reviewComments: [], files: [], reviews }),
+    }), context, page.items[0]);
+    expect(detail.pull?.reviews).toEqual(reviews);
+
+    const silent = await fetchListBackedReferenceDetail(reads(), context, page.items[0]);
+    expect('reviews' in (silent.pull ?? {})).toBe(false);
   });
 
   test('merge request rows carry their labels', async () => {

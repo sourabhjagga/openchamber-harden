@@ -58,6 +58,20 @@ rows consume these controls; they do not implement their security decisions.
   state. Failed setup is a warning while the space otherwise works; stopped is a
   resting state. A single status mark takes the highest severity and exposes the
   full explanation and repair in a tooltip or the phone's actions sheet.
+- The session header names the space a session works in, with its icon, where it
+  would otherwise name the branch, since a space's branch is the project's.
+- "Run setup again" is offered only in a project with setup commands. The menu
+  reads the project's setup each time it opens; a failed read offers the action.
+- "Start and send" on the stopped-space toast starts the space and holds one send
+  for the composer it was pressed in (`lib/spaces/space-send.ts`). The send goes
+  once the host lists the space running, only with the model shown when it was
+  pressed. Lost access to that model shows the refusal, and a composer showing another
+  model by then says so; both keep the text. Another draft on screen or a failed
+  start drops the send and keeps the text. With no model shown, it only starts.
+- Model pickers of a space end with "Grant access" (`useSpaceModelPicker`), which
+  closes the picker, opens the access dialog and opens the picker again after it. A
+  stopped space's row says to start it, and opens the same dialog, which has Start.
+  A space being made, gone or unreachable has no row.
 
 ## Decisions
 
@@ -70,3 +84,17 @@ only open it, so a list interaction cannot delete the space directly.
 
 A square status glyph reads as a Stop button. The word uses the row's time slot,
 while the tooltip and phone sheet expose the available Start action.
+
+### Why "Run setup again" stays hidden until the setup read answers
+
+An item that appears late pushes Stop and Delete down, which a user aiming for
+Stop survives. An item shown first and dropped after the read would pull Delete up
+under the cursor, so the menu waits for the answer and keeps no cache between openings.
+
+### Why "Start and send" waits on composer state and not on the start's promise
+
+A started space's session loads and can put back its own model for a moment, and a
+send right after the start went out with whatever the composer held. The held send
+runs from an effect once the composer is ready, and the send itself compares the
+model with the one shown at the press. Replacing the model there, as before, sent
+to a model the user never saw.

@@ -5,7 +5,10 @@ import { isString } from '../shared/guards.js';
 import { OpenChamberControlError, controlErrorFields } from './error.js';
 import { createPageAnswers } from './render-page.js';
 import { createSecretRuns } from './secret-run.js';
-import type { ActionContext } from './contracts.js';
+import type { SavedSecretStore } from './secret-run.js';
+import { EnvironmentConflictError } from '../environment/store.js';
+import type { EnvironmentStore } from '../environment/store.js';
+import type { ActionContext, ControlInput } from './contracts.js';
 
 interface SecretInput {
   label?: unknown;
@@ -20,6 +23,19 @@ export interface SecretAnswerInput {
   value?: unknown;
   values?: unknown;
   remember?: unknown;
+  save?: unknown;
+  saveGlobally?: unknown;
+  saved?: unknown;
+  env?: unknown;
+}
+
+interface SecretForgetInput {
+  saved?: unknown;
+}
+
+interface SavedSecretsOptions {
+  store: Pick<EnvironmentStore, 'projectSecrets' | 'userSecrets' | 'updateUser' | 'updateProject' | 'removeSecrets'>;
+  projectIdFor: (directory: string) => Promise<string | null>;
 }
 
 interface SecretContext extends ActionContext {
@@ -39,6 +55,7 @@ interface SecretRequestsOptions {
   onWaitChange?: NonNullable<Parameters<typeof createPageAnswers>[0]>['onWaitChange'];
   hasUnreadChat?: (sessionId: string) => Promise<boolean>;
   leases?: Parameters<typeof createSecretRuns>[0]['leases'];
+  saved?: Parameters<typeof createSecretRuns>[0]['saved'];
   runCommand?: Parameters<typeof createSecretRuns>[0]['run'];
 }
 
@@ -53,6 +70,8 @@ const DECLINED_NOTE = "The user declined to give this secret. Continue without i
 const CHAT_SENT_EARLIER_NOTE = "The card did not wait: the user had already written in the chat before it appeared, and that message follows this result. Continue from that message; ask for the secret again only if it still fits.";
 
 export const SECRET_REQUEST_CLOSED_IN_CHAT_NOTE = "The user wrote in the chat before the call finished; their message follows this result. If the card was still waiting, they gave no secret; if they pasted one in the chat, tell them to rotate it, since the chat keeps it. A command secret.run had started was stopped.";
+
+export const SECRET_CONNECTION_LOST_NOTE = "The connection to OpenChamber was lost before this call finished, so its card is closed and no result came back. If secret.run had already started its command, that command may have finished or may still be running. Don't call this again on your own: say what is blocked and end your turn; the user can ask you to continue.";
 
 const NOT_WAITING_MESSAGE = 'This request is no longer waiting for a secret';
 
@@ -88,9 +107,31 @@ export const createSecretFiles = ({ directory, now = Date.now, fsPromises = fs }
   return { write, remove, sweep };
 };
 
-export const createSecretRequests = ({ isEnabled, files, onWaitChange, hasUnreadChat = async () => false, leases, runCommand }: SecretRequestsOptions) => {
+export const createSavedSecrets = ({ store, projectIdFor }: SavedSecretsOptions): SavedSecretStore => ({
+  read: async (directory) => {
+    const projectId = await projectIdFor(directory);
+    return { projectId, project: projectId ? store.projectSecrets(projectId) : {}, global: store.userSecrets() };
+  },
+  write: async (scope, projectId, patch) => {
+    if (scope === 'global') await store.updateUser({ secrets: patch });
+    else if (projectId) await store.updateProject(projectId, { secrets: patch });
+    else throw new OpenChamberControlError('This session is not in a project', 400);
+  },
+  remove: async (projectId, expected) => {
+    try {
+      await store.removeSecrets(projectId, expected);
+    } catch (error) {
+      if (error instanceof EnvironmentConflictError) {
+        throw new OpenChamberControlError(`${error.message} on this card, so nothing was forgotten`, 409);
+      }
+      throw error;
+    }
+  },
+});
+
+export const createSecretRequests = ({ isEnabled, files, onWaitChange, hasUnreadChat = async () => false, leases, saved, runCommand }: SecretRequestsOptions) => {
   const waits = createPageAnswers({ onWaitChange });
-  const runs = createSecretRuns({ waits, hasUnreadChat, leases, run: runCommand });
+  const runs = createSecretRuns({ waits, hasUnreadChat, leases, saved, run: runCommand });
 
   const assertEnabled = async () => {
     if (!await isEnabled()) {
@@ -103,9 +144,9 @@ export const createSecretRequests = ({ isEnabled, files, onWaitChange, hasUnread
     return runs.execute(input, options);
   };
 
-  const forget = async (sessionId: string | null) => {
+  const forget = async (input: SecretForgetInput, call: SecretContext = {}) => {
     await assertEnabled();
-    return runs.forget(sessionId);
+    return runs.forget({ includeSaved: input.saved === true }, call);
   };
 
   const request = async (input: SecretInput, { sessionId, callId, directory, signal }: SecretContext = {}) => {
@@ -193,5 +234,18 @@ export const createSecretRequests = ({ isEnabled, files, onWaitChange, hasUnread
     return asked;
   };
 
-  return { request, run, forget, answer, fields, release: waits.release };
+  const forgetSaved = async (input: Pick<SecretAnswerInput, 'sessionId' | 'callId' | 'env'> = {}) => {
+    const card = await runs.forgetSaved(readText(input.sessionId), readText(input.callId), readText(input.env));
+    if (!card) throw new OpenChamberControlError(NOT_WAITING_MESSAGE, 404);
+    return card;
+  };
+
+  const execute = (action: string, input: ControlInput, call: SecretContext & { authorized?: boolean }) => {
+    if (action === 'secret.run') return run(input, call);
+    if (action === 'secret.forget') return forget(input, call);
+    if (action === 'secret.request') return request(input, call);
+    throw new OpenChamberControlError(`Unsupported OpenChamber action: ${action}`, 400);
+  };
+
+  return { execute, request, run, forget, answer, fields, forgetSaved, release: waits.release };
 };

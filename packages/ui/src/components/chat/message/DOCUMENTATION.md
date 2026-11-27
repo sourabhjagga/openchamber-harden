@@ -38,14 +38,38 @@ turn projection and scroll-follow policy.
   its voice overlay owns focus. Mobile composer comment mode keeps the quote
   until attach, cancel or a scope change; changing sessions or starting a new
   draft closes the menu even when no selection event fires.
+- An open desktop comment on message text follows its message when the timeline
+  remounts the body in another row, as when a working step becomes the final
+  answer: the leaving menu hands its quote, typed text and pasted images to the
+  next menu of the same session and message that can resolve the quote
+  (`selectionCommentHandoff.ts`), within two seconds; every leave and take
+  drops the drafts past that deadline, so abandoned ones do not pile up. The next menu takes the draft in a
+  passive effect, because it renders inside the body whose ref it reads and
+  React attaches that ref after the menu's layout effects. A menu hidden with
+  its session and shown again does not take back its own draft, so hiding
+  still closes the comment.
 - Attachment focus belongs to the column's composer before comment images are
   attached. Images from an abandoned comment never enter the composer.
 - Hidden user continuations are determined by display normalization, keeping
   neighbouring visible turns continuous. Linked-item display parts preserve
   their context identity and stay client-only; their backing data stays outside
   the ordinary file shape. Provider descriptor changes refresh chip labels.
-- Message comparison includes tool output, synthetic shell-action state and
-  compaction summaries, so streamed state changes reach memoized rows.
+- Message comparison includes assistant error identity, tool output, synthetic
+  shell-action state, pending inbox state and compaction summaries, so
+  error-only, delivery-only and streamed changes reach memoized rows.
+- A steered prompt (Steer, or Send now from the queue) that OpenCode still
+  holds in the inbox (`isWaitingSteer`: `pending` with the client-only `steer`
+  mark from the optimistic send or the inbox item's `steer` delivery) hides
+  history-only actions (revert, fork, context pin) and the enqueue timestamp
+  until delivery, and keeps local actions (copy, save as snippet, selection)
+  available. Once the steer has waited past 1.5 seconds, counted
+  from the creation time the row first rendered with (`useShownSteerWait`), its
+  bubble gets a dashed border and its live region, mounted while the steer is
+  pending, says it is waiting; after a reload a long-held steer gets both at
+  once. A later echo with a server-stamped time does not move the deadline, so
+  clock skew cannot skip or restart the grace period.
+  Delivery clears both in the same render. An ordinary Send keeps its usual
+  bubble however long the inbox holds it: `pending` alone never changes it.
 - Image preview measurements belong to their URL. An effect-based reset can
   race the load event of a cached image and leave the viewer incorrectly sized.
 - A quote popover's shadow belongs to the outer box that hugs its card. Keeping
@@ -56,6 +80,24 @@ turn projection and scroll-follow policy.
   in [message parts](parts/DOCUMENTATION.md#turn-footer-copy-and-image).
 
 ## Decisions
+
+### Why a steer's wait shows after a grace period and on the bubble
+
+Most steers reach the agent at its next step, within a second, so marking every
+steer at once flashed a status on nearly every follow-up. The mark waits out
+1.5 seconds and then changes the bubble's border to dashed. The
+earlier text row under the bubble added a line that came and went, and a border
+change moves nothing in the layout.
+
+### Why the waiting outline is an SVG path and not border-style: dashed
+
+A 1px `dashed` border draws dashes a few pixels long, which read as dots, and the
+browser fits them to each side separately. `SteerWaitOutline` draws one path
+around the bubble with its measured corner radii, the small tail corner
+included, and sets `pathLength` to a whole number of dash-and-gap tiles, so the
+dashes run continuously around the corners and the pattern closes without a
+seam. A CSS mask over a solid border was tried first; it can only stripe each
+side on its own.
 
 ### Why HTTP Mermaid sources use runtime URL classification
 
@@ -121,6 +163,19 @@ own layer with `translateZ(0)` adds GPU tiles without improving containment.
 A long answer can span several virtualized rows, and earlier text can be folded
 or unmounted. Export renders every text part afresh so it includes the whole
 reply and settled highlighting.
+
+### Why the PNG carries the app's loaded fonts
+
+The export SVG runs outside the chat document. Its font scanner can read
+stylesheet rules, but the app loads its appearance fonts through `FontFace`.
+The font loader registers each URL-based face at once and reads its data for
+the SVG in the background, so the exporter can add it alongside stylesheet
+fonts such as KaTeX, usually without another request on Save. The screen face
+never waits for that read, so startup and terminal refits keep their timing.
+Without the embedded copy, longer fallback glyphs can wrap inside a code chip
+measured with the original font. A failed read is not kept: the image still
+saves without that face, and the next Save reads it again. A face still loading when Save starts is waited for, up to 2 seconds, so the PNG embeds the face the layout was measured with.
+The VS Code webview retains its existing font policy and skips the CDN prefetch.
 
 ### Why plan dialogs mount lazily and not on every streaming message
 

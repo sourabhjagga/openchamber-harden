@@ -41,9 +41,12 @@ changed, and shows the matching excerpt under the title.
 The search covers the global active and archived cache, which does not
 bootstrap directories or load transcripts. `resolveSidebarSearchScope` admits a
 conversation by its directory: any known directory, and any folder under a
-project or one of its worktrees. VS Code keeps to its workspace directories and
-sends them with the content request; with none known the hook stays disabled,
-so an empty directory list cannot become a request for every directory.
+project or one of its worktrees. Known directory keys and candidate paths use
+the same path normalization, including raw Windows managed-chat directories.
+VS Code keeps to its exact workspace directories for metadata search, and
+`useConversationSearch` marks message search unsupported there before any
+request; with no directory known the hook stays disabled, so an empty directory
+list cannot become a request for every directory.
 The search text and its scope are plain state of the sidebar (and of the
 phone's sheet for its own field); nothing is stored. Excerpts and other message
 matches open through `openSessionLink`, so opening an archived match does not
@@ -113,6 +116,16 @@ Search admits a chat by its folder, and a folder is known as a chat only after
 the server names the chats root, which can arrive after the session list. The
 admitted directories depend on that root, so chats join a search when it lands
 instead of staying out until the session list next changes.
+
+### Why known directory keys are normalized inside the scope
+
+Callers hand the scope directories as they got them; a managed chat's folder
+comes as OpenCode reports it, with backslashes on Windows. The scope normalizes
+those keys itself, once per scope, rather than each caller. The normalization
+is a local admission check: it decides which conversations the sidebar search
+shows, and no request carries the normalized keys. A Windows chat missing from
+search results is filtered here.
+
 - `list/useSidebarGroupStatus.ts` subscribes to project and standalone Chats
   directories together. Chats uses the same `activity:chats` identity for status
   and row projection, including a Chats-only sidebar. An unresolved global list
@@ -200,6 +213,24 @@ the list by time use this same ownership resolver, on the phone too; rows keep
 the session's own directory while taking display ownership (project id,
 labels) from the index.
 
+### Why a nested repository's session has an ordinary project row
+
+A registered folder can contain several Git repositories. When a root session
+is in an external linked checkout of one of them, the folder lists the session
+under its own root. The nested repository's Git worktree list establishes that
+relationship. OpenCode's project ID alone would also match an unrelated clone.
+In work and title search use the same association; opening the row keeps the
+session's recorded directory. The checkout does not become a configured project
+or a manageable worktree of the containing folder. VS Code keeps its workspace
+scope.
+
+This is the one exception to "top-level sessions outside registered projects
+stay hidden" (maintainer decision 2026-11-24). A separate clone that shares the
+repository's OpenCode project ID stays hidden, because Git does not list it. A
+checkout whose folder trust the user declined stays hidden too: declining drops
+the association, as it keeps any other declined folder out of the lists. Other
+root sessions outside every registered project stay hidden as before.
+
 Web and desktop show the sections in the order the user arranged them: by
 default managed Chats, then Pinned and In work, then the projects or the list by
 time (see One view). The user's own sections, groups of projects and Pin to
@@ -264,7 +295,11 @@ no Shift.
 
 - The drawer keeps its header (close, Add project, the display menu, More,
   New chat), the search field over the list, Reorder projects, the footer and
-  the dialogs a row opens (project edit, new worktree, worktree delete). The
+  the dialogs a row opens (project edit, new worktree, worktree delete). Pin
+  on a session or worktree row, once the user has a pin list of their own,
+  opens the Pin to sheet (`MobilePinToSheet`) with its New pin list dialog;
+  `SessionSidebar` mounts both in its `phone` branch, since nothing else on
+  the phone renders the request `requestPinTo` stores. The
   display menu holds Grouping (by project or by time, `sidebarGrouping`), the
   project sort while grouped by project, Show pinned section, Show In work,
   "Also show in work under projects", Detailed rows, "Name worktrees by
@@ -306,8 +341,9 @@ no Shift.
   every row, and the marks before it come in the desktop's order (the done
   hint, the goal, the PR, the requests waiting on the user, the pin). No row
   shows a date, as on the
-  desktop: the list is ordered by recency; a turn's duration shows while it
-  runs and until it is read.
+  desktop: the list is ordered by recency, and the list by time heads its
+  days the desktop's way (see "Day headings in the list by time"); a turn's
+  duration shows while it runs and until it is read.
 - Detailed rows are on by default on the phone (store v12; a phone that was on
   the old List keeps two lines). Rows start near the edge, as the desktop's
   do: a two-line row's text 12px in, a one-line row's slot there and its text
@@ -350,9 +386,13 @@ no Shift.
 
 ### Why project trees resolve lineage globally
 
-The shared project tree checks parent presence against the global active and archived cache plus the merged active session list. Child expansion uses the lifecycle-ordered global graph. A child whose parent is known renders only beneath that parent, even when its own directory belongs to another project or worktree. An archived parent or intermediate never allows an active descendant to become an independent root. Project buckets contain roots only, so children do not consume root pagination or make a child-only worktree expandable. Temporary `/btw` forks and archived children remain hidden. Workflow agents (`metadata.openchamber.kind === 'workflow-agent'`) stay in the tree but get no rows, and neither does what they started (`listedChildren`): one run can start a hundred, and the run's card and Workflows panel list them. Their pending requests and activity still count for the row above, so an expanded parent's badge scope includes them (`selectBlockingBadgeSessionScopes`). Selection still uses each session's own directory. VS Code applies the same rule after its exact workspace filter.
+The shared project tree checks parent presence against the global active and archived cache plus the merged active session list. Child expansion uses the lifecycle-ordered global graph. A child whose parent is known renders only beneath that parent, even when its own directory belongs to another project or worktree. An archived parent or intermediate never allows an active descendant to become an independent root. Project buckets contain roots only, so children do not consume root pagination or make a child-only worktree expandable. Temporary `/btw` forks and archived children remain hidden. Workflow agents (`metadata.openchamber.kind === 'workflow-agent'`) stay in the tree but get no rows, and neither does what they started (`listedChildren`): one run can start a hundred, and the run's card and Workflows panel list them. Their pending requests and activity still count for the row above, so an expanded parent's badge scope includes them (`selectBlockingBadgeSessionScopes`). The display option `showSubagentSessions` (sidebar display menu, Settings → Sessions) withholds the same way: every session an agent spawned (`parentID`, `isSubagentSession`) loses its row, and a parent left with no listed children loses the expander, while reviews and promoted btw sessions keep their rows; under a hidden subagent its whole branch goes with it, folders and Pinned included. A row's badge covers its own session and every descendant without a row of its own (`collectRowBadgeNodes`), so a hidden subagent's permission or question shows on the nearest visible parent, expanded or not, on desktop and phone alike, and a listed child still reports its own. Clicking the badge opens the session that holds a request of that kind, in tree order: the row's own session first, then its descendants without a row (`findBlockingRequestTarget` reads the same stores the badge reads). It opens that session in its own directory, which for a worker in another worktree differs from the parent's, and brings the request (`revealRequest`) or the waiting page (`revealWaitingPage`) into view, as a request toast does. While multi-select is on, the badges stay plain marks and a click on them toggles the row. When the open session has no row of its own (a hidden subagent, or a child under a collapsed row), the nearest visible row above it takes the selected look, as a folded work does (`useShowsOpenHiddenSession`); the row's own unread mark and hover prefetch still go by its own session, and the phone's drawer scrolls to that row when it opens, ahead of the worktree header above it; the header stands in only while its group is folded (`apps/mobileSidebar/mobileCurrentRow.ts`). Selection still uses each session's own directory. VS Code applies the same rule after its exact workspace filter.
 
 Bucket-local lineage promoted cross-project subagents to independent rows and left their parent without an expansion control. The missing-parent fallback applies only while both active and archived sources lack the parent, and clears when either parent arrives. The project-section cache tracks each project's visible ancestors and descendants, including their order and record identity, so a lineage or same-ID semantic change rebuilds the affected trees without replacing unrelated project sections.
+
+### Why hiding spawned sessions keeps them in the tree
+
+Hiding a session an agent spawned is a display option, not a change to the tree. `listedChildren` withholds the row, and the parent keeps the `children` it always had, so its pending badge and cost roll-up still cover the hidden runs. The badge leads to the hidden run: a click opens the subagent that waits. The parent's chat shows its subagents' permissions and questions only from its own directory and never shows their waiting pages, so a worker in another worktree, or a page a subagent waits on, could not be answered from there. The parent row's activity and timer are the parent's own turn, which runs while its subagents do. Dropping them from `childrenMap` instead would quietly change archive and delete cascades, export, Move to worktree, and the cost the parent reports. A spawned session whose parent is missing from the cache never becomes a root row while the option is off, in project groups and in Chats alike (`listedAsRoot`); with the option on it keeps the missing-parent fallback above.
 
 Both project display modes use `projects/CrossfadeZoneHeaders.tsx` for sticky
 zone headers. The live header keeps one portal host as it moves between its
@@ -379,7 +419,7 @@ bootstrap work. Selection and activity subscriptions stay session-scoped so a
 structural list update does not make every row observe unrelated streaming
 updates.
 
-Session-row permission and form badges read the relevant directory-store buckets and show only whether something waits, without a count: one form can hold many questions, and a number that does not drop as the user answers them reads as wrong. A collapsed row covers its own pending requests and those of the descendants it hides; an expanded row covers only its own. The lookup never bootstraps a directory, so an unbootstrapped directory's store holds only live requests; until that store completes a bootstrap, the row lookup also reads forms from the cross-directory index, which the host seed fills at load, so a question already waiting in a project this client never opened still shows after a reload. Mobile rows show the same icon-only badges from the cross-directory index (`apps/usePendingRequests.ts`). A page an agent shows that waits for the user's answer has no directory-store bucket, so the row lookup also reads it from the cross-directory index and shows it as a form.
+Session-row permission and form badges read the relevant directory-store buckets and show only whether something waits, without a count: one form can hold many questions, and a number that does not drop as the user answers them reads as wrong. A collapsed row covers its own pending requests and those of the descendants it hides; an expanded row covers its own and those of descendants without a row (hidden subagents, workflow agents). The lookup never bootstraps a directory, so an unbootstrapped directory's store holds only live requests; until that store completes a bootstrap, the row lookup also reads permissions and forms from the cross-directory index, which the host seed fills at load, so a request already waiting in a project this client never opened still shows after a reload. Once the store completes a bootstrap it answers alone for the sessions it listed then, so a request whose settlement fell into a stream gap clears when the reconnect recovery re-reads the store. Mobile rows show the same icon-only badges through the same lookup and scopes (`apps/usePendingRequests.ts` calls `selectBlockingBadgeSessionScopes` and `useSessionBlockingRequests`), so a phone row and a desktop row agree about one session. On the phone the row is itself a button, so the badge buttons sit beside it (after the row's button on a one-line row, over the end of the second line on a detailed one, which keeps an invisible copy to hold their room): a button inside a button is invalid and VoiceOver reads it as one control. Each badge button keeps its 12px glyph in the line, opting out of the 36px touch-layout button minimum, and takes a 36px-tall touch area from a pseudo-element, 8px past the glyph on each side; between two badges each area stops 3px past its glyph, so neither reaches the other's icon in the 6px gap of a detailed row. A tap opens the waiting session and closes the drawer; while the row's swipe actions are open, it closes them first, as a tap on the row does. A page an agent shows that waits for the user's answer has no directory-store bucket, so the row lookup also reads it from the cross-directory index and shows it as a form.
 
 A session row's menu and the header's session menus (a tab's, the title's)
 are one component, `sessions/SessionActionsMenuItems.tsx`; each surface
@@ -397,6 +437,8 @@ Manual rename inputs share `components/session/sessionRenameKeyboard.ts` with
 the header and mobile list. Enter explicitly submits the owning form on
 keydown; Escape cancels. IME composition keys keep their text-input behavior,
 and held Enter does not submit repeatedly.
+
+An archive or delete confirmation belongs to the row that opened it. A session can appear in multiple sections, so the session ID alone would open a dialog for each of its visible rows. The state lives in that row so the confirmation also goes away when the row disappears.
 
 ## Sessions an agent runs for its own work
 
@@ -436,6 +478,26 @@ one session the user may want to open.
   them finish. Stop interrupts each running worker and whatever runs under
   it; closing the dialog cancels the Done. Archive on Done keeps its own guard
   after that: a worker still running in the worktree keeps it.
+
+### Leads
+
+A lead (`metadata.openchamber.lead`, `lib/sessionLead.ts`, server side in
+`packages/web/server/lib/session-lead/`) is a session the user marked to run
+a direction through its own workers. Its one mark is an agent's head
+branching to three sessions (`lead`) in the one-line row's chevron slot, the way the worktree icon
+sits in a group header: the title starts where every row's title starts, and
+with workers under it the mark gives way to the chevron on hover or focus
+(`SessionLeadSlot`); on touch the mark stays and a tap on it still toggles.
+Two-line rows show the mark with the row's marks, the phone beside the title.
+The row's states are any session's: no count of workers. A lead starts from
+New lead (a draft with its own welcome heading): in the project menu, and in
+the menu of the project's "+" (right click on desktop, long press on the
+phone; a plain click or tap still opens an ordinary draft), and the `new_lead`
+shortcut (⇧⌥⌘L) and palette command, which on an open draft switch it between
+session and lead and keep what was typed. The session menu
+makes an existing session a lead and turns it back. Hand to a lead in the session menu (a submenu of the project's leads on desktop, one item per lead on the phone) gives an ordinary top-level session to a lead as its own `ownWork` child; the server does the hand-over (`lead.handover`). VS Code
+has neither start, because its agent has no `openchamber` tool, but shows
+existing leads.
 
 ### Why a running worker asks before Done and not after
 
@@ -706,7 +768,18 @@ the same Mark all as read.
   collapse and is saved in local storage (`oc.sessions.activityCollapse`). The
   display menu's Collapse all / Expand all set every project and the zones
   (`SIDEBAR_ACTIVITY_KEYS`: Pages, Chats, Pinned, In work and the list by time)
-  together. Session folders keep their own collapse state. Zone and project
+  together. Session folders keep their own collapse state. Project collapse is
+  the instance's (`projects[].sidebarCollapsed`), mirrored into one local key
+  (`oc.sessions.projectCollapse`) per browser origin. After an instance switch
+  that key still names the previous instance's projects, so the first project
+  list the new instance sends replaces it. A fold, Collapse all or Expand all
+  made before that list arrives is replayed over it and only then saved, so a
+  stale list never reaches the instance's settings. Those pending choices are
+  kept per runtime (`oc.sessions.projectCollapse.pending:<runtime key>`), so a
+  reload before the list arrives still replays them. A fold goes into the
+  project store and to the settings writer at once (`updateDesktopSettings`),
+  which debounces it and flushes it with keepalive before the page unloads; a
+  project edit right after it (a reorder) writes the new flags. Zone and project
   headers are sticky. The projects sit under a "Projects"
   caption (a `caption` row, `projectsCaption`) styled as a zone's label, so
   every section has a caption and a project is an item of its list: its label
@@ -714,7 +787,12 @@ the same Mark all as read.
   sessions sets it apart from them. A project a size up and bold, with
   captioned zones above it, read as a heading of another level (maintainer,
   2026-10-28). The caption shows only with something listed above the
-  projects, never in single-project mode. The caption folds like a zone: closed, it
+  projects, never in single-project mode. The exception is a Projects section
+  left empty because the user's groups claim every project: its caption stays,
+  even when it comes first, because its "+" is the desktop sidebar's entry point
+  for adding a project. With no project at all there is no caption. The exception
+  covers grouping by project; an empty list by time still has no caption and no
+  "+". The caption folds like a zone: closed, it
   hides every project (`PROJECTS_CAPTION_COLLAPSE_KEY` in the zones' saved
   collapse set); Expand all opens it, Collapse all leaves it as it is and
   folds the projects one by one. One-line rows (sessions, works, drafts,
@@ -778,6 +856,63 @@ the same Mark all as read.
 - An isolated space without chats still has its work row: it leads its
   project's list while it is made or runs, and closes it otherwise (see
   Spaces). Search leaves it out.
+
+### Day headings in the list by time
+
+The `timeline` zone heads each day it lists with a `date-header` row: Today,
+Yesterday, then the date (`Mar 3`, with the year once it is not this year's:
+`Dec 31, 2025`). A day without work gets no heading. Rows still show no date.
+Pinned, In work, custom sections, the projects and search get no headings.
+
+- **What the day is.** `list/timelineEntries.ts` gives every timeline entry
+  its `activity`: `active` with the lifecycle time that ordered the work
+  (`resolveWorkActivity` in `works/sidebarWorks.ts`), so the first listed
+  session of the work in `orderedSessions`, or its newest archived root
+  session when that placed it higher (`buildWorktreeArchiveAnchors` keeps that
+  time in `archivedAt`). A worktree with only archived sessions files under
+  the day of its newest one.
+- **Lead block.** The projects' root folders, project-root drafts, pinned works
+  the zone keeps in place (pinned worktrees, and works a pinned session
+  orders first) and spaces being made or running with no session yet
+  (`activity.kind === 'lead'`) sit above the first heading with no heading of their
+  own, so an old pin never puts an old date above Today.
+- **Tail.** Worktrees nobody has started a session in, and stopped or failed
+  spaces without one (`activity.kind === 'unstarted'`), follow a last "No sessions yet"
+  heading, so a new empty worktree never sits under a date from months ago.
+  A pinned worktree with no session yet still leads.
+  The per-project status lines stay after it, outside every day.
+- **Each work under its own day.** The lifecycle order compares a subagent
+  shown at the top level with a root by their baseline times, so one active
+  today can sort below yesterday's root. `buildTimelineEntries` regroups the
+  active entries newest day first in their own slots, keeping the lifecycle
+  order within a day, so the orphan heads Today instead of hiding under
+  Yesterday.
+- **Days only descend.** The lanes of a run stay under the day of the newest
+  lane, and any entry still newer than the heading above it stays under that
+  heading, so no day is headed twice.
+- **What nests stays with its parent.** Subsessions, reviews, `/btw` and a
+  worktree's sessions are rows of their parent's entry and share its day,
+  whether Show subagent sessions is on or off.
+- **Interaction.** A heading is a plain `<div>`: not focusable, not draggable,
+  not a drop target, no selection entry (Shift ranges and select-all run
+  across days), no sticky header (the `timeline` header stays sticky) and no
+  section boundary for scroll anchoring. It ends the tree guides above it.
+  The first heading sits close under the zone header; every other one takes
+  `pb-2` on the row before it (`sectionSpacingAfter`).
+- **Text.** The row stores the local day (`timelineDates.ts`), and
+  `SessionSidebarDateHeading` names it in render through `useI18n()`: Today and
+  Yesterday from `common.date.*`, other days through `Intl.DateTimeFormat` for
+  the interface's locale. The date comes from the stored calendar day,
+  formatted in UTC, so a formatter cached before the device changed time zone
+  cannot shift it by a day. It lines up with the row titles in one-line and
+  detailed rows, on the desktop and the phone.
+- **Midnight.** The collection runs the sidebar clock while grouped by time
+  and passes its local day start (`timelineTodayStart`) to the row model, so
+  the list rebuilds when the day turns, not every hour. The clock checks the
+  day apart from the hour (`readSidebarClock`), so a time zone change that
+  crosses midnight inside the same absolute hour still moves Today. Days are
+  local calendar days (`setHours(0, 0, 0, 0)`), so a 23- or 25-hour day around
+  a clock change keeps its own Yesterday.
 
 ## In work
 
@@ -872,9 +1007,27 @@ project draft switched to a new Chat takes its text along, and its row goes.
 Opening a row (`works/openSessionDraft.ts`) opens the draft at once with its
 text and server files through `pendingComposerRestore`; attachments stored on
 the server follow once downloaded, if the user is still on the draft. A draft
+started from a sidebar folder shows that folder in the composer and retains its
+folder target when saved and reopened. The label and the send take the folder
+from one scope (`sync/draft-folder-target.ts`): the directory the sidebar opened the
+draft on, never the project's start folder inside a worktree, or the Chats
+root. When the folder is gone or the draft moves to another project or
+worktree, the label hides and the session lands unfiled. Its saved row stays
+in the project or worktree list until the session is sent. A draft
 this device failed to store (offline, or a 413 for attachments over the
-server's limit, which the user is told once) keeps this device's newer copy
-when reopened here. The first draft opened in a folder takes over the text
+server's limit, which the user is told once) still gets its row, built from
+what the device tried to send, and keeps this device's newer copy when
+reopened here: without the row, a first save lost on a bad connection left
+the text in the composer's storage with nothing in the sidebar that leads
+back to it. The store keeps the failed save in localStorage
+(`openchamber.sessionDrafts.unsynced.v1`, each window rewriting only its own
+entry; attachments not uploaded yet keep their id there and their bytes in
+memory, so a send whose answer was lost does not drop a file the server got),
+shows those rows before the server's list arrives, and sends them again after
+each successful list read, which follows a reconnect; a 413 waits for the
+user's next change. Throwing away a draft the server never had removes its row
+for good, offline too. A move that fails (a gone space's draft) leaves the
+draft where it was, since its text on this device is kept under that folder. The first draft opened in a folder takes over the text
 that folder kept under the old per-folder key
 (`readChatDraftClaimingFolderDraft`). Search leaves drafts out. The phone lists
 and opens the same drafts. VS Code has no shared drafts: it keeps the
@@ -1095,20 +1248,21 @@ can now give rows of the same kind different heights.
 
 The display menu's Show pinned section toggle (`showPinnedSection`,
 `sidebarShowPinnedSection`, per surface, on by default for new installs) adds a `pinned`
-activity zone between Chats and In work. It lists pinned top-level,
-unarchived project sessions in the shared lifecycle order; pinned chats stay
-pinned at the top of Chats. A pinned work stays in its project or folder and
+activity zone between Chats and In work. It lists pinned top-level, unarchived sessions, including Chats, in the shared lifecycle order.
+A pinned work stays in its project or folder, and a pinned Chat stays in Chats,
 in the list by time too, unless the user turns "Also in projects" off on
 Pinned (`keepPinnedInPlace`, on by default); then it is listed in Pinned only
-and leaves its project (`movedSessionIds`, `movedGroupKeys`). Turned off,
+and leaves its project or Chats (`movedSessionIds`, `movedGroupKeys`). Turned off,
 the zone leaves pinned sessions in their projects.
 
-A pinned work is never in work, a session or a worktree alike, in any pin
+Unless "Also in work" on Pinned is on (`pinnedInWork`,
+`sessionWorkIncludesPinned`, one value for all surfaces, off by default), a pinned
+work is never in work, a session or a worktree alike, in any pin
 list: pinning a session closes its work in the same write
 (`setSessionPinned`), Track on a pinned session writes nothing
 (`setSessionWorkState`), the server opens no work in a pinned one
-(`web/server/lib/session-work`), its row offers no Track or Done, and In work
-leaves it out. What is still open (an older build, a worktree pin, which lives
+(`web/server/lib/session-work`), a session's menu shows Track disabled with the
+reason (`TrackBlockedByPinItem`), and In work leaves it out. What is still open (an older build, a worktree pin, which lives
 in git apart from session state, another client) the sidebar closes once it
 sees it (`works/useClosePinnedWork.ts`), each open once, so a refused write is
 not retried and a later open is closed again; that also
@@ -1130,14 +1284,30 @@ so its works stay where the user filed them; the chip brings the old
 behavior back for anyone who wants each work listed once (maintainer,
 2026-11-10).
 
-### Why a pinned work is never in work
+With "Also in work" on, a pin does not touch work state, and a pinned work in
+work shows in both sections. Whether it leaves its project is Pinned's choice
+alone (`isPinned` in `resolveSidebarSectionMembership`), so the order of the
+sections still decides nothing. In work orders by activity without the pin lift.
+Done on a pinned worktree never archives it. Turned off, what is open is closed
+and does not come back by itself.
+
+### Why the sidebar asks the server before closing pinned work
+
+A saved setting is not pushed to other open clients. One that still holds "off"
+would close what another just opened, so `keepsPinnedOutOfWork`
+(`lib/pinnedInWork.ts`) reads the setting first and closes nothing when the
+read fails. Turning the chip off waits for the save for the same reason.
+
+### Why a pinned work is out of work by default
 
 The two sections used to share works, and the higher one listed a work that
 was both pinned and in work. That made the order of sections a rule about
 where a session lives, and a pinned session left its project whenever In work
 took it. A pin is the user's own long-lived shortlist and In work is what they
-are on now, so a pinned work stays out of In work for good (maintainer,
-2026-11-10). The rule lives in the state, not only in the list, so the
+are on now, so a pinned work stays out of In work (maintainer, 2026-11-10). A lead
+is both long-lived and current, which is what "Also in work" is for; it is a
+choice because others pin to take a session out of In work (maintainer,
+2026-11-25). The rule lives in the state, not only in the list, so the
 Overview, extensions and the agent tool read the same thing.
 
 A worktree work is pinned too, from its row's menu (desktop, web) or its swipe
@@ -1208,7 +1378,8 @@ expanded; an order saved before it existed gets it first on read. Its caption
 (`page` rows, `pages/SidebarPageRow.tsx`, from `pages/useSidebarPages.ts`) are
 Overview (while the feature is on), Issues and PRs, Scheduled tasks, Archive,
 Stats, Integrations catalog (not in enterprise mode), then each active
-extension page. A row is a one-line session row: the icon in the tree's slot,
+extension page; that is the default order, and the sections manager hides and
+reorders single pages (`sections/DOCUMENTATION.md`). A row is a one-line session row: the icon in the tree's slot,
 so the label starts where session titles do, the label in the row-title
 colour. An open page fills its row (`oc-selected`) and the next press closes
 it. A page with a shortcut (Overview, Issues and PRs, Archive) shows it in a
@@ -1258,6 +1429,13 @@ rest it is as quiet as the button was.
   for subdirectory sessions, whose own directory rarely has a Git status entry.
 - Worktree prefix lookup runs for each session on sidebar rebuilds and avoids
   allocating entry pairs or concatenated path prefixes in that loop.
+- Any change to any session record rebuilds the whole structure, so a turn's
+  start and end rebuild it several times, each on every session. What a rebuild
+  asks of each session and depends on nothing else keeps its answer between
+  rebuilds: a session's linked changes and issues per record and URL matcher
+  (`lib/linkedIssues.ts`), a folder's chats root per set of roots
+  (`lib/chatDirectories.ts`). At 4x CPU throttle with 4,000 sessions this took
+  the longest task of a turn from 178 to 160 ms.
 - Root-branch resolution keys its cache by project path and input branch and
   coalesces initial status bursts. The same input stays cached for 5 minutes;
   another project's settled branch cannot trigger a quadratic resolution cascade.
@@ -1359,7 +1537,8 @@ rest it is as quiet as the button was.
   one-line form of `SessionTimelineRowBody`: done hint, pin, the live state
   and, while a turn runs or until it is read, the turn's duration on the
   right. No row shows a date:
-  every list is ordered by recency and the whole-row tooltip has the time.
+  every list is ordered by recency, the list by time heads its days, and the
+  whole-row tooltip has the time.
   One-line rows (sessions, runs, worktree works, drafts) are 34px: the 20px
   line, 6px above and below, a 1px margin each side (`SESSION_ESTIMATE`). The
   one-line Chats, Pinned, In work and list-by-time rows (`'tree-chat'`,
@@ -1525,7 +1704,7 @@ rest it is as quiet as the button was.
 - List loading and workspace initialization have separate states. The spinner follows only the list queue; config, MCP, LSP, and live-state recovery cannot keep a successful empty list spinning. A core initialization failure has a separate localized notice and reuses the retry/native-access actions without clearing loaded sessions.
 - Directory permission failures remain visible even when stale sessions are retained. Flat groups inspect every represented root/worktree directory; local Desktop may open the native picker for the exact failed directory, while other runtimes keep the ordinary Retry action.
 - Pins and folder assignments are not pruned from the first startup snapshot or from optimistic mutations. Confirmed local deletion and routed external deletion clean immediately; a later authoritative omission after an established baseline covers missed external delete events.
-- Pending-permission/question row badges ride in the meta cluster at the row's end with the time and status, and hide with it on hover or while the row menu is open, except on non-VS Code always-visible-actions rows, which reserve permanent padding and keep the cluster shown. VS Code hover-reveals its actions over the row's right edge even under `alwaysShowActions`, so its cluster keeps hiding.
+- Pending-permission/question row badges are buttons, and a one-line row keeps them past its meta cluster at the row's end, outside what hides on hover or while the row menu is open. The hover actions then sit beside them: `resolveSessionRowActionLayout` moves the actions in by the badges' width (`endBadgeCount`) and widens the title's actions reserve by the same amount, so a row's text does not move when the pointer arrives and the badge stays under it. Rows without a badge keep the plain layout. Always-visible-actions rows already reserve the actions' room, as padding on the row or on the cluster at its end, so they keep their actions where they are. VS Code shows its actions only on hover even under `alwaysShowActions`, and it makes room for them with hover padding on the row; with badges at the end that padding would pull the badges out from under the pointer, so there the actions move in beside the badges as above, and the hover padding goes on the meta cluster before the badges instead (`endBadgeActionsRoomClass`). A detailed row shows the badges on its second line, which the actions never cover. In multi-select the badges are plain marks inside the meta cluster again and hide with it. Like the phone's, the badge buttons opt out of the 36px minimum a touch layout gives buttons (`mobile.css`), so a tablet's desktop rows keep the 12px glyph in line.
 - A row's menu (session, worktree, run, project header) is its right-click menu. With a mouse there is no "⋯" button for it: it only repeated the right click and took room the title fades under. Touch screens keep the button: always shown in touch layouts (`alwaysShowActions`: the phone surface and tablets), and revealed like the other row actions on a touch screen elsewhere, such as the desktop app on a touch laptop (`pointer-fine:hidden` hides it for a mouse). The hover reserves count it only where it always shows, since a hover comes from a mouse. VS Code's webview leaves the right click to the page, so it has no button either. From the keyboard, Shift+F10 on a focused row opens the same menu under it (`components/ui/contextMenuKeyboard.ts`, wired into `ContextMenuTrigger`); Mac browsers do not turn that key into a right click themselves. The reserve the hover actions take is counted from the buttons actually shown.
 - Hover-revealed actions on session rows, worktree headers and project headers swap in over the row's end (the right, or the left in a right-to-left layout) at once, without a fade; they do not re-lay the row out. What they cover (date, branch, badges, indicators) hides in the same step, and the title or label's tail fades away under them through the `oc-actions-mask` utility (`index.css`): the row's text line is an `@container`, `--oc-actions-reserve` says how far the actions reach in from its end edge, `--oc-actions-inset` how far the masked text starts from its start edge. A title whose own direction differs from the interface (`dir="auto"`) starts under the actions, so it takes `padding-inline-start` of the reserve instead of the fade. Reserves, insets and the mask's own gradient stops are rem so they track the interface font size, and the mask multiplies reserves and insets by `--padding-scale` because the buttons and offsets they describe are spacing tokens that grow with the density setting; a pixel reserve would stop short of the buttons at larger sizes and let the title show through. Change a reserve whenever an action's size, count or offset changes. Only permanently shown actions (`alwaysShowActions`) take layout room.
 - Tooltips that list PRs or issues (session rows, timeline PR badges, worktree headers) render them as links through `sessions/SidebarRefLinks.tsx`. A link into a repository that is none of the project's names it after the number (`#118826 · dotnet/runtime · Completed`), since numbers are per repository; the repository is the part that truncates, and it is asked only while the tooltip is open. The chat's Context sources rows name it the same way (`useOutsideRepository`), where the title is what truncates. The PR badge and header tooltips close 750 ms after the pointer leaves, so the pointer can travel in; the whole-row tooltip closes at once and relies on the popup staying open while the pointer heads into it. The row and header action buttons sit in their own `TooltipProvider`: the pointer crosses them on the way, and a same-group tooltip would replace the open one at once. Every row but VS Code's has the whole-row tooltip, opening to the right (title, time, project, branch, links, recap); every other tooltip on a row, a header's folder name included, opens above its element (`sessions/RowMarkTooltip.tsx` for status marks), so it never covers the neighbouring marks and actions. A session menu item that opens a submenu explains itself only while disabled: the hint would cover the open submenu.
@@ -1573,6 +1752,10 @@ measured at most 0.11 above muted, and often below it, in every built-in
 light palette. Folder and archive labels take `oc-group-label`, three
 quarters of the way to body text, for the same reason: at 85% of body text
 they fell under the resting titles they contain in every light palette.
+
+### Why a one-line row's badges sit beside the hover actions and not under them
+
+The badges open the waiting session, so they have to stay reachable on the hover that reaches them. Inside the meta cluster they hid as the pointer arrived, and the actions took their place. Moving the badges in on hover would shift them under the pointer; reserving their room all the time would cost every row title width. Moving the actions in by the badges' width costs only the rows that wait.
 
 ### Why hover actions appear without a fade
 
@@ -1644,6 +1827,13 @@ or a session in the project root with what grew out of it), named for its task,
 with the grouping as its only choice (2026-10). Rows are one line with no
 project icon and no date: the order already says how recent a work is, the
 tooltip names its project and time, and the room goes to the title.
+
+### Why the list by time has day headings and its rows still no date
+
+One long run by recency made earlier work hard to find. The maintainer
+accepted day headings the way a phone's lists show them, with no new setting (#6325).
+A date on every row would spend the width the title needs and repeat itself
+down a day; one heading per day says it once.
 
 ### Why a worktree is listed among the project's sessions
 
@@ -1749,3 +1939,29 @@ anchored like a session doing so. A hidden list (the phone's while projects
 are reordered) keeps nothing. The sidebar never scrolled to a session the
 user opened or created, and still does not; the phone's drawer brings its
 row into view after the anchor (`scrollRequest`).
+
+### Why rows read the live record and the structure rebuilds on a structural key
+
+Every change to a session record replaced the global list, and the sidebar
+rebuilt its whole structure from about 4,000 sessions for it: several times at
+each turn's start and end, while the rows that changed were one to three. The
+structure now keeps its input list while every record in it has the same
+structural key (`list/sidebarStructureKey.ts`): the record minus the fields
+only a row shows (tokens, cost, outcome, model, agent, `time.idle` and the
+`openchamber.turn` metadata), plus the facts the structure derives from them
+(a done or review suggestion, which `time.idle` decides). `time.updated`
+counts only while the sidebar reads it: projects sorted by recent activity, a
+custom section filtered by activity, a search. A row reads its session's
+current record from the global store by id (`sessions/useLiveSessionNode.ts`),
+so what it shows follows the record even when the structure kept an older one.
+The live marks of a row (running, unread, the turn's length) already come from
+stores of their own. A new field read by the structure belongs in the key, and
+the key test (`sidebarStructureKey.test.ts`) names the fields left out.
+Rejected: patching one row inside the built structure, which every derived
+index (ownership, grouping, sections, row model) would have to support.
+Measured at 4x CPU throttle with 4,000 sessions and four sessions in a turn:
+structure builds per turn went from 5 to 7 down to 2 and the sidebar's time
+from about 420 to 285 ms; time in tasks over 50 ms fell by 37 percent. What
+still rebuilds the derived indexes at a turn's start and end is the ordering
+store: a session going active and settling again publishes new ranks, and
+group order reads those ranks too.

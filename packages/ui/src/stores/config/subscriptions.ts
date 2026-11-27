@@ -24,6 +24,7 @@ import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import { markStartupTrace } from '@/lib/startupTrace';
 import { useRoutingStore } from '@/stores/useRoutingStore';
 import { useUIStore } from '@/stores/useUIStore';
+import { getSafeStorage } from '@/stores/utils/safeStorage';
 
 let unsubscribeConfigRuntimeChanges: (() => void) | null = null;
 let unsubscribeConfigStoreChanges: (() => void) | null = null;
@@ -49,7 +50,9 @@ export const subscribeConfigRuntimeChanges = (): void => {
         resetModelsMetadataRequest();
         if (detail.runtimeKey === detail.previousRuntimeKey) return;
         configRuntime.instanceGeneration += 1;
+        getSafeStorage().removeItem('sttKeyProvider');
         useConfigStore.setState({
+            sttKeyProvider: undefined,
             configRuntimeKey: detail.runtimeKey,
             modelsMetadata: new Map<string, ModelMetadata>(),
             directoryScoped: {},
@@ -73,6 +76,9 @@ export const subscribeConfigRuntimeChanges = (): void => {
             settingsDefaultModel: undefined,
             settingsDefaultVariant: undefined,
             settingsDefaultAgent: undefined,
+            chatsDefaultModel: undefined,
+            chatsDefaultVariant: undefined,
+            chatsDefaultAgent: undefined,
             settingsDefaultsLoaded: false,
             settingsZenModel: undefined,
             selectionSource: 'auto',

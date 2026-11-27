@@ -45,6 +45,8 @@ const continuesShownText = (part: ToolPart, previous: ShownPart | undefined): bo
     && (previous.type === 'text' || isSettledAsk(previous))
 );
 
+export const hasUiBlock = (text: string): boolean => UI_BLOCK_FENCE.test(fenceUiBlocks(text));
+
 export function getShownPages(messages: readonly ChatMessageEntry[], finalMessage?: ChatMessageEntry): ShownPart[] {
     const shown: ShownPart[] = [];
     for (const message of messages) {
@@ -52,7 +54,7 @@ export function getShownPages(messages: readonly ChatMessageEntry[], finalMessag
             if (part.type === 'tool') {
                 const inView = isShownInPlace(part.tool, part.state) && !isSettledAsk(part);
                 if (inView || continuesShownText(part, shown.at(-1))) shown.push(part);
-            } else if (part.type === 'text' && message !== finalMessage && UI_BLOCK_FENCE.test(fenceUiBlocks(part.text))) {
+            } else if (part.type === 'text' && message !== finalMessage && hasUiBlock(part.text)) {
                 shown.push(part);
             }
         }

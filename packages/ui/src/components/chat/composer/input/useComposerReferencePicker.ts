@@ -8,15 +8,16 @@ import { useSourceControlProvider } from '@/lib/source-control/providers/registr
 import { readChatDraft, getChatDraftIdentityKey, writeChatDraft } from '@/lib/chatDraftPersistence';
 import { isVSCodeRuntime } from '@/lib/desktop';
 import { useAttachReferences } from '@/components/references/useAttachReferences';
-import { useRepositoryReferenceProvider } from '@/components/references/referenceSources';
-import { withComposerReferences, type ComposerReference } from '../../composer/composerReferences';
+import { useRepositoryAcrossProvider, useRepositoryReferenceProvider } from '@/components/references/referenceSources';
+import { composerReferenceKey, withComposerReferences, type ComposerReference } from '../../composer/composerReferences';
+import { readLinkedReferences } from '../../composer/linkedReferenceDrafts';
 import { withMissingReferenceLinks } from '../../composer/referenceLinks';
 import { useTrackerSources } from '@/lib/trackers/sources';
 
 type Dependencies = {
     mobilePanels: Pick<ReturnType<typeof useComposerMobilePanels>, 'setMobileControlsPanel'>;
     referencePickerState: Pick<ReturnType<typeof useComposerReferencePickerState>, 'setReferencePicker'>;
-    language: Pick<ReturnType<typeof useComposerLanguage>, 'referencePickerDirectory' | 'chatDraftIdentityKeyRef'>;
+    language: Pick<ReturnType<typeof useComposerLanguage>, 'referencePickerDirectory' | 'referenceScope' | 'chatDraftIdentityKeyRef'>;
     sessionScope: Pick<ReturnType<typeof useComposerSessionScope>, 'isBtwActive' | 'chatDraftIdentity'>;
     referenceDrafts: Pick<ReturnType<typeof useComposerReferenceDrafts>, 'updateLinkedReferencesFor'>;
 };
@@ -26,7 +27,7 @@ export function useComposerReferencePicker({
 }: Dependencies) {
     const { setMobileControlsPanel } = mobilePanels;
     const { setReferencePicker } = referencePickerState;
-    const { referencePickerDirectory, chatDraftIdentityKeyRef } = language;
+    const { referencePickerDirectory, referenceScope, chatDraftIdentityKeyRef } = language;
     const { isBtwActive, chatDraftIdentity } = sessionScope;
     const { updateLinkedReferencesFor } = referenceDrafts;
 
@@ -38,7 +39,11 @@ export function useComposerReferencePicker({
         setReferencePicker({ source: 'repository' });
     }, [setReferencePicker]);
 
-    const repositoryProvider = useRepositoryReferenceProvider(isVSCodeRuntime() ? null : referencePickerDirectory);
+    const folderProvider = useRepositoryReferenceProvider(isVSCodeRuntime() ? null : referencePickerDirectory);
+
+    const acrossProvider = useRepositoryAcrossProvider(isVSCodeRuntime() ? null : referenceScope.directories);
+
+    const repositoryProvider = acrossProvider ?? folderProvider;
 
     const repositoryDescriptor = useSourceControlProvider(repositoryProvider);
 
@@ -48,11 +53,13 @@ export function useComposerReferencePicker({
         const onScreen = chatDraftIdentityKeyRef.current;
         if (chatDraftIdentity && getChatDraftIdentityKey(chatDraftIdentity) !== onScreen) {
             const saved = readChatDraft(chatDraftIdentity);
-            writeChatDraft(chatDraftIdentity, withMissingReferenceLinks(saved.text, references), saved.confirmedMentions);
+            const addedKeys = new Set(references.map(composerReferenceKey));
+            const merged = readLinkedReferences(chatDraftIdentity).filter((reference) => addedKeys.has(composerReferenceKey(reference)));
+            writeChatDraft(chatDraftIdentity, withMissingReferenceLinks(saved.text, merged), saved.confirmedMentions);
         }
     }, [chatDraftIdentity, isBtwActive, updateLinkedReferencesFor, chatDraftIdentityKeyRef]);
 
-    const attachReferences = useAttachReferences(referencePickerDirectory, addLinkedReferences);
+    const attachReferences = useAttachReferences(referenceScope.folders, addLinkedReferences);
 
     const trackerSources = useTrackerSources();
 

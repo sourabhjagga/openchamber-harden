@@ -3,6 +3,7 @@ import crypto, { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { constants as fsConstants } from 'node:fs';
+import { directoryReachability, directoryUnreachableError } from '../directory-reachability/index.js';
 import { withSourceControlFileLock } from '../source-control/file-lock.js';
 import type { CheckoutHydration, HydrationPart, WorktreeBootstrapState } from './service-contracts.js';
 
@@ -16,7 +17,7 @@ const ERROR_CODES = new Set([
   'REMOTE_CHANGED', 'AUTHENTICATION_REQUIRED', 'AUTHENTICATION_FAILED', 'TRANSPORT_FAILED',
   'CONFLICT', 'CANCELLED', 'TIMEOUT', 'OUTCOME_UNKNOWN', 'RUNTIME_UNSUPPORTED', 'UNKNOWN',
   'GIT_LFS_CLIENT_MISSING', 'PATH_LENGTH_LIMIT', 'CHECKOUT_TOO_LARGE',
-  'BRANCH_NAME_CONFLICT',
+  'BRANCH_NAME_CONFLICT', 'SUBMODULE_SOURCE_LOCAL', 'LFS_SOURCE_LOCAL',
 ]);
 const HYDRATION_STATUSES = new Set([
   'succeeded', 'authorization-required', 'invalid', 'client-missing', 'failed', 'cancelled', 'not-needed',
@@ -37,17 +38,29 @@ const SAFE_ERROR_MESSAGES: Readonly<Record<PropertyKey, string>> = Object.freeze
   TIMEOUT: 'Worktree checkout hydration timed out',
   OUTCOME_UNKNOWN: 'Worktree bootstrap completion is unknown. Inspect the checkout and repair setup before use.',
   RUNTIME_UNSUPPORTED: 'Worktree checkout hydration is unsupported by this runtime',
-  UNKNOWN: 'Worktree bootstrap completion is unknown. Inspect the checkout and repair setup before use.',
+  UNKNOWN: 'Worktree setup failed. Git\'s message is in the server log.',
   GIT_LFS_CLIENT_MISSING: 'Git LFS is required but unavailable',
   CHECKOUT_TOO_LARGE: 'Worktree checkout has too many files to inspect',
   PATH_LENGTH_LIMIT: 'Git reported "File name too long". The worktree checkout path exceeds this system\'s path-length limit. Enable OS long paths or use a shorter repository path.',
   BRANCH_NAME_CONFLICT: 'Git could not create the worktree branch: its name clashes with an existing branch (the same name, or one nested inside the other). Rename the branch and create the worktree again.',
+  SUBMODULE_SOURCE_LOCAL: 'Submodules weren\'t fetched: OpenChamber fetches them only through a network remote, and this worktree has none to use. The repository\'s remote is a folder on this computer, it has no remote, or its branch tracks none. Work in the repository folder itself, or start the worktree from a branch whose upstream is a network remote.',
+  LFS_SOURCE_LOCAL: 'Git LFS files weren\'t fetched: OpenChamber fetches them only through a network remote, and this worktree has none to use. The repository\'s remote is a folder on this computer, it has no remote, or its branch tracks none. Work in the repository folder itself, or start the worktree from a branch whose upstream is a network remote.',
 });
 
 function errorMessageFor<Code>(code: Code): BootstrapFailureMessage | undefined;
 function errorMessageFor(code: PropertyKey) { return SAFE_ERROR_MESSAGES[code]; }
 
 export const worktreeBootstrapFailureMessage = <Code>(code: Code) => errorMessageFor(code) ?? null;
+
+const KNOWN_FAILURE_CODES = new Map<string, string>([
+  ['SOURCE_CONTROL_BINDING_STALE', 'STALE_BINDING'],
+  ['SOURCE_CONTROL_BINDING_REPOSITORY_MISMATCH', 'STALE_REPOSITORY'],
+  ['SOURCE_CONTROL_BINDING_CONTEXT_MISMATCH', 'STALE_CONFIG'],
+  ...['BRANCH_NAME_CONFLICT', 'STALE_BINDING', 'STALE_REPOSITORY', 'STALE_CONFIG', 'REMOTE_CHANGED', 'TIMEOUT', 'CANCELLED', 'RUNTIME_UNSUPPORTED', 'OUTCOME_UNKNOWN']
+    .map((code): [string, string] => [code, code]),
+]);
+
+export const knownWorktreeBootstrapFailureCode = <Code>(code: Code) => isString(code) ? KNOWN_FAILURE_CODES.get(code) ?? null : null;
 
 function hasOwnMessage<Code>(code: Code): boolean;
 function hasOwnMessage(code: PropertyKey) { return Object.hasOwn(SAFE_ERROR_MESSAGES, code); }
@@ -69,9 +82,15 @@ const invalidStore = <Cause>(cause?: Cause) => Object.assign(new Error('Worktree
 const capacityError = () => Object.assign(new Error('Worktree bootstrap storage capacity reached'), {
   code: 'WORKTREE_BOOTSTRAP_STORAGE_CAPACITY',
 });
+const RESOLVE_DEADLINE_MS = 3000;
 const directoryFingerprint = async (directory: string, fsImpl: typeof fs) => {
   const absolutePath = path.resolve(directory);
-  const realPath = await fsImpl.realpath(absolutePath).catch(() => absolutePath);
+  await directoryReachability.assertReachable(absolutePath);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(directoryUnreachableError(absolutePath)), RESOLVE_DEADLINE_MS);
+  });
+  const realPath = await Promise.race([fsImpl.realpath(absolutePath).catch(() => absolutePath), late]).finally(() => clearTimeout(timer));
   const normalized = path.normalize(realPath);
   const identity = process.platform === 'win32' ? normalized.toLowerCase() : normalized;
   return crypto.createHash('sha256').update(identity).digest('base64url');
@@ -118,7 +137,7 @@ const isSafeDisplayEndpoint = (value: unknown): value is string => {
     return ['https:', 'ssh:'].includes(endpoint.protocol)
       && !endpoint.username && !endpoint.password && !endpoint.search && !endpoint.hash
       && Boolean(endpoint.hostname && endpoint.pathname && endpoint.pathname !== '/')
-      && /^[\x21-\x5b\x5d-\x7e\u0080-\uffff]*$/.test(pathname)
+      && /^[\x20-\x5b\x5d-\x7e\u0080-\uffff]*$/.test(pathname)
       && pathname.split('/').slice(1).every((part) => part && part !== '.' && part !== '..');
   } catch {
     return false;
@@ -218,8 +237,13 @@ export function createWorktreeBootstrapStore({
     throw new TypeError('Worktree bootstrap store options are invalid');
   }
   let writes = Promise.resolve();
-  const enqueue = <Result>(operation: () => Promise<Result>) => {
-    const next = writes.then(() => withSourceControlFileLock(`${filePath}.lock`, operation, { fsImpl, waitMs: lockWaitMs }));
+  const forDirectory = <Result>(directory: string, operation: (fingerprint: string) => Promise<Result>) => {
+    const resolving = directoryFingerprint(directory, fsImpl);
+    resolving.catch(() => undefined);
+    const next = writes.then(async () => {
+      const fingerprint = await resolving;
+      return withSourceControlFileLock(`${filePath}.lock`, () => operation(fingerprint), { fsImpl, waitMs: lockWaitMs });
+    });
     writes = next.then(() => undefined, () => undefined);
     return next;
   };
@@ -257,8 +281,7 @@ export function createWorktreeBootstrapStore({
       throw error;
     }
   };
-  const write = (directory: string, bootstrapState: WorktreeBootstrapState) => enqueue(async () => {
-    const fingerprint = await directoryFingerprint(directory, fsImpl);
+  const write = (directory: string, bootstrapState: WorktreeBootstrapState) => forDirectory(directory, async (fingerprint) => {
     const record = parseBootstrapState(scrubBootstrapState(bootstrapState));
     const state = await readState();
     if (!Object.hasOwn(state.records, fingerprint) && Object.keys(state.records).length >= maxRecords) {
@@ -272,14 +295,13 @@ export function createWorktreeBootstrapStore({
     await writeState(state);
     return cloneRecord(record);
   });
-  const read = (directory: string) => enqueue(async () => {
+  const read = (directory: string) => forDirectory(directory, async (fingerprint) => {
     const state = await readState();
-    const record = state.records[await directoryFingerprint(directory, fsImpl)];
+    const record = state.records[fingerprint];
     return record ? cloneRecord(record) : null;
   });
-  const completeHydration = (directory: string) => enqueue(async () => {
+  const completeHydration = (directory: string) => forDirectory(directory, async (fingerprint) => {
     const state = await readState();
-    const fingerprint = await directoryFingerprint(directory, fsImpl);
     const current = state.records[fingerprint];
     if (current?.status !== 'failed' || !current.hydration
       || ['succeeded', 'not-needed'].includes(current.hydration.status)) return null;
@@ -290,9 +312,8 @@ export function createWorktreeBootstrapStore({
     await writeState(state);
     return cloneRecord(record);
   });
-  const remove = (directory: string, { ifMissingFailed = false } = {}) => enqueue(async () => {
+  const remove = (directory: string, { ifMissingFailed = false } = {}) => forDirectory(directory, async (fingerprint) => {
     const state = await readState();
-    const fingerprint = await directoryFingerprint(directory, fsImpl);
     if (ifMissingFailed) {
       const current = state.records[fingerprint];
       if (current && current.status !== 'failed') return false;

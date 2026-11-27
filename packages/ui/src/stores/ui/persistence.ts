@@ -1,10 +1,14 @@
-import { createDeferredSafeJSONStorage } from '../utils/safeStorage';
+import { createDeferredSafeJSONStorage, getSafeStorage } from '../utils/safeStorage';
+import { contextWindowOwnerId } from '@/lib/contextWindow/role';
+import { createContextWindowUIStorage } from '@/lib/contextWindow/storage';
+import type { ContextWindowRecord } from '@/lib/contextWindow/layoutState';
 import { EMPTY_NOTIFICATION_TEMPLATES, isLegacyDefaultTemplates } from '../utils/notificationTemplates';
 import { zonePlacementSchema } from '@/lib/workspace/zones';
 import { sanitizeWorkStatusSectionOrder } from '@/components/chat/work-status/sections';
 import type { PersistOptions } from 'zustand/middleware';
 import {
   normalizeLargeTextPasteBehavior,
+  documentAttachBehaviorSchema,
   normalizeFileEditorKeymap,
   DEFAULT_EDITOR_FONT_SIZE,
   DEFAULT_CONTEXT_EDITOR_TREE_WIDTH,
@@ -12,10 +16,10 @@ import {
 import { withoutForeignComparisons, sanitizeContextPanelByDirectory } from './contextPanelState';
 import type { LegacyZoneSizes, UIStore } from './types';
 
-export const uiStorePersistOptions = {
+const uiStorePersistOptions = {
   name: 'ui-store',
   storage: createDeferredSafeJSONStorage(),
-  version: 30,
+  version: 31,
   migrate: (persistedState, version) => {
     if (!persistedState || typeof persistedState !== 'object') {
       return persistedState;
@@ -36,6 +40,11 @@ export const uiStorePersistOptions = {
 
     if (version < 29 && state.contextEditorTreeWidth === 240) {
       state.contextEditorTreeWidth = DEFAULT_CONTEXT_EDITOR_TREE_WIDTH;
+    }
+
+    if (version < 31) {
+      if (state.activityRenderMode === 'text') state.keepEarlierReplies = true;
+      if (state.activityRenderMode === 'text' || state.activityRenderMode === 'summary') state.activityRenderMode = 'grouped';
     }
 
     if (version < 30) {
@@ -234,6 +243,7 @@ export const uiStorePersistOptions = {
 
     state.fileEditorKeymap = normalizeFileEditorKeymap(state.fileEditorKeymap);
     state.largeTextPasteBehavior = normalizeLargeTextPasteBehavior(state.largeTextPasteBehavior);
+    state.documentAttachBehavior = documentAttachBehaviorSchema.parse(state.documentAttachBehavior);
 
     if (state.toolJsonViewMode !== 'summary'
       && state.toolJsonViewMode !== 'formatted'
@@ -276,6 +286,7 @@ export const uiStorePersistOptions = {
     fileTreeSide: state.fileTreeSide,
     contextEditorVisible: state.contextEditorVisible,
     contextEditorTreeWidth: state.contextEditorTreeWidth,
+    gitSidebarWidth: state.gitSidebarWidth,
     contextZoneSizes: state.contextZoneSizes,
     contextZoneExpandedChatSizes: state.contextZoneExpandedChatSizes,
     workStatusExpandedSections: state.workStatusExpandedSections,
@@ -392,6 +403,7 @@ export const uiStorePersistOptions = {
     agentNotifyToolEnabled: state.agentNotifyToolEnabled,
     agentUsageToolEnabled: state.agentUsageToolEnabled,
     agentTerminalToolEnabled: state.agentTerminalToolEnabled,
+    agentActionsToolEnabled: state.agentActionsToolEnabled,
     agentImageToolEnabled: state.agentImageToolEnabled,
     agentImageModel: state.agentImageModel,
     agentMemoryDreamingEnabled: state.agentMemoryDreamingEnabled,
@@ -405,6 +417,7 @@ export const uiStorePersistOptions = {
     agentMemoryViewedAt: state.agentMemoryViewedAt,
     inputSpellcheckEnabled: state.inputSpellcheckEnabled,
     largeTextPasteBehavior: state.largeTextPasteBehavior,
+    documentAttachBehavior: state.documentAttachBehavior,
     enterToSend: state.enterToSend,
     enterToSendConfigured: state.enterToSendConfigured,
     mobileReturnKeySends: state.mobileReturnKeySends,
@@ -415,6 +428,7 @@ export const uiStorePersistOptions = {
     selectionApprovalText: state.selectionApprovalText,
     showToolFileIcons: state.showToolFileIcons,
     showTurnChangedFiles: state.showTurnChangedFiles,
+    keepEarlierReplies: state.keepEarlierReplies,
     timeFormatPreference: state.timeFormatPreference,
     weekStartPreference: state.weekStartPreference,
     desktopWindowControlsPosition: state.desktopWindowControlsPosition,
@@ -434,3 +448,19 @@ export const uiStorePersistOptions = {
     fileEditorVimMappings: state.fileEditorVimMappings,
   })
 } satisfies PersistOptions<UIStore, unknown>;
+
+export const contextWindowPersistOptions = (): PersistOptions<UIStore, unknown> => {
+  const ownerId = contextWindowOwnerId();
+  const layoutStorage = ownerId ? createDeferredSafeJSONStorage<ContextWindowRecord>() : undefined;
+  if (!ownerId || !layoutStorage) return uiStorePersistOptions;
+  return {
+    ...uiStorePersistOptions,
+    partialize: (state) => ({ ...uiStorePersistOptions.partialize(state), contextPanelByDirectory: state.contextPanelByDirectory }),
+    storage: createContextWindowUIStorage({
+      ownerId,
+      version: uiStorePersistOptions.version,
+      storage: getSafeStorage,
+      layoutStorage,
+    }),
+  };
+};

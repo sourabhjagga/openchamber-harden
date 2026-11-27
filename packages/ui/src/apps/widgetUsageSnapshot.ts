@@ -43,17 +43,21 @@ type WidgetFormat = {
 
 const quotaLabel = (key: string): string => (key.includes(' · ') ? key : formatWindowLabel(key));
 
-const quota = (key: string, window: UsageWindow, mode: 'used' | 'remaining', format: WidgetFormat): WidgetQuota => {
+const quota = (id: QuotaProviderId, key: string, window: UsageWindow, mode: 'used' | 'remaining', format: WidgetFormat): WidgetQuota => {
   const percent = mode === 'remaining' ? window.remainingPercent : window.usedPercent;
-  const value = formatQuotaWindowValueLabel(window, percent, format.t);
+  const value = formatQuotaWindowValueLabel(window, percent, format.t, mode === 'used' ? 'usage' : 'remaining');
   const entry: WidgetQuota = {
     label: quotaLabel(key),
     value: value === '-' ? '' : compactQuotaValueLabel(value),
     tone: resolveUsageTone(window.usedPercent),
   };
   if (percent !== null && Number.isFinite(percent)) entry.percent = Math.min(100, Math.max(0, percent));
-  const reset = formatQuotaResetShort(window.resetAt, window.resetAfterFormatted ?? window.resetAtFormatted,
-    format.timeFormatPreference);
+  const reset = formatQuotaResetShort(
+    window.resetAt,
+    window.resetAfterFormatted ?? window.resetAtFormatted,
+    format.timeFormatPreference,
+    { providerId: id },
+  );
   if (reset) entry.reset = format.t('settings.usage.card.resetsAt', { time: reset });
   return entry;
 };
@@ -64,11 +68,11 @@ export const createWidgetUsageSnapshot = (state: WidgetQuotaInput, format: Widge
     const result = state.results.find((entry) => entry.providerId === id);
     if (!result?.configured || !result.usage) return [];
     const windows = Object.entries(result.usage.windows ?? {})
-      .map(([key, value]) => quota(key, value, mode, format));
+      .map(([key, value]) => quota(id, key, value, mode, format));
     const modelEntries = Object.entries(result.usage.models ?? {});
     for (const [modelName, model] of selectVisibleModelEntries(id, modelEntries, state.selectedModels[id] ?? [])) {
       for (const [key, window] of Object.entries(model.windows ?? {})) {
-        windows.push(quota(`${modelName} · ${key}`, window, mode, format));
+        windows.push(quota(id, `${modelName} · ${key}`, window, mode, format));
       }
     }
     return windows.length > 0 ? [{ id, name: result.providerName, windows }] : [];

@@ -2,7 +2,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { pathToFileURL } from 'node:url';
 import { createOpenCodeEnvRuntime } from './env-runtime.js';
+import { isSupportedBundledNodeVersion, resolvePackageBundledOpenCodeServerDir } from './bundled-opencode-server.js';
 
 const originalOpencodeBinary = process.env.OPENCODE_BINARY;
 const originalComSpec = process.env.ComSpec;
@@ -175,7 +177,7 @@ describe('OpenCode env runtime', () => {
     expect(runtime.resolveManagedOpenCodeLaunchSpec(entry)).toEqual({
       binary: process.versions.bun ? expect.any(String) : process.execPath,
       args: [entry],
-      env: {},
+      env: { UV_THREADPOOL_SIZE: '32' },
       wrapperType: 'bundled-server',
     });
     const binary = createExecutable('openchamber-plain-opencode-');
@@ -484,6 +486,41 @@ describe('OpenCode env runtime', () => {
     expect(state.resolvedOpencodeBinarySource).toBe('env');
   });
 
+  it('resolves the web package bundled OpenCode server only from a built package layout', () => {
+    const root = createTempDir('openchamber-web-pkg-');
+    const builtModuleDir = path.join(root, 'build', 'server', 'lib', 'opencode');
+    const builtServerDir = path.join(root, 'build', 'opencode-server');
+    fs.mkdirSync(builtModuleDir, { recursive: true });
+    fs.mkdirSync(path.join(builtServerDir, 'assets'), { recursive: true });
+    fs.writeFileSync(path.join(builtServerDir, 'serve.mjs'), '');
+    fs.writeFileSync(path.join(builtServerDir, 'assets', 'manifest.json'), JSON.stringify({ mode: 'node_modules' }));
+
+    expect(resolvePackageBundledOpenCodeServerDir(pathToFileURL(path.join(builtModuleDir, 'bundled-opencode-server.js')).href)).toBe(builtServerDir);
+
+    const sourceModuleDir = path.join(root, 'server', 'lib', 'opencode');
+    const sourceServerDir = path.join(root, 'opencode-server');
+    fs.mkdirSync(sourceModuleDir, { recursive: true });
+    fs.mkdirSync(path.join(sourceServerDir, 'assets'), { recursive: true });
+    fs.writeFileSync(path.join(sourceServerDir, 'serve.mjs'), '');
+    fs.writeFileSync(path.join(sourceServerDir, 'assets', 'manifest.json'), JSON.stringify({ mode: 'node_modules' }));
+
+    expect(resolvePackageBundledOpenCodeServerDir(pathToFileURL(path.join(sourceModuleDir, 'bundled-opencode-server.ts')).href)).toBeNull();
+  });
+
+  it('requires Node 22.16+ or 24+ for the bundled OpenCode server', () => {
+    expect(isSupportedBundledNodeVersion('v20.19.0')).toBe(false);
+    expect(isSupportedBundledNodeVersion('22.12.0')).toBe(false);
+    expect(isSupportedBundledNodeVersion('22.15.0')).toBe(false);
+    expect(isSupportedBundledNodeVersion('22.16.0')).toBe(true);
+    expect(isSupportedBundledNodeVersion('22.23.3')).toBe(true);
+    expect(isSupportedBundledNodeVersion('23.11.1')).toBe(false);
+    expect(isSupportedBundledNodeVersion('24.0.0')).toBe(true);
+    expect(isSupportedBundledNodeVersion('24.14.0')).toBe(true);
+    expect(isSupportedBundledNodeVersion('v25.1.0')).toBe(true);
+    expect(isSupportedBundledNodeVersion('bun')).toBe(false);
+    expect(isSupportedBundledNodeVersion('')).toBe(false);
+  });
+
   it('resolves the bundled OpenCode server from Electron resourcesPath', () => {
     const bundledEntry = createBundledServer();
     process.env.PATH = createTempDir('openchamber-empty-path-');
@@ -569,20 +606,42 @@ describe('OpenCode env runtime', () => {
       },
     });
 
-    // Not probed yet, so the PowerShell and cmd snapshot probes run too.
+    // Not probed yet, so the registry probes run too.
     state.cachedLoginShellEnvSnapshot = undefined;
-    expect(runtime.getLoginShellEnvSnapshot()).toBeNull();
+    expect(runtime.getLoginShellEnvSnapshot()).toEqual({ PATH: process.env.PATH });
     expect(runtime.resolveOpencodeCliPath()).toBeNull();
     expect(calls.some((call) => call.command === 'where')).toBe(true);
+    expect(calls.some((call) => call.command.endsWith('reg.exe'))).toBe(true);
     for (const call of calls) {
       expect(call.options.timeout).toBe(10_000);
     }
-    const powershellCalls = calls.filter((call) => call.args.includes('-Command'));
-    expect(powershellCalls.length).toBeGreaterThan(0);
-    for (const call of powershellCalls) {
-      expect(call.args).toContain('-NoProfile');
-      expect(call.args).toContain('-NonInteractive');
-    }
+  });
+
+  it('puts the Windows registry PATH before the process PATH and expands only REG_EXPAND_SZ', () => {
+    setPlatform('win32');
+    const processPath = createTempDir('openchamber-process-path-');
+    process.env.PATH = processPath;
+    process.env.SystemRoot = 'C:\\Windows';
+    const machineOutput = [
+      '',
+      'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment',
+      '    Path    REG_EXPAND_SZ    %SystemRoot%\\system32;C:\\Program Files\\Git\\cmd;%NOT_SET_HERE%\\bin',
+      '',
+      '',
+    ].join('\r\n');
+    const userOutput = 'HKEY_CURRENT_USER\\Environment\r\n    Path    REG_SZ    C:\\literal\\%SystemRoot%\r\n';
+    const { runtime, state } = createRuntime({}, {
+      spawnSync: (command, args) => {
+        expect(command).toBe('C:\\Windows\\System32\\reg.exe');
+        if (args[1].startsWith('HKCU')) return { status: 0, stdout: userOutput };
+        return { status: 0, stdout: machineOutput };
+      },
+    });
+    state.cachedLoginShellEnvSnapshot = undefined;
+
+    expect(runtime.getLoginShellEnvSnapshot()).toEqual({
+      PATH: ['C:\\Windows\\system32;C:\\Program Files\\Git\\cmd;%NOT_SET_HERE%\\bin', 'C:\\literal\\%SystemRoot%', processPath].join(path.delimiter),
+    });
   });
 
   it('does not auto-detect the Windows OpenCode desktop app as a CLI', () => {

@@ -11,18 +11,21 @@ import type { useComposerInlineContext } from './useComposerInlineContext';
 import type { useComposerEditorState } from './useComposerEditorState';
 import type { useComposerDraftText } from './useComposerDraftText';
 import type { useComposerAttachmentWork } from './useComposerAttachmentWork';
+import type { useComposerLargePasteState } from './useComposerLargePasteState';
 import type { ComposerSendHandlers } from './composerSendHandlers';
 import React from 'react';
 import { useUIStore } from '@/stores/useUIStore';
 import { type QueuedContextPart, type QueuedMessageGoal } from '@/stores/messageQueueStore';
+import { withOriginalAttachment } from '@/stores/messageQueueAttachments';
 import { useSessionGoalArmStore } from '@/stores/useSessionGoalArmStore';
 import { useSelectionStore } from '@/sync/selection-store';
+import { isSessionModelChosen } from '@/sync/session-selection';
 import { prepareUserMessageResume } from '@/sync/user-message-resume';
-import { attachedImagesAsPathNotes, ImageSaveForTextModelError, modelCannotReadImages } from '@/sync/text-model-images';
+import { attachedFilesForModel, AttachmentPathSaveError } from '@/sync/model-attachment-paths';
 import { useInputStore, type SyntheticContextPart } from '@/sync/input-store';
 import { useInlineCommentDraftStore } from '@/stores/useInlineCommentDraftStore';
 import { useSnippetsStore } from '@/stores/useSnippetsStore';
-import { getRuntimeKey } from '@/lib/runtime-switch';
+import { captureRuntimeInstance, getRuntimeKey } from '@/lib/runtime-switch';
 import { parseAgentMentions } from '@/lib/messages/agentMentions';
 import { CONTEXT_METADATA_KEY, draftFromContextPayload } from '@/lib/messages/contextParts';
 import { toast } from '@/components/ui';
@@ -32,7 +35,6 @@ import { referencesLinkedIn, withoutSharedPageLinks, withReferencesFromText } fr
 import { type SessionReference } from '../../composer/sessionReferences';
 import { routeGuestSlashCommand } from '../../composer/submit/guestCommands';
 import { opencodeClient } from '@/lib/opencode/client';
-import { buildSkillMentionInstruction } from '@/lib/skillMentionInstruction';
 import { withMissingCitations } from '@/lib/attachmentIdentity';
 import { filterMissingInlineAttachments } from '../../composer/attachments/inlineMentionAttachments';
 import { buildComposerContext, expandCommentSnippets } from '../../composer/submit/buildOutgoingMessage';
@@ -42,10 +44,12 @@ import { withRegisteredSharedPages } from '../../sharePages/received/takeShareLi
 import type { ChatInputProps } from './chatInputProps';
 import { collectInlineSkillMentions } from './composerMentionTokens';
 import { recordLinkedReferences } from './recordLinkedReferences';
+import { saveAttachmentsHeldForSend } from './saveAttachmentsHeldForSend';
 
 type Dependencies = {
     inlineContext: Pick<ReturnType<typeof useComposerInlineContext>, 'isMobileCommentOpen' | 'hasDrafts' | 'attachmentsToSend' | 'inlineDraftTarget' | 'consumeDrafts'>;
     attachmentWork: Pick<ReturnType<typeof useComposerAttachmentWork>, 'waitForPendingAttachments'>;
+    largePasteState: Pick<ReturnType<typeof useComposerLargePasteState>, 'largeTextPasteOffer'>;
     i18n: Pick<ReturnType<typeof useI18n>, 't'>;
     draftText: Pick<ReturnType<typeof useComposerDraftText>, 'setMessage' | 'confirmedMentionsRef' | 'composerText'>;
     editorState: Pick<ReturnType<typeof useComposerEditorState>, 'composerRef'>;
@@ -62,12 +66,13 @@ type Dependencies = {
 };
 
 export function useComposerQueueActions({
-    inlineContext, attachmentWork, i18n, draftText, editorState, sendHandlers, sendAvailability,
+    inlineContext, attachmentWork, largePasteState, i18n, draftText, editorState, sendHandlers, sendAvailability,
     sessionScope, queueState, language, selection, mentionAttachments, props, referenceDrafts,
     preferences,
 }: Dependencies) {
     const { isMobileCommentOpen, hasDrafts, attachmentsToSend, inlineDraftTarget, consumeDrafts } = inlineContext;
     const { waitForPendingAttachments } = attachmentWork;
+    const { largeTextPasteOffer } = largePasteState;
     const { t } = i18n;
     const { setMessage, confirmedMentionsRef, composerText } = draftText;
     const { composerRef } = editorState;
@@ -93,7 +98,15 @@ export function useComposerQueueActions({
 
     const handleQueueMessage = React.useCallback(async () => {
         if (isMobileCommentOpen()) return;
+        if (largeTextPasteOffer) return;
         if (await waitForPendingAttachments()) {
+            void handleQueueMessageRef.current();
+            return;
+        }
+        const sent = attachmentsToSend(getCurrentInputSnapshot().message);
+        const held = await saveAttachmentsHeldForSend(chatDraftIdentity, messageQueueTarget?.directory ?? undefined, sent, t);
+        if (held === 'stopped') return;
+        if (held === 'saved') {
             void handleQueueMessageRef.current();
             return;
         }
@@ -107,8 +120,11 @@ export function useComposerQueueActions({
         }
         if (sendHeldByMissingFolderRef.current()) return;
         const queueRuntimeKey = getRuntimeKey();
+        const isQueueRuntime = captureRuntimeInstance();
         const queueTarget = messageQueueTarget;
         const queueSessionId = currentSessionId;
+        const keepSessionAgent = !(currentAgentName && useSelectionStore.getState().getSessionAgentPick(queueSessionId) === currentAgentName);
+        const keepSessionModel = keepSessionAgent && !(currentProviderId && currentModelId && isSessionModelChosen(queueSessionId, currentProviderId, currentModelId));
         const settleModelPick = useSelectionStore.getState().captureSessionModelPickSettlement(
             queueSessionId, currentProviderId, currentModelId, queueRuntimeKey,
         );
@@ -135,21 +151,25 @@ export function useComposerQueueActions({
             extractedMentionAttachments,
             opencodeClient,
         );
+        if (!isQueueRuntime()) return;
         let attachmentsToQueue = [...composerAttachments, ...mentionAttachments];
-        if (modelCannotReadImages(currentProviderId, currentModelId)) {
-            try {
-                attachmentsToQueue = await attachedImagesAsPathNotes(attachmentsToQueue, queueTarget.directory);
-            } catch (error) {
-                if (!(error instanceof ImageSaveForTextModelError)) throw error;
-                toast.error(t('chat.chatInput.toast.textModelImageSaveFailed', { files: error.filenames.join(', ') }));
-                return;
+        try {
+            if (currentProviderId && currentModelId) {
+                attachmentsToQueue = await attachedFilesForModel(
+                    { providerID: currentProviderId, modelID: currentModelId }, attachmentsToQueue, queueTarget.directory, isQueueRuntime,
+                );
             }
-            if (getRuntimeKey() !== queueRuntimeKey) return;
+        } catch (error) {
+            if (!isQueueRuntime()) return;
+            if (!(error instanceof AttachmentPathSaveError)) throw error;
+            toast.error(t('chat.chatInput.toast.textModelImageSaveFailed', { files: error.filenames.join(', ') }));
+            return;
         }
+        if (!isQueueRuntime()) return;
         const availableSkillNames = new Set(
             availableSkills.map((skill) => skill.name),
         );
-        const skillInstruction = buildSkillMentionInstruction(collectInlineSkillMentions(sanitizedText, availableSkillNames));
+        const skillNames = collectInlineSkillMentions(sanitizedText, availableSkillNames);
         const textToQueue = await useSnippetsStore.getState().expandText(sanitizedText).catch((error) => {
             console.warn('[queue] Failed to expand snippets, queueing original text:', error);
             return sanitizedText;
@@ -161,6 +181,11 @@ export function useComposerQueueActions({
         const linked = referencesLinkedIn(messageToQueue, linkedReferences);
         const linkedToQueue = await withRegisteredSharedPages(withReferencesFromText(linked, referenceLinksIn(messageToQueue)));
         const expandedDrafts = await expandCommentSnippets(drafts, useSnippetsStore.getState().expandText);
+        if (!isQueueRuntime()) {
+            if (draftTarget && drafts.length > 0) useInlineCommentDraftStore.getState().restoreDrafts(draftTarget, drafts);
+            if (syntheticParts.length > 0) useInputStore.getState().setPendingSyntheticParts(syntheticParts, mailboxTarget);
+            return;
+        }
         const actionsNote = currentSessionId
             ? planRunningActionsNote(currentSessionId, collectRunningActions(projectActionsRef.current))
             : null;
@@ -168,7 +193,7 @@ export function useComposerQueueActions({
             inlineComments: expandedDrafts,
             syntheticTexts: [...syntheticParts.map((part) => part.text), ...(actionsNote?.text ? [actionsNote.text] : [])],
             references: [...linkedToQueue.map(toContextReference), ...sessionMentionsIn(messageToQueue)],
-        }, skillInstruction);
+        });
         const goalArm = textToQueue.trim()
             ? useSessionGoalArmStore.getState().consume()
             : { armed: false, objectiveOverride: null };
@@ -195,6 +220,7 @@ export function useComposerQueueActions({
                 content: messageToQueue,
                 text: textToQueue,
                 agentMention: mention?.name,
+                skills: skillNames.length > 0 ? skillNames : undefined,
                 attachments: attachmentsToQueue.length > 0 ? attachmentsToQueue : undefined,
                 context: context.length > 0 ? context : undefined,
                 sendConfig: currentProviderId && currentModelId ? {
@@ -202,6 +228,8 @@ export function useComposerQueueActions({
                     modelID: currentModelId,
                     agent: currentAgentName ?? undefined,
                     variant: currentVariant ?? undefined,
+                    ...(keepSessionModel && { keepSessionModel: true }),
+                    ...(keepSessionAgent && { keepSessionAgent: true }),
                 } : undefined,
                 goal,
             });
@@ -234,7 +262,7 @@ export function useComposerQueueActions({
         void resumeAfterQueue().catch(console.warn);
         recordLinkedReferences(queueSessionId, queueTarget.directory, linkedToQueue);
         if (currentSessionId) actionsNote?.commit(currentSessionId);
-    }, [getCurrentInputSnapshot, currentSessionId, messageQueueTarget, inputMode, hasDrafts, guestCommands, attachmentsToSend, sanitizeAttachmentsForSend, prepareReadOnSendMentions, extractInlineFileMentions, mentionableAgents, availableSkills, consumePendingSyntheticParts, mailboxTarget, inlineDraftTarget, consumeDrafts, linkedReferences, scrollToLatest, clearAttachedFiles, chatDraftIdentity, setLinkedReferencesFor, updateLinkedReferencesFor, isMobile, isMobileCommentOpen, addToQueue, currentProviderId, currentModelId, currentAgentName, currentVariant, t, readSessionMentionsBeforeSend, sessionMentionsIn, referenceLinksIn, composerText, setMessage, waitForPendingAttachments, projectActionsRef, handleSubmitRef, handleQueueMessageRef, confirmedMentionsRef, sendHeldByMissingFolderRef, composerRef]);
+    }, [getCurrentInputSnapshot, currentSessionId, messageQueueTarget, inputMode, hasDrafts, guestCommands, attachmentsToSend, sanitizeAttachmentsForSend, prepareReadOnSendMentions, extractInlineFileMentions, mentionableAgents, availableSkills, consumePendingSyntheticParts, mailboxTarget, inlineDraftTarget, consumeDrafts, linkedReferences, scrollToLatest, clearAttachedFiles, chatDraftIdentity, setLinkedReferencesFor, updateLinkedReferencesFor, isMobile, isMobileCommentOpen, addToQueue, currentProviderId, currentModelId, currentAgentName, currentVariant, t, readSessionMentionsBeforeSend, sessionMentionsIn, referenceLinksIn, composerText, setMessage, waitForPendingAttachments, largeTextPasteOffer, projectActionsRef, handleSubmitRef, handleQueueMessageRef, confirmedMentionsRef, sendHeldByMissingFolderRef, composerRef]);
 
     const restoreQueuedContext = React.useCallback((context: readonly QueuedContextPart[]) => {
         const synthetic: SyntheticContextPart[] = [];
@@ -277,7 +305,7 @@ export function useComposerQueueActions({
                     contextText: part.text,
                 });
             } else if (payload.kind === 'change-request') {
-                restored.push({
+                const reference: Extract<ComposerReference, { kind: 'change-request' }> = {
                     kind: 'change-request',
                     provider: payload.provider ?? 'github',
                     number: payload.number,
@@ -287,7 +315,9 @@ export function useComposerQueueActions({
                     base: '',
                     includeDiff: false,
                     contextText: part.text,
-                });
+                };
+                if (payload.sourceLinks) reference.sourceLinks = payload.sourceLinks;
+                restored.push(reference);
             } else if (payload.kind === 'tracker-item') {
                 restored.push({ kind: 'tracker-item', provider: payload.provider, identifier: payload.identifier, title: payload.title, url: payload.url, contextText: part.text });
             } else if (payload.kind === 'session') {
@@ -336,7 +366,7 @@ export function useComposerQueueActions({
             if (!queued) return;
             if (queued.attachments && queued.attachments.length > 0) {
                 const currentAttachments = useInputStore.getState().attachedFiles;
-                useInputStore.getState().setAttachedFiles([...currentAttachments, ...queued.attachments]);
+                useInputStore.getState().setAttachedFiles([...currentAttachments, ...queued.attachments.map(withOriginalAttachment)]);
             }
             setMessage(withMissingCitations(queued.content, queued.attachments ?? []));
             if (queued.goal) useSessionGoalArmStore.getState().setArmed(true, queued.goal.objective ?? null);

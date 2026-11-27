@@ -2,6 +2,228 @@
 
 <!-- Legacy copy for app versions up to 1.22.1, which fetch this file for their update notes. Generated from changelog/*.md while it exists; delete it after 2026-09-19 and nothing will recreate it. -->
 
+## [2.8.1] - 2026-11-26
+
+### New
+
+- **Chat: Grouped activity, the new default.** Tool calls join into phases such as explore, edit and run, each with its own icon, so a long turn reads as a few groups. A reply replaced by a newer one after background work folds into one line saying what woke the agent.
+- **Git: one panel for changes, staging and history.** Git and Diffs are merged. A narrow panel shows changed files with their diffs inline, a wide one adds a resizable file list, and history opens in the same place.
+- **Layout: move the context panel into a window of its own.** Use the rail or a zone's header to put the panel on a second monitor; the chat window keeps a rail that brings it back.
+- Chat: press Stop or Esc before the model answers and the prompt comes back to the composer, ready to fix and send again.
+- Chat: a steered message shows when it is still waiting for the agent (thanks to @Galnaz).
+- Chat: expanded quotes show the words around the selected text.
+- Skills: turn on skills from MCP servers in Settings > Skills and mention them in the composer like any other skill.
+- Agents: an agent can run the project's actions, read their output and stop them. Turn it on in Settings > General > OpenChamber Tools > Project actions.
+- Agents: an agent can wait on a check it writes itself, which runs every few minutes without spending model turns, and a fired wait reaches a working agent right away.
+- Sessions: get a warning when a session and its subagents spend more than an amount you set in Settings > Sessions (thanks to @JosueGalRe).
+- Sidebar: the session list can show date headings (thanks to @Galnaz).
+- Sidebar: hide subagent sessions from the display menu, and open a hidden subagent that waits for you from its parent's badge (thanks to @gaojunran and @Galnaz).
+- Sidebar: pinned sessions can also show in In work, sessions sorted into your own sections leave In work, and custom sections can list leads.
+- Sidebar: hide or reorder single pages in the Pages section.
+- Notifications: an agent's or plugin's notification reaches your phone and web push the same way a finished turn does (thanks to @JosueGalRe).
+- Board: reply to and resolve review threads, see what each reviewer decided and dismiss a review (thanks to @gaojunran).
+- Board: change a pull request's base, update its branch or rebase it from the preview (thanks to @gaojunran).
+- Board: edit an issue's assignees and close a GitHub issue as completed or not planned (thanks to @gaojunran).
+- Board: the preview can show the newest activity first and fold a long description (thanks to @gaojunran).
+- Board: filter pull requests in the picker by status, author, repository and label (thanks to @gaojunran).
+- Board: refresh a Linear item from its preview.
+- Pull requests: filter the activity to comments, unresolved or resolved threads.
+- Browser: the start page lists running apps by page title and icon, and text typed in the address bar searches the web.
+- Desktop: updates download in the background and install when you quit, or when no work is running after a 30-second countdown you can cancel (thanks to @chaosmanage).
+- Desktop: open a project on an SSH instance in VS Code or Zed from the header (thanks to @JosueGalRe).
+- Mobile: share text, links and files from other iPhone apps into a new session.
+- Mobile: start a new session or a dictation from the app icon (thanks to @gaojunran and @JeremyKennedy).
+- Voice: pick a voice from a custom speech server's list, and use an OpenCode provider's key for a custom voice server (thanks to @Galnaz and @sergiopadure).
+- Settings: changes made to the settings file outside the app apply without a restart, themes included (thanks to @KonTy).
+
+### Improvements
+
+- Install: `@openchamber/web` brings its own OpenCode server, so the npm package, SSH instances and the Docker image run without a separate OpenCode install.
+- Usage: Copilot, Z.ai and Zhipu credits follow the used or remaining setting, and the collapsed Usage header keeps long numbers readable.
+- Work status: the cache row is named Prompt cache and explains itself on hover.
+- Spaces: model pickers in a space list only the models it may use, and Start and send sends the message once the space starts.
+- Spaces: Docker on another machine answers much faster.
+- Providers: models from a gateway's list carry their context size (thanks to @audioscavenger).
+- Providers: brand logos show for common custom provider names (thanks to @aomsir).
+- Settings: each session warming mode says what it does (thanks to @JosueGalRe).
+
+### Fixes
+
+- **Windows: the desktop app froze for up to 30 seconds at launch, on OpenCode restarts and every minute while a network drive or project folder was offline.** The app stays responsive, and the offline project waits until its folder returns.
+- Windows: deleting an open project or worktree could keep one CPU core busy.
+- Chat: a stale tab, /compact or a queued message could switch the session back to a model or agent nobody picked (thanks to @yulia-ivashko).
+- Chat: while OpenCode reloaded its config, a message could go to Big Pickle or be refused as an unknown model.
+- Chat: old prompts came back at the end of a long live chat, sometimes as empty bubbles.
+- Chat: queued prompts from another device could vanish, and cancelled ones could stay.
+- Chat: a message sent while the network dropped for a moment was lost (thanks to @JosueGalRe).
+- Chat: a skill mentioned in a queued or first message did not reach the agent.
+- Chat: secret cards and waiting pages failed with "fetch failed" after five minutes.
+- Chat: reverting a chat outside Git now says that the agent's file edits stayed on disk (thanks to @yulia-ivashko).
+- Chat: when a page an agent shows has a script error, the agent hears about it (thanks to @yulia-ivashko).
+- Chat: HTML pages that use browser storage stayed blank in previews and in the chat.
+- Chat: search steps through every match and shows it, also when there is only one (thanks to @yulia-ivashko and @Naputt1).
+- Chat: the session's agent showed as missing in a folder OpenCode had not opened yet.
+- Chat: a click on the model or agent menu before it loaded did nothing.
+- Chat: a diagram in a Markdown preview opens full screen again (thanks to @c-w-xiaohei).
+- Chat: a review comment's chip opens its file or diff (thanks to @gaojunran).
+- Chat: page annotations stay in the side panel chat (thanks to @ChangeHow).
+- Chat: the status row named a model while compacting (thanks to @AyhamJo7).
+- Recap: a turn that worked only through tools was summed up as doing nothing.
+- Goals: the agent stopped when one part needed you, though other parts could go on.
+- Walkthrough: a diff too big for the model gets a clear message.
+- Sessions: automatic cleanup counted time away from the app, so after a week off it archived what you worked on before.
+- Sessions: a new session draft whose save failed could not be found again.
+- Settings: projects disappeared when settings.json was briefly locked or could not be read (thanks to @yulia-ivashko).
+- Settings: saving a custom provider failed with "Integration not found" (thanks to @yulia-ivashko).
+- Settings: a new command typed while the list loaded was saved as new-command.
+- Settings: Restart is off in shared service mode and names the command to run, and each restart reports its own result (thanks to @MorningStar0709).
+- Settings: newly connected providers show without a reload (thanks to @IbrahimKhan12).
+- Skills: .claude skills were hidden when OpenCode still loaded them, or shown when Settings turned them off (thanks to @yulia-ivashko).
+- Git: integrating worktree commits could overwrite local changes in the checkout holding the target branch, and closing the app midway left sessions on a deleted folder.
+- Git: one worktree on an unresponsive disk held up New worktree, rename and delete for minutes.
+- Git: staging or committing a folder with more than a thousand new files failed.
+- Git: the first worktree from a new contributor fork failed with submodules or LFS.
+- Git: submodules or LFS files without a network remote showed a misleading sign-in error.
+- Git: a worktree made by an agent showed the wrong base branch.
+- Git: a branch diff showed unrelated commits when the local base was behind.
+- Git: Git requests hung when the gpg agent never started (thanks to @AyhamJo7).
+- Git: submodules pinned to a commit on no branch, LFS over HTTPS and remote URLs with spaces work (thanks to @lmnotran and @AyhamJo7).
+- Git: GitHub and GitLab remotes on an SSH host alias are recognized (thanks to @yulia-ivashko).
+- Git: large stacked diffs could crash the app (thanks to @Cyneric).
+- Git: pull request checks counted only check runs and missed commit statuses (thanks to @lmnotran).
+- Diffs: Stage and Discard stayed hidden after a refresh, and typing in a comment field could stop.
+- Composer: pasted issue and PR links work in a folder of several repositories (thanks to @yulia-ivashko).
+- Composer: inline comments made in one window were missing or erased in another.
+- Files: autosave skipped a file you emptied, and the file tree stopped taking clicks after a missed release on its resize grip (thanks to @yulia-ivashko).
+- Sidebar: pinned chats did not show in their pin lists (thanks to @IbrahimKhan12).
+- Sidebar: worktree sessions of repositories nested in a project folder were missing (thanks to @mv2sa).
+- Board: pages loaded with Load more vanished after a refresh (thanks to @yulia-ivashko).
+- Linear: people show by their full name.
+- Dictation: cancelling or closing a panel left the microphone on.
+- Browser: a running project action's dev server is listed under its address, and pages show a loading strip (thanks to @yulia-ivashko and @JosueGalRe).
+- Project actions: actions meant for another OS showed in the menu.
+- Desktop: the header's folder button opens the file manager Windows uses for folders (thanks to @yulia-ivashko).
+- Desktop: macOS asks before a shell command uses Calendar or Reminders (thanks to @JosueGalRe).
+- Desktop: links open in the browser only for http and https, and mail links keep working (thanks to @Galnaz).
+- Remote: a connection link with line breaks or invisible characters is accepted (thanks to @yulia-ivashko).
+- Remote: the private relay works behind a proxy (thanks to @naoya-in).
+- Mobile: notification banners for a session clear when you open it, on iPhone and Android (thanks to @yulia-ivashko and @JeremyKennedy).
+- Mobile: extension panels stayed blank on iPhone over a direct connection (thanks to @yulia-ivashko).
+- Mobile: tapping a slash command while the keyboard composed a word did nothing (thanks to @JosueGalRe).
+- Mobile: Pin to opens from the drawer, and settled requests drop their badge (thanks to @yulia-ivashko and @JeremyKennedy).
+- MCP: servers reconnect after signing in through the browser (thanks to @Cyneric).
+- Server: a command that timed out could hang the request (thanks to @DeryFerd).
+- Server: a new build could be served from the browser's old copy (thanks to @JeremyKennedy).
+- Server: the bundled OpenCode trusts the system's certificates and loads symlinked or extensionless TypeScript plugins (thanks to @JosueGalRe, @Davide95 and @slvvko).
+- Server: sessions on an external OpenCode got OpenChamber's tools without their instructions.
+- Server: the npm package ships patched zod and bun-pty (thanks to @JosueGalRe).
+- Menus taller than the screen scroll (thanks to @sergiopadure).
+
+### SDK
+
+- Source control: `reviewState` and the `reviewDrafts` capability let a Git host keep a review draft and show it before publishing (thanks to @gaojunran).
+- Links: `contributes.links.urls.origin` accepts a subdomain wildcard (thanks to @JosueGalRe).
+- Sessions: a session waiting on an agent's page counts as waiting on you (thanks to @yulia-ivashko).
+
+### Misc
+
+- Bundled OpenCode updated to 2.4.2.
+- The bundled OpenCode server needs Node 22.16 or newer, or 24 (thanks to @JosueGalRe).
+- Usage: Google and Antigravity quota cards are removed, because the way they read quota could get your Google accounts suspended.
+
+## [2.8.0] - 2026-11-22
+
+### New
+
+- **Leads: a session that runs a whole direction of work.** Start one with New lead in a project's menu, or make any session a lead from its menu. A lead hands tasks to its own sessions, checks what comes back and keeps a brief and a digest you answer in one reply; you can also hand an existing session to a lead.
+- **OpenCode Server: share one OpenCode with the CLI and TUI.** Use shared OpenCode service in Settings > General > OpenCode Server connects OpenChamber to the `opencode serve --service` background service. Add the OpenChamber plugin to your OpenCode config from the same section and OpenChamber's tools work there too. After `opencode update`, the update notification's Update and Reload OpenCode buttons move the service to the new version.
+- Chat: Activity has a third mode, Show notes, that folds tool rows and keeps what the agent wrote between steps in view (thanks to @yulia-ivashko).
+- Chat: a shell block in a finished reply has Run in terminal, which runs it in the project's terminal (thanks to @Cyneric).
+- Chat: Office documents can attach as the original file for the agent to edit, with a setting in Chat > Composer to always save, always convert or ask (thanks to @cemarta7).
+- Files: select code and comment on exactly that fragment (thanks to @cemarta7).
+- Files: an image opens over the whole window (thanks to @Galnaz).
+- Sessions: chats outside a project get their own default model, thinking level and agent in Settings > Sessions (thanks to @Galnaz).
+- Extensions: limit an extension to chosen folders, so it shows only in those projects (thanks to @JosueGalRe).
+- Agents: a secret an agent asks for can be kept for the project or for all projects, so you stop pasting the same token in every session (thanks to @JosueGalRe).
+- Board: an item's activity lists where it was mentioned, and its preview shows each reviewer's state (thanks to @gaojunran).
+- Board: pasted portal links resolve through extensions (thanks to @ChangeHow).
+- Providers: a custom provider can take its model defaults from a known provider (thanks to @cemarta7).
+- Voice: add your own transcription prompt (thanks to @cemarta7).
+- Walkthrough: export a walkthrough as Markdown or HTML (thanks to @cemarta7).
+- Shortcuts: show or hide reasoning traces from the palette or a key you assign (thanks to @Galnaz).
+- Scheduled tasks: search the session picker (thanks to @Galnaz).
+- Worktrees: the base branch picker lists remote default branches first (thanks to @Galnaz).
+- Workflows: an agent can fork a named agent with its history (thanks to @c-w-xiaohei).
+- Mobile: share text, links and files from other Android apps into a new session in your last-used project, and start a session from a Quick Settings tile (thanks to @gaojunran).
+- Mobile: on a portrait phone, terminal tabs open as a list you can switch, rename and close.
+
+### Improvements
+
+- Panels: closing a panel you opened from another one goes back to the previous panel.
+- Chat: wide Markdown tables expand to the chat's width (thanks to @chaosmanage).
+- Chat: an attachment the model cannot read reaches it as a saved file it can open (thanks to @chaosmanage).
+- Chat: a dropped provider connection shows as a retry while OpenCode retries, with no failed turn (thanks to @mv2sa).
+- Chat: a shell row reads Shell, leaving room for the command.
+- Appearance: menus and popovers are glass again, and the composer and status pills sit closer to the chat in dark themes.
+- Sidebar: the session list stays smooth while agents work with thousands of sessions.
+- Worktrees: the branch picker opens fast in repositories with many branches and shows one continuous list (thanks to @Cyneric).
+- Usage: the Work status headline includes extension usage, OpenRouter's monthly spend includes your own keys, and OpenCode Go shows the account name (thanks to @AlistairDClarke, @ghaabor and @kennycch).
+- Desktop: the tray menu and its tooltip follow the app's language (thanks to @Cyneric).
+- Browser: Google sign-in works in the browser panel.
+
+### Fixes
+
+- **Desktop: OpenCode Zen's free models answered every message with a usage limit error.**
+- Desktop: Claude turns failed with "Bun is not defined" while the old opencode-claude plugin was installed. The app removes it and connects Claude Agent with your Claude Code login.
+- OpenCode Server: with the shared service on, About and the update notification asked for a restart that changed nothing after `opencode update`, and diagnostics named the wrong OpenCode.
+- Chat: a late copy of an old error could stop a running turn and show its notice again under a newer one.
+- Chat: attachments you removed or moved to another server left copies of the file behind.
+- Chat: an answered question could come back after a reload, and a question cut off by an interrupt can be recovered (thanks to @sergiopadure, @DeryFerd and @JeremyKennedy).
+- Chat: a question's answers showed the reply text instead of the answers you picked (thanks to @JeremyKennedy).
+- Chat: older changed-file diffs failed to open (thanks to @chaosmanage).
+- Chat: live reasoning didn't show, and collapsed reasoning summaries stayed narrow on a wide row (thanks to @Cyneric and @gaojunran).
+- Chat: a write row drew its diff twice (thanks to @gaojunran).
+- Chat: exported images lost their web fonts (thanks to @ChangeHow).
+- Chat: a UI block whose fence lost its language showed as code (thanks to @linepi).
+- Chat: /btw hid messages that held only comments (thanks to @Cyneric).
+- Chat: a page image whose path holds an apostrophe failed to load (thanks to @Cyneric).
+- Composer: dictation started while opening a new draft could land in the previous session (thanks to @Cyneric).
+- Composer: the caret jumped after choosing how to paste a large text (thanks to @mv2sa).
+- Composer: word gestures crossed script boundaries, and the hint mixed into an empty composer's text on Android (thanks to @fake-monkey and @daveotero).
+- Sessions: subagents of a lead showed as leads, with the lead's pins and goal.
+- Sessions: a session started by an agent failed with "agent configuration is unavailable" in a folder OpenCode had not opened yet (thanks to @Galnaz).
+- Sessions: an empty session lost its model, a draft lost its folder after reopening, and pinned messages broke in forks (thanks to @Cyneric).
+- Sessions: a title followed the language of a path instead of the words around it (thanks to @lmnotran).
+- Goals: an interrupted turn left a goal running, and a failed progress check stopped it (thanks to @Cyneric and @40960).
+- Git: Sync and other transfers failed with trace headers set per command (thanks to @tomzx).
+- Git: submodule URLs ending in a slash and `.gitmodules` entries without a commit broke the repository view (thanks to @IbrahimKhan12 and @lmnotran).
+- GitHub: pasted GitHub Enterprise PR links didn't resolve, and same-repository Enterprise PRs couldn't open in a worktree (thanks to @DaKheera47).
+- Board: private GitHub images didn't load in item previews (thanks to @Dawnfz-Lenfeng).
+- Files: CSV files with a separator other than a comma showed as one column (thanks to @DeryFerd).
+- Diff: a changed-file chip didn't open in a project without a repository (thanks to @JeremyKennedy).
+- Usage: Claude reset times jittered, Claude usage ignored a custom Claude home, and slow Claude or Codex usage requests hung (thanks to @Cyneric, @deinspanjer and @abigfatstone).
+- Usage: OpenCode Go showed one account's meters while another was billed, and a token typed before Settings > Usage loaded was erased.
+- Notifications: a replaced notification didn't alert again, and subagent notifications stayed after you opened the parent (thanks to @ShuhanYan and @Cyneric).
+- Mobile: push came only from one saved instance (thanks to @Factor-scd).
+- Mobile: Android back skipped the parent session (thanks to @Cyneric).
+- Dictation: a dropped connection ended the dictation, and segments from compatible providers were cut short (thanks to @Tobias-Conrad and @Cyneric).
+- Terminal: terminals over a tunnel didn't connect, and Windows Store PowerShell wasn't found (thanks to @mv2sa and @Cyneric).
+- Tabs: more than 10 pinned session tabs were dropped (thanks to @orium).
+- Sidebar: Windows chats weren't found by ID or title, and project folding reset after switching instances (thanks to @JosueGalRe and @freeleex).
+- Browser: agent keystrokes could land in the chat composer, shifted symbols typed wrong, links opened in a new tab lost the referrer, and agent pages opened in the wrong desktop window (thanks to @Cyneric and @JosueGalRe).
+- Desktop: an idle SSH instance failed to open in a new window, and the Quake window covered the taskbar (thanks to @y10ab1 and @Cyneric).
+- Desktop: macOS updates asked for an administrator password when only the parent folder was protected (thanks to @JonathanO).
+- Desktop: TypeScript plugins installed from npm failed to load (thanks to @DeryFerd).
+- Updates: a failed npm check reported OpenCode as missing, and Windows updates through package manager shims failed to verify (thanks to @40960 and @Cyneric).
+- Notes: editing a note dropped whitespace (thanks to @Cyneric).
+- Scheduled tasks: very long names and prompts broke the task (thanks to @sergiopadure).
+- Security: tightened file writes through directory links, login attempt limits, device relay changes, origin checks and notification and settings routes (thanks to @DeryFerd).
+
+### SDK
+
+- Sessions: extensions can read a session's context and token usage (thanks to @chaosmanage).
+- Walkthrough: open Changes Walkthrough against a chosen comparison base (thanks to @cemarta7).
+
 ## [2.7.3] - 2026-11-19
 
 ### New

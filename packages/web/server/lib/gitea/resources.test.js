@@ -110,6 +110,19 @@ describe('Gitea change request context', () => {
     ...extra,
   });
 
+  it.each([
+    [{ admin: false, push: true, pull: true }, true],
+    [{ admin: false, push: false, pull: true }, false],
+    [undefined, undefined],
+  ])('says whether the reader may write the pull request branch from push %#', async (permissions, branchWriteAccess) => {
+    const { service } = setup(contextRoutes({
+      'GET /repos/alice/app': { ...fixtures.upstreamRepo, permissions },
+      'GET /repositories/1': { ...fixtures.upstreamRepo, permissions },
+    }));
+    const result = await service.changeRequestContext('/repo', 1, { remote: 'origin' });
+    expect(result.branchWriteAccess).toBe(branchWriteAccess);
+  });
+
   it('reads the diff per file, comments, reviews, commits and verdicts', async () => {
     const { service, calls } = setup(contextRoutes());
 
@@ -124,11 +137,104 @@ describe('Gitea change request context', () => {
     expect(result.commits.map((commit) => commit.headline)).toEqual(['Start feature', 'Finish feature']);
     expect(result.commitsComplete).toBe(true);
     expect(result.verdicts).toEqual([expect.objectContaining({ state: 'approved', author: expect.objectContaining({ username: 'alice' }) })]);
+    expect(result.reviews.map((review) => [review.id, review.state, review.author.login])).toEqual([['10', 'commented', 'carol'], ['3', 'approved', 'alice']]);
+    expect(result.reviews[1].submittedAt).toBe('2026-10-22T17:41:27+03:00');
     expect(result.reviewers.map((user) => [user.id, user.username])).toEqual([['1', 'alice'], ['3', 'carol']]);
     // Comments are one list: Gitea ignores paging there.
     const commentReads = calls.filter((call) => call.url.pathname === '/api/v1/repos/alice/app/issues/1/comments');
     expect(commentReads).toHaveLength(1);
     expect(commentReads[0].url.searchParams.has('page')).toBe(false);
+  });
+
+  it('reads every review state, dismissed included, newest first', async () => {
+    const reviews = [
+      { id: 11, user: { id: 1, login: 'alice', avatar_url: 'https://gitea.example.com/avatars/alice' }, state: 'APPROVED', submitted_at: '2026-10-01T10:00:00Z' },
+      { id: 12, user: { id: 2, login: 'bob' }, state: 'REQUEST_CHANGES', submitted_at: '2026-10-01T12:00:00Z' },
+      { id: 13, user: { id: 3, login: 'carol' }, state: 'COMMENT', submitted_at: '2026-10-01T09:00:00Z' },
+      { id: 14, user: { id: 4, login: 'dee' }, state: 'DISMISSED', submitted_at: '2026-10-01T13:00:00Z' },
+    ];
+    const { service } = setup(contextRoutes({ 'GET /repos/alice/app/pulls/1/reviews': reviews }));
+
+    const result = await service.changeRequestContext('/repo', 1, { includeTimeline: true, remote: 'origin' });
+
+    expect(result.reviews.map((review) => [review.id, review.state, review.author.login])).toEqual([
+      ['14', 'dismissed', 'dee'], ['12', 'changes_requested', 'bob'], ['11', 'approved', 'alice'], ['13', 'commented', 'carol'],
+    ]);
+    expect(result.reviews[2].author.avatarUrl).toBe('https://gitea.example.com/avatars/alice');
+    expect(result.reviews[2].submittedAt).toBe('2026-10-01T10:00:00Z');
+  });
+
+  it('reads one state per reviewer, the latest review deciding and asked reviewers still pending', async () => {
+    const ann = { id: 7, login: 'ann' };
+    const bo = { id: 8, login: 'bob' };
+    const review = (id, user, state, submittedAt, stale = false) => ({ id, user, state, stale, submitted_at: submittedAt });
+    const { service } = setup(contextRoutes({
+      'GET /repos/alice/app/pulls/1': { ...fixtures.forkPull, requested_reviewers: [{ id: 9, login: 'cy' }, { id: 7, login: 'ann' }] },
+      'GET /repos/alice/app/pulls/1/reviews': [
+        review(1, ann, 'COMMENT', '2026-10-01T09:00:00Z'),
+        review(2, bo, 'APPROVED', '2026-10-01T09:30:00Z'),
+        // A stale review still says what its author decided.
+        review(3, ann, 'REQUEST_CHANGES', '2026-10-01T10:00:00Z', true),
+        // A dismissed approval is no longer in force, so its author is not approved.
+        { ...review(4, { id: 10, login: 'di' }, 'APPROVED', '2026-10-01T10:30:00Z'), dismissed: true },
+        // A private draft after an approval leaves the approval in place.
+        review(5, bo, 'PENDING', '2026-10-01T11:00:00Z'),
+      ],
+    }));
+
+    const result = await service.changeRequestContext('/repo', 1, { includeTimeline: true, remote: 'origin' });
+
+    expect(result.reviewerStates.map(({ user, state }) => [user.username, state])).toEqual([
+      ['ann', 'changes_requested'], ['bob', 'approved'], ['di', 'pending'], ['cy', 'pending'],
+    ]);
+  });
+
+  it('says whether the account may dismiss reviews: a repository admin, on an open pull request', async () => {
+    const read = async (extra) => (await setup(contextRoutes(extra)).service.changeRequestContext('/repo', 1, { remote: 'origin' })).canDismissReviews;
+    const upstreamWith = (permissions) => ({ ...fixtures.upstreamRepo, permissions });
+
+    expect(await read()).toBe(true);
+    // A writer who is not an admin cannot dismiss on Gitea or Forgejo.
+    const writer = upstreamWith({ admin: false, push: true, pull: true });
+    expect(await read({ 'GET /repos/alice/app': writer, 'GET /repositories/1': writer })).toBe(false);
+    expect(await read({ 'GET /repos/alice/app/pulls/1': { ...fixtures.forkPull, state: 'closed' } })).toBe(false);
+    const unsaid = upstreamWith(undefined);
+    expect(await read({ 'GET /repos/alice/app': unsaid, 'GET /repositories/1': unsaid })).toBeUndefined();
+  });
+
+  it('keeps reviews it cannot read apart from none at all', async () => {
+    const requested = { ...fixtures.forkPull, requested_reviewers: [{ id: 9, login: 'cy' }] };
+    const read = async (reviews) => setup(contextRoutes({ 'GET /repos/alice/app/pulls/1': requested, 'GET /repos/alice/app/pulls/1/reviews': reviews }))
+      .service.changeRequestContext('/repo', 1, { remote: 'origin' });
+
+    // Only unreadable entries: the requested reviewer stays, with no claimed state.
+    const unknown = await read([{ state: 'APPROVED' }, { id: 4, state: 'SOMETHING_NEW', user: { id: 9, login: 'cy' } }]);
+    expect(unknown).not.toHaveProperty('reviews');
+    expect(unknown).not.toHaveProperty('reviewerStates');
+    expect(unknown.reviewers.map((user) => user.username)).toEqual(['cy']);
+
+    // A review request is a review record in Gitea but no opinion: nobody has reviewed yet.
+    const asked = await read([{ id: 5, state: 'REQUEST_REVIEW', user: { id: 9, login: 'cy' }, submitted_at: '2026-10-01T10:00:00Z' }]);
+    expect(asked.reviews).toEqual([]);
+    expect(asked.reviewerStates.map(({ user, state }) => [user.username, state])).toEqual([['cy', 'pending']]);
+  });
+
+  it('carries the reviewers, their states and the verdicts without the timeline', async () => {
+    const { service } = setup(contextRoutes());
+
+    const plain = await service.changeRequestContext('/repo', 1, { remote: 'origin' });
+
+    expect(plain).not.toHaveProperty('commits');
+    expect(plain.reviewers.map((user) => user.username)).toEqual(['alice', 'carol']);
+    expect(plain.reviewerStates.map(({ user, state }) => [user.username, state])).toEqual([['alice', 'approved'], ['carol', 'commented']]);
+    expect(plain.verdicts).toEqual([expect.objectContaining({ state: 'approved', author: expect.objectContaining({ username: 'alice' }) })]);
+
+    const timeline = await service.changeRequestContext('/repo', 1, { includeTimeline: true, remote: 'origin' });
+
+    expect(timeline.reviewers).toEqual(plain.reviewers);
+    expect(timeline.reviewerStates).toEqual(plain.reviewerStates);
+    expect(timeline.verdicts).toEqual(plain.verdicts);
+    expect(timeline.commits).toHaveLength(2);
   });
 
   it('keeps commits made within one second in the order Gitea lists them', async () => {
@@ -291,6 +397,54 @@ describe('Gitea mutations', () => {
       .rejects.toMatchObject({ status: 405, message: 'Work in progress PRs cannot be merged' });
   });
 
+  it('dismisses and undismisses a review through its two endpoints', async () => {
+    let dismissed = false;
+    const { service, calls } = setup({
+      'POST /repos/alice/app/pulls/1/reviews/9/dismissals': () => {
+        dismissed = true;
+        return { id: 9, state: 'APPROVED', dismissed };
+      },
+      'POST /repos/alice/app/pulls/1/reviews/9/undismissals': () => {
+        dismissed = false;
+        return { id: 9, state: 'APPROVED', dismissed };
+      },
+      'GET /repos/alice/app/pulls/1/reviews/9': () => ({ id: 9, state: 'APPROVED', dismissed }),
+    });
+
+    await expect(service.dismissReview({ providerTarget, reviewId: '9', dismissed: true, message: 'Off topic' })).resolves.toEqual({});
+    await expect(service.reconcileReviewDismiss(providerTarget, '9', true)).resolves.toEqual({ state: 'succeeded', result: {} });
+    await expect(service.dismissReview({ providerTarget, reviewId: '9', dismissed: false })).resolves.toEqual({});
+    await expect(service.reconcileReviewDismiss(providerTarget, '9', false)).resolves.toEqual({ state: 'succeeded', result: {} });
+
+    const writes = calls.filter((call) => call.method === 'POST');
+    expect(writes.map((call) => [call.url.pathname, call.body])).toEqual([
+      ['/api/v1/repos/alice/app/pulls/1/reviews/9/dismissals', { message: 'Off topic' }],
+      ['/api/v1/repos/alice/app/pulls/1/reviews/9/undismissals', {}],
+    ]);
+  });
+
+  it('reconciles a dismissal from the dismissed flag, which is how Gitea records it', async () => {
+    const { service } = setup({ 'GET /repos/alice/app/pulls/1/reviews/9': { id: 9, state: 'APPROVED', dismissed: true } });
+    await expect(service.reconcileReviewDismiss(providerTarget, '9', true)).resolves.toEqual({ state: 'succeeded', result: {} });
+    await expect(service.reconcileReviewDismiss(providerTarget, '9', false)).resolves.toEqual({ state: 'outcome-unknown' });
+  });
+
+  it('reads a review back that still stands as not dismissed', async () => {
+    const { service } = setup({ 'GET /repos/alice/app/pulls/1/reviews/9': { id: 9, state: 'APPROVED', dismissed: false } });
+    await expect(service.reconcileReviewDismiss(providerTarget, '9', true)).resolves.toEqual({ state: 'outcome-unknown' });
+    await expect(service.reconcileReviewDismiss(providerTarget, '9', false)).resolves.toEqual({ state: 'succeeded', result: {} });
+  });
+
+  it.each([
+    ['no dismissal mark', { id: 9, state: 'APPROVED' }],
+    ['another review', { id: 10, state: 'APPROVED', dismissed: false }],
+    ['no review id', { state: 'APPROVED', dismissed: false }],
+  ])('leaves a dismissal or restore unknown when the read-back carries %s', async (_case, answer) => {
+    const { service } = setup({ 'GET /repos/alice/app/pulls/1/reviews/9': answer });
+    await expect(service.reconcileReviewDismiss(providerTarget, '9', true)).resolves.toEqual({ state: 'outcome-unknown' });
+    await expect(service.reconcileReviewDismiss(providerTarget, '9', false)).resolves.toEqual({ state: 'outcome-unknown' });
+  });
+
   it('refuses a mutation target whose head already moved', async () => {
     const { service } = setup();
     await expect(service.resolveChangeRequestMutation(context, { project: upstream, number: 1, headSha: 'f'.repeat(40) }))
@@ -312,6 +466,29 @@ describe('Gitea mutations', () => {
       ['POST', { reviewers: ['bob'] }], ['DELETE', { reviewers: ['alice'] }],
     ]);
     await expect(service.setReviewers({ providerTarget, reviewers: ['404'] })).rejects.toMatchObject({ status: 422 });
+  });
+
+  it('reads every assignable person in the one answer Gitea gives', async () => {
+    const people = Array.from({ length: 50 }, (_, index) => ({ id: index + 1, login: `user${index + 1}` }));
+    const { service, calls } = setup({ 'GET /repos/alice/app/assignees': people });
+
+    const listed = await service.listReviewerCandidates('/repo', upstream, 'origin', { role: 'assignee' });
+
+    expect(listed.map((person) => person.login)).toEqual(people.map((person) => person.login));
+    expect(calls.filter((call) => call.url.pathname.endsWith('/assignees'))).toHaveLength(1);
+  });
+
+  it('removes the last assignee without reading who could be assigned', async () => {
+    const { service, calls } = setup({ 'PATCH /repos/alice/app/issues/6': { ...fixtures.issue, assignees: null } });
+
+    await service.setIssueAssignees({ providerTarget: { ...providerTarget, number: 6 }, assignees: [] });
+
+    expect(calls.map((call) => [call.method, call.body])).toEqual([['PATCH', { assignees: [] }]]);
+  });
+
+  it('leaves who may assign unknown: push grades the code, Gitea checks the issues unit', async () => {
+    const { service } = setup({ 'GET /repos/alice/app/issues/6': fixtures.issue });
+    expect(await service.getIssue('/repo', 6, upstream, 'origin')).not.toHaveProperty('writeAccess');
   });
 
   it('refuses to remove a reviewer who already reviewed, before sending anything', async () => {
@@ -747,5 +924,205 @@ describe('Gitea label filtering', () => {
     await expect(service.listIssues('/repo', { labels: ['bug,docs'] }))
       .rejects.toMatchObject({ code: 'INVALID_SOURCE_CONTROL_READ_CONTEXT', status: 400 });
     expect(calls).toHaveLength(0);
+  });
+});
+
+
+describe('Gitea cross-references', () => {
+  const timelineEntry = (overrides = {}) => ({
+    id: 1,
+    type: 'issue_ref',
+    ref_issue: {
+      id: 12,
+      number: 12,
+      title: 'Related bug',
+      html_url: `${ORIGIN}/bob/app/issues/12`,
+      repository: { full_name: 'bob/app' },
+      pull_request: null,
+    },
+    ref_action: 'close',
+    user: { id: 3, login: 'carol', avatar_url: `${ORIGIN}/avatars/carol` },
+    created_at: '2026-10-23T10:00:00+03:00',
+    ...overrides,
+  });
+  const author = { login: 'carol', avatarUrl: `${ORIGIN}/avatars/carol` };
+
+  it("reads an issue's cross-references from its timeline", async () => {
+    const { service, calls } = setup({
+      'GET /repos/bob/app/issues/6': fixtures.issue,
+      'GET /repos/bob/app/issues/6/timeline': [timelineEntry()],
+    });
+
+    const issue = await service.getIssue('/repo', 6, undefined, 'origin', { includeReferences: true });
+
+    expect(issue.references).toEqual([{
+      kind: 'issue',
+      number: 12,
+      title: 'Related bug',
+      url: `${ORIGIN}/bob/app/issues/12`,
+      repo: 'bob/app',
+      createdAt: '2026-10-23T10:00:00+03:00',
+      author,
+    }]);
+    const read = calls.find((call) => call.url.pathname === '/api/v1/repos/bob/app/issues/6/timeline');
+    expect(read.url.searchParams.get('limit')).toBe('50');
+  });
+
+  it('finds a recent mention past a first timeline page full of ordinary events', async () => {
+    const comment = (id) => ({ id, type: 'comment', body: 'ok', created_at: '2026-10-01T10:00:00Z' });
+    const pages = {
+      1: Array.from({ length: 50 }, (_, index) => comment(index + 1)),
+      2: Array.from({ length: 50 }, (_, index) => comment(index + 51)),
+      3: [comment(101), timelineEntry({ id: 102 })],
+    };
+    const { service, calls } = setup({
+      'GET /repos/bob/app/issues/6': fixtures.issue,
+      'GET /repos/bob/app/issues/6/timeline': (call) => new Response(
+        JSON.stringify(pages[call.url.searchParams.get('page')] ?? []),
+        { headers: { 'x-total-count': '102' } },
+      ),
+    });
+
+    const issue = await service.getIssue('/repo', 6, undefined, 'origin', { includeReferences: true });
+
+    expect(issue.references).toEqual([expect.objectContaining({ number: 12, url: `${ORIGIN}/bob/app/issues/12` })]);
+    // The read stays bounded: the first page and the last two.
+    const read = calls.filter((call) => call.url.pathname === '/api/v1/repos/bob/app/issues/6/timeline');
+    expect(read.map((call) => call.url.searchParams.get('page')).sort()).toEqual(['1', '2', '3']);
+  });
+
+  it("adds a pull request timeline's references only when they are asked for, a cross-repository one included", async () => {
+    const { service, calls } = setup({
+      'GET /repos/alice/app/pulls/1.diff': fixtures.forkPullDiff,
+      'GET /repos/alice/app/pulls/1/files': fixtures.forkPullFiles,
+      'GET /repos/alice/app/issues/1/comments': fixtures.comments,
+      'GET /repos/alice/app/pulls/1/reviews': fixtures.reviews,
+      [`GET /repos/alice/app/pulls/1/reviews/${fixtures.reviews[1].id}/comments`]: fixtures.reviewComments,
+      'GET /repos/alice/app/pulls/1/commits': fixtures.commits,
+      'GET /repos/alice/app/issues/1/timeline': [
+        timelineEntry({
+          type: 'pull_ref',
+          ref_issue: {
+            id: 7, number: 7, title: 'Follow-up', html_url: `${ORIGIN}/alice/app/pulls/7`, repository: { full_name: 'alice/app' }, pull_request: {},
+          },
+        }),
+        timelineEntry({
+          id: 2,
+          ref_issue: {
+            id: 3, number: 3, title: 'Upstream bug', html_url: `${ORIGIN}/carol/lib/issues/3`, repository: { full_name: 'carol/lib' }, pull_request: null,
+          },
+        }),
+      ],
+    });
+
+    const plain = await service.changeRequestContext('/repo', 1, { remote: 'origin' });
+    expect(plain).not.toHaveProperty('references');
+    // The timeline alone, as every preview outside the Source Board reads it, carries none.
+    const timelineOnly = await service.changeRequestContext('/repo', 1, { includeTimeline: true, remote: 'origin' });
+    expect(timelineOnly).not.toHaveProperty('references');
+    expect(calls.some((call) => call.url.pathname.endsWith('/issues/1/timeline'))).toBe(false);
+
+    const result = await service.changeRequestContext('/repo', 1, { includeTimeline: true, includeReferences: true, remote: 'origin' });
+    expect(result.references).toEqual([
+      {
+        kind: 'pull', number: 7, title: 'Follow-up', url: `${ORIGIN}/alice/app/pulls/7`, repo: 'alice/app', createdAt: '2026-10-23T10:00:00+03:00', author,
+      },
+      {
+        kind: 'issue', number: 3, title: 'Upstream bug', url: `${ORIGIN}/carol/lib/issues/3`, repo: 'carol/lib', createdAt: '2026-10-23T10:00:00+03:00', author,
+      },
+    ]);
+  });
+
+  it('reads a comment that mentions the item as the comment, not as a bare reference', async () => {
+    const { service } = setup({
+      'GET /repos/bob/app/issues/6': fixtures.issue,
+      'GET /repos/bob/app/issues/6/timeline': [
+        timelineEntry({
+          id: 15,
+          type: 'comment_ref',
+          ref_issue: {
+            id: 2, number: 2, title: 'Scratch: pull request demo', html_url: `${ORIGIN}/bob/app/pulls/2`,
+            repository: { full_name: 'bob/app' }, pull_request: { id: 2 },
+          },
+          ref_comment: {
+            id: 15, body: 'Refs #1 so the timeline has a cross-reference.',
+            user: { id: 9, login: 'nebula', avatar_url: `${ORIGIN}/avatars/nebula` },
+            created_at: '2026-11-16T03:03:02+08:00',
+          },
+          user: { id: 3, login: 'carol', avatar_url: `${ORIGIN}/avatars/carol` },
+          created_at: '2026-11-16T03:03:02+08:00',
+        }),
+        timelineEntry({
+          id: 16,
+          type: 'comment_ref',
+          ref_issue: {
+            id: 9, number: 9, title: 'Plain issue mention', html_url: `${ORIGIN}/bob/app/issues/9`,
+            repository: { full_name: 'bob/app' }, pull_request: null,
+          },
+          ref_comment: {
+            id: 16, body: 'Also refs #1.', user: { id: 9, login: 'nebula', avatar_url: `${ORIGIN}/avatars/nebula` },
+            created_at: '2026-11-16T04:00:00+08:00',
+          },
+          created_at: '2026-11-16T04:00:00+08:00',
+        }),
+      ],
+    });
+
+    const issue = await service.getIssue('/repo', 6, undefined, 'origin', { includeReferences: true });
+
+    const nebula = { login: 'nebula', avatarUrl: `${ORIGIN}/avatars/nebula` };
+    expect(issue.references).toEqual([
+      {
+        kind: 'pull', number: 2, title: 'Scratch: pull request demo', url: `${ORIGIN}/bob/app/pulls/2`,
+        repo: 'bob/app', createdAt: '2026-11-16T03:03:02+08:00', author: nebula,
+      },
+      {
+        kind: 'issue', number: 9, title: 'Plain issue mention', url: `${ORIGIN}/bob/app/issues/9`,
+        repo: 'bob/app', createdAt: '2026-11-16T04:00:00+08:00', author: nebula,
+      },
+    ]);
+  });
+
+  it('keeps one row when the same item is mentioned more than once', async () => {
+    const { service } = setup({
+      'GET /repos/bob/app/issues/6': fixtures.issue,
+      'GET /repos/bob/app/issues/6/timeline': [
+        timelineEntry({ id: 20, type: 'comment_ref', ref_comment: { created_at: '2026-10-24T10:00:00Z' } }),
+        timelineEntry({ id: 21, type: 'comment_ref', ref_comment: { created_at: '2026-10-23T10:00:00Z' } }),
+      ],
+    });
+
+    const issue = await service.getIssue('/repo', 6, undefined, 'origin', { includeReferences: true });
+    expect(issue.references).toHaveLength(1);
+    expect(issue.references[0].createdAt).toBe('2026-10-23T10:00:00Z');
+  });
+
+  it('ignores timeline events that name no readable item', async () => {
+    const { service } = setup({
+      'GET /repos/bob/app/issues/6': fixtures.issue,
+      'GET /repos/bob/app/issues/6/timeline': [
+        // A comment reference needs its own ref_issue to point anywhere.
+        timelineEntry({ id: 1, type: 'comment_ref', ref_issue: undefined }),
+        timelineEntry({ id: 2, type: 'commit_ref' }),
+        // A reference the timeline names without a number or a URL is dropped.
+        timelineEntry({ id: 3, ref_issue: { number: '12', html_url: `${ORIGIN}/bob/app/issues/12` } }),
+        timelineEntry({ id: 4, ref_issue: { number: 12 } }),
+        timelineEntry({ id: 5, ref_issue: undefined }),
+      ],
+    });
+
+    const issue = await service.getIssue('/repo', 6, undefined, 'origin', { includeReferences: true });
+    expect(issue).not.toHaveProperty('references');
+  });
+
+  it('keeps an issue readable when its timeline cannot be read', async () => {
+    const { service } = setup({
+      'GET /repos/bob/app/issues/6': fixtures.issue,
+      'GET /repos/bob/app/issues/6/timeline': () => new Response('{}', { status: 500 }),
+    });
+
+    const issue = await service.getIssue('/repo', 6, undefined, 'origin', { includeReferences: true });
+    expect(issue).toMatchObject({ number: 6 });
+    expect(issue).not.toHaveProperty('references');
   });
 });

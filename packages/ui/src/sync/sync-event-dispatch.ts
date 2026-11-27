@@ -24,6 +24,7 @@ import { processVSCodePermissionAutoAccept } from "./vscode-permission-auto-acce
 import { useGlobalSessionsStore } from "@/stores/useGlobalSessionsStore"
 import { cleanupPersistedSessionState } from "./session-deletion-cleanup"
 import { toast } from "@/components/ui"
+import { dropFormDraftsForRequest } from "@/components/chat/formDrafts"
 import { applyGlobalSessionStatusEvent } from "./global-session-status"
 import { applyGlobalBlockingRequestEvents } from "./global-blocking-requests"
 import { applyBackgroundShellEvents, directoriesWithRunningShells, refreshBackgroundShells } from "./background-shells"
@@ -38,6 +39,7 @@ import { sessionEvents } from "@/lib/sessionEvents"
 import { fileTreeChanges } from "@/lib/fileTreeChanges"
 import { notifyWatchedFileChanged } from "@/lib/watchedFiles"
 import { getImperativeSessionMessageLoader } from "./session-message-loader"
+import { notifyServerConnect } from "./server-connect"
 import { claimFirstServerConnect, notifyFirstServerConnect } from "./first-server-connect"
 import { type EventRoutingIndex, normalizeEventDirectory, resolveDirectoryFromRoutingIndex, resolveCachedSessionDirectory, findSessionInChildStores, updateRoutingIndexFromEvent, resolveMaterializationSessionID } from "./event-routing-index"
 import { type DirectoryEventBatch, getDirectoryEventState, type SessionMove } from "./directory-event-batch"
@@ -206,6 +208,7 @@ export function handleEvent(
       scheduleCatalogReload(result.kind, childStores, null)
     }
     if (payload.type === "server.connected") {
+      if (expectedRuntimeKey === getRuntimeKey()) notifyServerConnect()
       void runBackgroundNetworkTask(() => refreshBackgroundImages(() => opencodeClient.listRunningImageJobs()))
         .catch(() => undefined)
       if (expectedRuntimeKey === getRuntimeKey() && claimFirstServerConnect(childStores, expectedRuntimeKey)) {
@@ -318,7 +321,10 @@ export function handleEvent(
   }
 
   if (payload.type === "form.created") {
-    notifyFormCreated(payload.properties.form, resolvedDirectory)
+    const { form } = payload.properties
+    const pending = getDirectoryEventState(store, batch).form[form.sessionID]?.some((item) => item.id === form.id)
+    if (!pending) dropFormDraftsForRequest(expectedRuntimeKey, form.sessionID, form.id)
+    notifyFormCreated(form, resolvedDirectory)
   }
 
   if (payload.type === "form.settled") {
@@ -425,6 +431,10 @@ export function handleEvent(
     getImperativeSessionMessageLoader()?.invalidateSession(
       { directory: resolvedDirectory, sessionID }, draft.message[sessionID] ?? [],
     )
+  }
+  if (payload.type === "message.removed") {
+    const { sessionID, messageID } = payload.properties
+    getImperativeSessionMessageLoader()?.optimisticConfirm({ directory: resolvedDirectory, sessionID, messageID })
   }
   if (reducerChanged && (payload.type === "session.patched" || payload.type === "session.deleted")) {
     recordDirectoryRecoveryEvent(store, payload)

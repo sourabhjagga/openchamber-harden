@@ -1,8 +1,8 @@
 import type { Part } from '@/lib/opencode/model';
 import { isShownInPlace } from '@/lib/opencode/tools';
 import { filterVisibleParts, isEmptyTextPart } from '../../message/partUtils';
-import { getShownPages, isSettledAsk, type ShownPart } from './liveActivity';
-import type { TimelineRow } from './timelineRows';
+import { getShownPages, hasUiBlock, isSettledAsk, type ShownPart } from './liveActivity';
+import { AFTER_LAST_PART, type TimelineRow } from './timelineRows';
 import type { ChatMessageEntry } from './types';
 
 export type RowSizeMetrics = {
@@ -24,8 +24,8 @@ const DETAILED_TOOL_EXTRA_PX = 14;
 const DETAILED_TOOLS = new Set(['patch', 'edit', 'write', 'subagent', 'task']);
 const TURN_END_PX = 76;
 const TURN_END_WITHOUT_ANSWER_PX = 8;
-const FOLD_HEADER_PX = 40;
 const SHOWN_PAGE_PX = 320;
+const NESTED_INDENT_PX = 20;
 const UNGROUPED_PX = 120;
 const PATCH_FILE_CHIP_PX = 155;
 const PATCH_FILES_EXTRA_PX = 18;
@@ -77,6 +77,7 @@ const sliceText = (part: Part & { type: 'text' }, row: Extract<TimelineRow, { ki
 
 const rowParts = (message: ChatMessageEntry, row: Extract<TimelineRow, { kind: 'turn-message' }>, metrics: RowSizeMetrics): Part[] => {
     const parts = filterVisibleParts(message.parts, { includeReasoning: metrics.showReasoningTraces }).filter((part) => !isEmptyTextPart(part));
+    if (row.slice?.from === AFTER_LAST_PART) return [];
     const start = row.slice?.from ? parts.findIndex((part) => part.id === row.slice?.from?.partId) : 0;
     const endCut = row.slice?.to;
     let end = parts.length;
@@ -89,16 +90,16 @@ const rowParts = (message: ChatMessageEntry, row: Extract<TimelineRow, { kind: '
 
 type TurnRowOf<K extends TimelineRow['kind']> = Extract<TimelineRow, { kind: K }>;
 
-const hoistedPages = (row: TurnRowOf<'turn-message' | 'turn-pages'>) => {
+const hoistedPages = (row: TurnRowOf<'turn-fold' | 'turn-message' | 'turn-pages'>) => {
     if (!row.underFold) return [];
     const finalMessage = row.finalMessageId ? row.entry.turn.assistantMessages.find((message) => message.info.id === row.finalMessageId) : undefined;
     return getShownPages(row.entry.turn.assistantMessages, finalMessage);
 };
 
-const hoistedHeight = (pages: ShownPart[], metrics: RowSizeMetrics): number => pages.reduce(
-    (height, page) => height + (page.type === 'tool' && isSettledAsk(page) ? metrics.lineHeight : SHOWN_PAGE_PX),
-    0,
-);
+const hoistedHeight = (pages: ShownPart[], metrics: RowSizeMetrics): number => pages.reduce((height, page) => {
+    if (page.type === 'text' && !hasUiBlock(page.text)) return height + markdownHeight(page.text, metrics.columnWidth);
+    return height + (page.type === 'tool' && isSettledAsk(page) ? metrics.lineHeight : SHOWN_PAGE_PX);
+}, 0);
 
 const messageRowHeight = (row: TurnRowOf<'turn-message'>, metrics: RowSizeMetrics): number | undefined => {
     const message = row.entry.turn.assistantMessages.find((candidate) => candidate.info.id === row.messageId);
@@ -140,13 +141,17 @@ const promptHeight = (message: ChatMessageEntry, metrics: RowSizeMetrics): numbe
     return height > 0 ? PROMPT_CHROME_PX + height : EMPTY_PROMPT_PX;
 };
 
-export const estimateTimelineRowSize = (row: TimelineRow, metrics: RowSizeMetrics): number | undefined => {
-    if (metrics.columnWidth <= 0) return undefined;
+export const estimateTimelineRowSize = (row: TimelineRow, columnMetrics: RowSizeMetrics): number | undefined => {
+    if (columnMetrics.columnWidth <= 0) return undefined;
+    const metrics = row.kind === 'ungrouped' || row.depth === 0 ? columnMetrics : { ...columnMetrics, columnWidth: columnMetrics.columnWidth - row.depth * NESTED_INDENT_PX };
     let height: number;
     switch (row.kind) {
         case 'ungrouped': return UNGROUPED_PX;
+        case 'turn-fold':
+        case 'turn-line':
+        case 'earlier-lines':
+        case 'turn-group': height = metrics.lineHeight; break;
         case 'turn-head': height = promptHeight(row.entry.turn.userMessage, metrics); break;
-        case 'turn-fold': height = FOLD_HEADER_PX; break;
         case 'turn-pages': height = hoistedHeight(hoistedPages(row), metrics); break;
         case 'turn-message': {
             const message = messageRowHeight(row, metrics);

@@ -13,9 +13,10 @@ const windowSchema = z.object({
   valueLabel: z.string().nullable().optional(),
   value: z.discriminatedUnion('kind', [
     z.object({ kind: z.literal('requests'), count: z.number().finite().nonnegative() }),
-    z.object({ kind: z.literal('spend'), spent: z.number().finite().nonnegative(), limit: z.number().finite().positive().nullable() }),
+    z.object({ kind: z.literal('spend'), spent: z.number().finite().nonnegative().nullable(), limit: z.number().finite().positive().nullable() }),
   ]).optional(),
   creditsUsed: z.number().finite().nonnegative().optional(),
+  credits: z.object({ used: z.number().finite().nonnegative(), limit: z.number().finite().positive(), remaining: z.number().finite().nonnegative().optional() }).optional(),
   giftReset: z.object({ recordId: z.number(), expireAt: z.number(), grantType: z.string().optional() }).nullable().optional(),
 });
 const windowsSchema = z.record(z.string(), windowSchema);
@@ -93,6 +94,7 @@ export const fetchQuota = async (
       error: z.string().optional(),
       planLabel: z.string().nullable().optional(),
       accountLabel: z.string().nullable().optional(),
+      selection: z.string().optional(),
       usage: z.object({
         windows: windowsSchema,
         models: z.record(z.string(), z.object({ windows: windowsSchema })).optional(),

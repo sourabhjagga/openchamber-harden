@@ -7,6 +7,7 @@ import {
   mapChangeRequest,
   mapCI,
   mapComment,
+  mapCommitStatus,
   mapFile,
   mapIssue,
   mapProject,
@@ -26,7 +27,6 @@ import {
 import {
   buildReferenceSearchQuery,
   fetchDiscussionDetail,
-  fetchPullStack,
   fetchReferenceDetail,
   labelSearchQualifiers,
   mapReferencesAcross,
@@ -34,18 +34,22 @@ import {
   readReferencePeople,
   readReferenceState,
   readReferencesAcrossRequest,
-  parseReferenceLink,
   searchGitHubReferences,
   searchGitHubReferencesAcross,
 } from './reference-search.js';
+import { createContextCache } from './context-cache.js';
+import { readAssignablePeople } from './people.js';
+import { fetchPullStack } from './pull-stack.js';
+import { referencesField } from './references.js';
+import { parseReferenceLink } from './reference-links.js';
 import { fetchReviewState } from './review-draft.js';
+import { readReviewContext, type ContextReviewFields } from './review-summaries.js';
 import type { Octokit, RestEndpointMethodTypes } from '@octokit/rest';
 import type { ProviderImplementation, ProviderSession } from '../source-control/provider-contract.js';
 import type { ContributorProvenanceRead } from '../git/contributor-provenance-storage.js';
 import type { AcrossContext, AcrossGroup, DiscoveryRepository, GitHubEnvelope } from './contracts.js';
 import type { CI } from './mappers.js';
 import { retainedEntry } from './contracts.js';
-
 type ResourceMethods = ProviderImplementation['resources'];
 type ResourceInput<Key extends keyof ResourceMethods> = Parameters<NonNullable<ResourceMethods[Key]>>[0];
 type Rest = RestEndpointMethodTypes;
@@ -53,6 +57,7 @@ type Pull = Rest['pulls']['get']['response']['data'];
 type ListedPull = Rest['pulls']['list']['response']['data'][number];
 type Issue = Rest['issues']['get']['response']['data'];
 type CheckRun = Rest['checks']['listForRef']['response']['data']['check_runs'][number];
+type CommitStatus = Rest['repos']['getCombinedStatusForRef']['response']['data']['statuses'][number];
 type Job = Rest['actions']['listJobsForWorkflowRun']['response']['data']['jobs'][number];
 type Annotation = Rest['checks']['listAnnotations']['response']['data'][number];
 type Identity = Pick<ReturnType<typeof mapProject>, 'provider' | 'instance'>;
@@ -76,7 +81,7 @@ export interface GitHubResourceOptions {
   readContributorProvenance?: ((directory: string) => Promise<ContributorProvenanceRead>) | undefined;
   invalidateAccount: (identity: GitHubEnvelope['data'], persisted: boolean) => Promise<boolean>;
 }
-interface ContextScope {
+export interface ContextScope {
   accountId: string;
   credentialRevision: number | null;
   repositoryId: string | undefined;
@@ -84,7 +89,7 @@ interface ContextScope {
   primaryRemote: string;
   number: number | undefined;
 }
-export interface PullContext {
+export interface PullContext extends ContextReviewFields {
   identity: Identity;
   fetchedAt: number;
   project: ReturnType<typeof mapProject>;
@@ -131,9 +136,6 @@ const errorCodeStartsWith = (code: GitHubEnvelope['code'], prefix: string) => {
   return Boolean(method.call(code, prefix));
 };
 
-
-const PR_CONTEXT_CACHE_TTL_MS = 30_000;
-const PR_CONTEXT_CACHE_MAX_ENTRIES = 50;
 const GITHUB_COM = 'github.com';
 const PULL_LIST_STATES = new Set(['open', 'closed', 'merged', 'all']);
 const PULL_LIST_PEOPLE = new Set(['any', 'assigned', 'created', 'reviewRequested']);
@@ -147,7 +149,6 @@ export const responseError = <Body extends { error: unknown }>(status: number, b
 const sourceControlError = (message: string, code: string, status: number) => Object.assign(new Error(message), { code, status });
 
 const notInProject = () => responseError(400, { error: 'Repository is not part of this project' });
-
 const rateLimited = () => Object.assign(new Error('GitHub rate limited'), { status: 503 });
 
 const sameRepository = (left: Pick<DiscoveryRepository, 'owner' | 'repo'>, right: Pick<DiscoveryRepository, 'owner' | 'repo'>) => left.owner.toLowerCase() === right.owner.toLowerCase()
@@ -157,35 +158,6 @@ export const gitHubRefusalMessage = (error: GitHubEnvelope['data']) => {
   const message = errorField(errorField(errorField(error, 'response'), 'data'), 'message');
   return isProviderString(message) && message.trim() ? message : errorField(error, 'message');
 };
-
-function createContextCache() {
-  const entries = new Map<string, { data: PullContext; includeCheckDetails: boolean; fetchedAt: number; scope: ContextScope }>();
-  let epoch = 0;
-  return Object.freeze({
-    begin: () => epoch,
-    read: (key: string, includeCheckDetails: boolean) => {
-      const entry = entries.get(key);
-      return entry && Date.now() - entry.fetchedAt < PR_CONTEXT_CACHE_TTL_MS && (entry.includeCheckDetails || !includeCheckDetails)
-        ? entry.data
-        : null;
-    },
-    store: (key: string, scope: ContextScope, data: PullContext, includeCheckDetails: boolean, started: number) => {
-      if (started !== epoch) return;
-      entries.delete(key);
-      entries.set(key, { data, includeCheckDetails, fetchedAt: data.fetchedAt, scope });
-      if (entries.size > PR_CONTEXT_CACHE_MAX_ENTRIES) {
-        const oldest = entries.keys().next().value;
-        if (oldest !== undefined) entries.delete(oldest);
-      }
-    },
-    invalidate: (scope: Partial<ContextScope>) => {
-      epoch += 1;
-      for (const [key, entry] of entries) {
-        if (Object.entries(scope).every(([field, value]) => errorField(entry.scope, field) === value)) entries.delete(key);
-      }
-    },
-  });
-}
 
 export function createGitHubResources({
   load,
@@ -238,25 +210,18 @@ export function createGitHubResources({
   };
 
   const readChecks = async (octokit: Octokit, repo: DiscoveryRepository, sha: string, { runs: keepRuns = false } = {}) => {
-    const { checks: { dedupeCheckRuns, summarizeCheckRuns, summarizeCombinedStatuses } } = await load();
-    let summary: ReturnType<GitHubResourceModules['checks']['summarizeCheckRuns']> | ReturnType<GitHubResourceModules['checks']['summarizeCombinedStatuses']> | null = null;
-    let checkRuns: CheckRun[] = [];
-    try {
-      const response = await octokit.rest.checks.listForRef({ owner: repo.owner, repo: repo.repo, ref: sha, per_page: 100 });
-      checkRuns = dedupeCheckRuns(requireGitHubCheckRuns(response?.data?.check_runs));
-      if (checkRuns.length > 0) summary = summarizeCheckRuns(checkRuns);
-    } catch {
-      checkRuns = [];
-    }
-    if (!summary) {
-      try {
-        const combined = await octokit.rest.repos.getCombinedStatusForRef({ owner: repo.owner, repo: repo.repo, ref: sha });
-        summary = summarizeCombinedStatuses(requireGitHubStatuses(combined?.data?.statuses));
-      } catch {
-        summary = null;
-      }
-    }
-    return { summary, checkRuns: keepRuns && summary && checkRuns.length > 0 ? checkRuns : [] };
+    const { checks: { dedupeCheckRuns, summarizeCheckRead } } = await load();
+    const ref = { owner: repo.owner, repo: repo.repo, ref: sha };
+    const [checkRuns, statuses]: [CheckRun[] | null, CommitStatus[] | null] = await Promise.all([
+      octokit.rest.checks.listForRef({ ...ref, per_page: 100 })
+        .then((response: Rest['checks']['listForRef']['response']): CheckRun[] => dedupeCheckRuns(requireGitHubCheckRuns(response?.data?.check_runs)))
+        .catch(() => null),
+      octokit.rest.repos.getCombinedStatusForRef({ ...ref, per_page: 100 })
+        .then((combined: Rest['repos']['getCombinedStatusForRef']['response']) => requireGitHubStatuses(combined?.data?.statuses))
+        .catch(() => null),
+    ]);
+    const summary = summarizeCheckRead(checkRuns, statuses);
+    return { summary, checkRuns: keepRuns ? checkRuns ?? [] : [], statuses: keepRuns ? statuses ?? [] : [] };
   };
 
   const readCheckDetails = async (octokit: Octokit, repo: DiscoveryRepository, checkRuns: CheckRun[]) => {
@@ -490,7 +455,7 @@ export function createGitHubResources({
       return result;
     },
 
-    changeRequestContext: async ({ session, context, directory, number, project, remote, includeDiff, includeCIDetails }: ResourceInput<'changeRequestContext'>) => {
+    changeRequestContext: async ({ session, context, directory, number, project, remote, includeDiff, includeCIDetails, includeReferences }: ResourceInput<'changeRequestContext'>) => {
       const { octokit } = accountOf(session);
       const identity = identityOf(session);
       const requestedRepo = project ? { owner: project.owner, repo: project.name } : null;
@@ -502,7 +467,7 @@ export function createGitHubResources({
         primaryRemote: remote,
         number,
       };
-      const cacheKey = JSON.stringify([directory, number, includeDiff, requestedRepo ? `${requestedRepo.owner}/${requestedRepo.repo}` : null, scope, context?.linked === true]);
+      const cacheKey = JSON.stringify([directory, number, includeDiff, includeReferences === true, requestedRepo ? `${requestedRepo.owner}/${requestedRepo.repo}` : null, scope, context?.linked === true]);
       const cached = contextCache.read(cacheKey, includeCIDetails);
       if (cached) return cached;
       const started = contextCache.begin();
@@ -512,6 +477,7 @@ export function createGitHubResources({
       const route = { owner: repo.owner, repo: repo.repo };
       const projectDTO = mapProject(repo, identity);
       const prData = requireGitHubPullRequest((await octokit.rest.pulls.get({ ...route, pull_number: number }))?.data, 'GitHub returned an invalid pull request');
+      const reviewContextRead = readReviewContext(octokit, route, number, prData.requested_reviewers, identity);
       const issueComments = requireProviderArray<Rest['issues']['listComments']['response']['data'][number]>(
         (await octokit.rest.issues.listComments({ ...route, issue_number: number, per_page: 100 }))?.data,
         'GitHub returned an invalid issue comment list',
@@ -528,10 +494,13 @@ export function createGitHubResources({
       let ci: CI | null = null;
       const sha = prData.head?.sha;
       if (sha) {
-        const { summary, checkRuns } = await readChecks(octokit, repo, sha, { runs: true });
-        if (summary && checkRuns.length > 0) {
+        const { summary, checkRuns, statuses } = await readChecks(octokit, repo, sha, { runs: true });
+        if (summary && checkRuns.length + statuses.length > 0) {
           const details = includeCIDetails ? await readCheckDetails(octokit, repo, checkRuns) : () => ({});
-          ci = mapCI(summary, checkRuns.map((run) => mapCheckRun(run, details(run), identity)));
+          ci = mapCI(summary, [
+            ...checkRuns.map((run) => mapCheckRun(run, details(run), identity)),
+            ...statuses.map((status) => mapCommitStatus(status, identity)),
+          ]);
         } else {
           ci = mapCI(summary);
         }
@@ -553,6 +522,7 @@ export function createGitHubResources({
         changeRequest: mapChangeRequest(prData, projectDTO, identity),
         issueComments,
         reviewComments,
+        ...await reviewContextRead,
         files,
         ci,
       };
@@ -561,6 +531,7 @@ export function createGitHubResources({
         const stack = await fetchPullStack({ octokit, owner: repo.owner, repo: repo.repo, number }).catch(() => undefined);
         if (stack !== undefined) result.stack = stack;
       }
+      if (includeReferences) Object.assign(result, await referencesField(octokit, repo.owner, repo.repo, number));
       contextCache.store(cacheKey, scope, result, includeCIDetails, started);
       return result;
     },
@@ -626,14 +597,15 @@ export function createGitHubResources({
       return result;
     },
 
-    getIssue: async ({ session, context, directory, number, project, remote }: ResourceInput<'getIssue'>) => {
+    getIssue: async ({ session, context, directory, number, project, remote, includeReferences }: ResourceInput<'getIssue'>) => {
       const { octokit } = accountOf(session);
       const identity = identityOf(session);
       const repo = await resolveRepoForRequest(octokit, directory, project ? { owner: project.owner, repo: project.name } : null, remote, { linked: context?.linked });
       if (!repo) return null;
       const issue = requireGitHubIssue((await octokit.rest.issues.get({ owner: repo.owner, repo: repo.repo, issue_number: number }))?.data, 'GitHub returned an invalid issue');
       if (issue.pull_request) throw responseError(400, { error: 'Not a GitHub issue' });
-      return mapIssue(issue, mapProject(repo, identity), identity);
+      const mapped = mapIssue(issue, mapProject(repo, identity), identity);
+      return includeReferences ? { ...mapped, ...(await referencesField(octokit, repo.owner, repo.repo, number)) } : mapped;
     },
 
     issueComments: async ({ session, context, directory, number, project, remote }: ResourceInput<'issueComments'>) => {
@@ -709,17 +681,11 @@ export function createGitHubResources({
       });
     },
 
-    listReviewerCandidates: async ({ session, directory, project, remote }: ResourceInput<'listReviewerCandidates'>) => {
+    listReviewerCandidates: async ({ session, directory, project, remote, role }: ResourceInput<'listReviewerCandidates'>) => {
       const { octokit } = accountOf(session);
       const repo = await resolveRepoForRequest(octokit, directory, { owner: project.owner, repo: project.name }, remote);
       if (!repo) throw notInProject();
-      const response = await octokit.rest.issues.listAssignees({ owner: repo.owner, repo: repo.repo, per_page: 100 });
-      return requireProviderArray<Rest['issues']['listAssignees']['response']['data'][number]>(response?.data, 'GitHub returned an invalid user list').flatMap((user) => {
-        if (!isProviderString(user?.login) || !user.login) return [];
-        return [isProviderString(user.avatar_url) && user.avatar_url
-          ? { id: user.login, login: user.login, avatarUrl: user.avatar_url }
-          : { id: user.login, login: user.login }];
-      });
+      return readAssignablePeople(octokit, repo, role === 'assignee');
     },
 
     references: ({ session, context, directory, remote, kind, state, people, query, labels = [], cursor }: ResourceInput<'references'> & { labels?: string[] }) => pickerRead(async () => {
@@ -751,7 +717,7 @@ export function createGitHubResources({
         labels,
         text: query ?? '',
         cursor: cursor || null,
-      });
+      }, repo.host || GITHUB_COM);
       return { connected: true, repo, ...page };
     }),
 
@@ -805,7 +771,7 @@ export function createGitHubResources({
           if (folder.status !== 'included') continue;
           const { accountId, instance } = folder.trusted;
           const groupKey = JSON.stringify([instance ?? '', accountId]);
-          if (!accounts.has(groupKey)) accounts.set(groupKey, { accountId, octokit: folder.octokit, folders: [], authority: [], repositories: new Map() });
+          if (!accounts.has(groupKey)) accounts.set(groupKey, { accountId, octokit: folder.octokit, host: instance || GITHUB_COM, folders: [], authority: [], repositories: new Map() });
           const group = accounts.get(groupKey);
           if (!group) throw new Error('Missing reference account group');
           group.folders.push(folder);
@@ -840,7 +806,7 @@ export function createGitHubResources({
       }
     },
 
-    referenceDetail: ({ session, context, directory, remote, project, number, host, kind }: ResourceInput<'referenceDetail'>) => pickerRead(async () => {
+    referenceDetail: ({ session, context, directory, remote, project, number, host, kind, includeReferences }: ResourceInput<'referenceDetail'>) => pickerRead(async () => {
       const { octokit: github, rateLimit } = await load();
       const requestedHost = String(host ?? '').trim().toLowerCase();
       const octokit = requestedHost ? await github.getOctokitOrNull(requestedHost) : accountOf(session).octokit;
@@ -860,8 +826,11 @@ export function createGitHubResources({
         repo = await resolveRepoForRequest(octokit, directory, { owner: project.owner, repo: project.name }, remote, { linked: context?.linked });
         if (!repo) throw notInProject();
       }
-      const read = kind === 'discussion' ? fetchDiscussionDetail : fetchReferenceDetail;
-      return { connected: true, detail: await read({ octokit, owner: repo.owner, repo: repo.repo, number }) };
+      const query = { octokit, owner: repo.owner, repo: repo.repo, number };
+      const detail = kind === 'discussion'
+        ? await fetchDiscussionDetail(query)
+        : await fetchReferenceDetail({ ...query, includeReferences: includeReferences === true });
+      return { connected: true, detail };
     }),
 
     reviewState: ({ session, directory, remote, project, number }: ResourceInput<'reviewState'>) => pickerRead(async () => {
@@ -961,7 +930,7 @@ export function createGitHubResources({
         context,
         sourceProject: { id: `${headOwner}/${headName}`, owner: headOwner, name: headName },
         targetProject: { id: project.id, owner: target.owner, name: target.repo },
-        classification: headOwner === target.owner && headName === target.repo ? 'same-repository' : 'contributor-fork',
+        classification: `${headOwner}/${headName}`.toLowerCase() === `${target.owner}/${target.repo}`.toLowerCase() ? 'same-repository' : 'contributor-fork',
         headSha,
         headRef: `refs/heads/${headRef}`,
         endpoint,

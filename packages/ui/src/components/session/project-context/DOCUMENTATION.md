@@ -511,6 +511,9 @@ matched the old project would silently hide everything in the new one.
 - **An external note change is adopted only while the open note is untouched** since
   its last save. "Add to notes" from a chat selection must reach an open panel,
   but must never overwrite what the user is typing.
+- **A save echo leaves the open draft's whitespace intact.** The store trims
+  note bodies for persistence, so the editor compares the stored body with the
+  trimmed last-saved draft before treating it as an external change.
 - **List cards never change height.** A note card shows its title and a short
   clamped preview; editing happens in the opened note, never inside the list.
 - **A blanked note body is never persisted.** The server rejects it, so the row
@@ -551,4 +554,7 @@ only where the chat composer's mic would (dictation enabled, capture supported,
 not VS Code). The transcript continues the field's text instead of adding the
 entry, so a misheard word can be fixed first. It does not answer the
 `toggle_dictation` shortcut: that key belongs to the chat composer, and two
-listeners would start two recordings.
+listeners would start two recordings. The transcript is appended to the draft it
+was started in (`hooks/useKnowledgeDraft.ts`): the mounted field when it shows that draft,
+the saved draft otherwise. A field also rereads its saved draft when another
+window writes it, and adds text appended there to its own unsaved typing.

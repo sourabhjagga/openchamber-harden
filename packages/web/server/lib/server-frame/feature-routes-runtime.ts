@@ -43,7 +43,7 @@ import { registerExtensionWaitsRoutes } from '../extension-waits/runtime.js';
 import { registerWorkflowRoutes } from '../workflows/routes.js';
 import { registerRoutingPromptRewrite, registerRoutingRoutes } from '../routing/routes.js';
 import { registerConfigEntityRoutes } from '../opencode/config-entity-routes.js';
-import { createThemeFolderWatch } from '../appearance/theme-watch.js';
+import { createFeatureFolderWatches } from './feature-folder-watches.js';
 import { registerSettingsUtilityRoutes } from './core-routes.js';
 import { registerProjectIconRoutes } from '../appearance/project-icon-routes.js';
 import { registerProviderLogoRoutes } from '../appearance/provider-logo-routes.js';
@@ -106,6 +106,7 @@ import { createSshPassphraseStore } from '../git/ssh-passphrases.js';
 import { openCodeCredentialSource } from '../opencode/auth.js';
 import { createContributorProvenanceStore } from '../git/contributor-provenance-storage.js';
 import { createGitNetworkOperationStore } from '../git/network-operation-storage.js';
+import { createWithPlannedRemote, hydrateFollowingPlannedRemotes } from '../git/planned-remotes.js';
 import { readEffectiveGitTransportRevision } from '../git/transport-config.js';
 import { completeWorktreeCheckoutHydration, configureRepositoryTransport, deleteBranch as deleteBranchService, isGitRepository as isGitRepositoryService, removeWorktree as removeWorktreeService, resolvePrimaryWorktreeRoot, resolveWorktreeTopLevel } from '../git/service.js';
 import { createPrivateRepositoryIdentityResolver, resolveRepositoryId } from '../source-control/repository-identity.js';
@@ -118,6 +119,7 @@ import type { createNotificationEmitterRuntime } from '../notifications/emitter-
 import type { SseWriter } from '../notifications/contracts.js';
 import type { GlobalMessageStreamHub } from '../event-stream/global-hub.js';
 import type { createSettingsRuntime } from '../settings/settings-runtime.js';
+import type { SettingsFileChange } from '../settings/settings-file-state.js';
 import type { createSettingsHelpers } from '../settings/settings-helpers.js';
 import type { createProjectDirectoryRuntime } from '../projects/project-directory-runtime.js';
 import type { createOpenCodeNetworkRuntime } from '../opencode/network-runtime.js';
@@ -155,14 +157,14 @@ type RouteDependencies =
   & Pick<IconOptions, 'createFsSearchRuntime' | 'openchamberDataDir'>
   & Required<Pick<SessionOptions, 'validateDirectoryPath' | 'waitForOpenCodeReady' | 'emitSessionCreatedEvent'>>
   & Required<Pick<GuestOptions, 'onGuestDeactivated' | 'surfaceViewerHeaders' | 'openchamberVersion'>>
-  & Pick<SettingsRuntime, 'readSettingsFromDisk' | 'readSettingsFromDiskMigrated' | 'persistSettings' | 'persistResolvedSettings'>
   & Pick<ReturnType<typeof createProjectDirectoryRuntime>, 'resolveProjectDirectory' | 'resolveOptionalProjectDirectory'>
   & Pick<Parameters<typeof registerSettingsUtilityRoutes>[1], 'readCustomThemesFromDisk' | 'saveImportedTheme' | 'deleteImportedTheme' | 'refreshOpenCodeAfterConfigChange'>
   & Pick<Parameters<typeof registerOpenCodeRoutes>[1], 'crypto' | 'getOpenCodeResolutionSnapshot' | 'getOpenCodeUpgradeCapability' | 'upgradeOpenCodeCli' | 'getOpenCodeCompatibility' | 'installOpenCodeV2'>
   & Pick<ScheduledTaskOptions, 'projectConfigRuntime' | 'scheduledTasksRuntime' | 'sanitizeProjects'>
   & Required<Pick<ScheduledTaskOptions, 'scheduledTaskService'>>
-  & Pick<Parameters<typeof registerSkillRoutes>[1], 'sanitizeSkillCatalogs' | 'isUnsafeSkillRelativePath' | 'getOpenCodePort'>
+  & Pick<Parameters<typeof registerSkillRoutes>[1], 'sanitizeSkillCatalogs' | 'isUnsafeSkillRelativePath' | 'getOpenCodePort' | 'getManagedOpenCodeProcessEnv'>
   & {
+    settingsRuntime: Pick<SettingsRuntime, 'readSettingsFromDisk' | 'readSettingsFromDiskMigrated' | 'persistSettings' | 'persistResolvedSettings' | 'watchSettingsFiles' | 'reconcileExternalSettings' | 'subscribeTakenInSettings'>;
     fs: typeof import('node:fs');
     formatSettingsResponse: ReturnType<typeof createSettingsHelpers>['formatSettingsResponse'];
     buildOpenCodeUrl: ReturnType<typeof createOpenCodeNetworkRuntime>['buildOpenCodeUrl'];
@@ -218,7 +220,7 @@ export const createFeatureRoutesRuntime = (dependencies: FeatureRuntimeDependenc
     id: `server_${crypto.randomUUID()}`,
     platform: process.env.OPENCHAMBER_RUNTIME === 'desktop' ? 'desktop' : 'web',
   });
-  let themeFolderWatch: ReturnType<typeof createThemeFolderWatch> | null = null;
+  const folderWatches = createFeatureFolderWatches();
   let stopGuestPackageWatch: () => void = () => {};
   let quotaProviders: typeof import('../quota/index.js') | null = null;
   const getQuotaProviders = async () => {
@@ -277,16 +279,11 @@ export const createFeatureRoutesRuntime = (dependencies: FeatureRuntimeDependenc
         code: 'RUNTIME_UNSUPPORTED',
       });
     }
-    const bindingRead = await walkthroughBindingService.get(parentDirectory);
-    const repositoryAuthority = {
-      repositoryId: bindingRead.repository.repositoryId,
-      bindingRevision: bindingRead.revision,
-      configRevision: bindingRead.repository.configRevision,
-    };
-    return networkOperations.hydrateBoundCheckout({
-      directory,
-      parentRemoteName,
-      repositoryAuthority,
+    const { get: readBinding } = walkthroughBindingService;
+    const { hydrateBoundCheckout: hydrate } = networkOperations;
+    return createWithPlannedRemote({
+      directory: parentDirectory, remote: undefined, serialize: false, readBinding,
+      create: (pinned) => hydrateFollowingPlannedRemotes(pinned, (repositoryAuthority) => hydrate({ directory, parentRemoteName, repositoryAuthority })),
     });
   };
 
@@ -338,7 +335,6 @@ export const createFeatureRoutesRuntime = (dependencies: FeatureRuntimeDependenc
       resolveProjectDirectory,
       resolveOptionalProjectDirectory,
       validateDirectoryPath,
-      customThemesDir = null,
       readCustomThemesFromDisk,
       saveImportedTheme,
       deleteImportedTheme,
@@ -349,16 +345,13 @@ export const createFeatureRoutesRuntime = (dependencies: FeatureRuntimeDependenc
       getOpenCodeCompatibility,
       installOpenCodeV2,
       formatSettingsResponse,
-      readSettingsFromDisk,
-      readSettingsFromDiskMigrated,
-      persistSettings,
-      persistResolvedSettings,
+      settingsRuntime,
       sanitizeProjects,
       sanitizeSkillCatalogs,
       isUnsafeSkillRelativePath,
       buildOpenCodeUrl,
       getOpenCodeAuthHeaders,
-      getOpenCodePort,
+      getOpenCodePort, getManagedOpenCodeProcessEnv,
       getOwnPorts,
       devServerScanner,
       buildAugmentedPath,
@@ -391,6 +384,7 @@ export const createFeatureRoutesRuntime = (dependencies: FeatureRuntimeDependenc
       openchamberVersion,
       workflowRuntime = null,
     } = routeDependencies;
+    const { readSettingsFromDisk, readSettingsFromDiskMigrated, persistSettings, persistResolvedSettings } = settingsRuntime;
 
     registerSettingsUtilityRoutes(app, {
       readCustomThemesFromDisk,
@@ -537,7 +531,7 @@ export const createFeatureRoutesRuntime = (dependencies: FeatureRuntimeDependenc
       refreshPluginSwitches,
     });
 
-    const { getProfiles, getProfile, getGlobalIdentity, resolveRepositoryGitPaths } = await import('../git/index.js');
+    const { getProfiles, getProfile, getGlobalIdentity, resolveRepositoryGitPaths, spawnOutsideProjects } = await import('../git/index.js');
 
     registerQuotaRoutes(app, { getQuotaProviders });
     registerSmallModelRoutes(app, { getSmallModelService });
@@ -642,11 +636,10 @@ export const createFeatureRoutesRuntime = (dependencies: FeatureRuntimeDependenc
         parentEndpoint: TransportAuthority['endpoint'];
         parentRemoteName: string;
       }) => {
-        if (!(networkOperations?.inspectCheckoutHydration instanceof Function)) return null;
-        const inspection = await networkOperations.inspectCheckoutHydration({
-          directory, parentEndpoint, parentRemoteName,
+        if (!(networkOperations?.inspectCheckoutAuxiliary instanceof Function)) return null;
+        return networkOperations.inspectCheckoutAuxiliary({
+          directory, parentEndpoint, parentRemoteName, kind, path: checkoutPath,
         });
-        return inspection.requirements.find((entry) => entry.kind === kind && entry.path === checkoutPath) ?? null;
       },
     });
     registerWalkthroughRoutes(app, {
@@ -743,7 +736,7 @@ export const createFeatureRoutesRuntime = (dependencies: FeatureRuntimeDependenc
       clientReloadDelayMs,
       buildOpenCodeUrl,
       getOpenCodeAuthHeaders,
-      getOpenCodePort,
+      getOpenCodePort, getManagedOpenCodeProcessEnv,
       getSkillSources,
       discoverSkills,
       mergeDiscoveredSkills,
@@ -796,7 +789,7 @@ export const createFeatureRoutesRuntime = (dependencies: FeatureRuntimeDependenc
         bootstrapStore: worktreeBootstrapStore,
         disposeInstance: createWorktreeInstanceDisposer({ buildOpenCodeUrl, getOpenCodeAuthHeaders }),
       }),
-      spawnImpl: spawn,
+      spawnImpl: spawnOutsideProjects(gitBinary, spawn),
       fsImpl: fsPromises,
       pathImpl: path,
       gitBinary,
@@ -805,25 +798,17 @@ export const createFeatureRoutesRuntime = (dependencies: FeatureRuntimeDependenc
       trustedDirectoriesConfig: createTrustedDirectoriesConfig({ gitBinary }),
     });
     await registerBuiltInGuests({ persistPath: extensionsPersistPath(openchamberDataDir), root: routeDependencies.builtInExtensionsDir });
-    const announceChange = (type: string) => {
+    const announceChange = (type: string, properties: SettingsFileChange | Record<string, never> = {}) => {
       const clients = getOpenChamberEventClients();
       for (const client of clients) {
         try {
-          writeSseEvent(client, { type, properties: {} });
+          writeSseEvent(client, { type, properties });
         } catch {
           clients.delete(client);
         }
       }
     };
-    themeFolderWatch?.stop();
-    themeFolderWatch = customThemesDir
-      ? createThemeFolderWatch({
-        fsPromises,
-        path,
-        themesDir: customThemesDir,
-        onChange: () => announceChange('openchamber:themes-changed'),
-      })
-      : null;
+    await folderWatches.start(routeDependencies, announceChange);
     const extensionSourceControlProviders = createExtensionProviders({
       listGuests: () => listInstalledGuests({ persistPath: extensionsPersistPath(openchamberDataDir) }),
       register: walkthroughBindingService.registerExtensionProvider,
@@ -1026,7 +1011,7 @@ export const createFeatureRoutesRuntime = (dependencies: FeatureRuntimeDependenc
         fs.realpath(target, (error, resolved) => (error ? reject(error) : resolve(resolved)));
       }),
     });
-    registerEnvironmentRoutes(app, { store: environmentStore, runtime: environmentRuntime, listProjects: listConfiguredProjects });
+    registerEnvironmentRoutes(app, { store: environmentStore, runtime: environmentRuntime, listProjects: listConfiguredProjects, readClaudeConfigDir: () => environmentRuntime.forClaudeQuota().CLAUDE_CONFIG_DIR, onClaudeConfigChanged: () => announceChange('openchamber:quota-credentials-changed') });
   };
 
   return {
@@ -1035,8 +1020,7 @@ export const createFeatureRoutesRuntime = (dependencies: FeatureRuntimeDependenc
     createChangeRequestWorktree,
     publishRepositoryCredentialEndpoint: async () => { await gitRepositoryCredentialRuntime?.publish(); },
     stopFolderWatches: () => {
-      themeFolderWatch?.stop();
-      themeFolderWatch = null;
+      folderWatches.stop();
       stopGuestPackageWatch();
       stopGuestPackageWatch = () => {};
     },

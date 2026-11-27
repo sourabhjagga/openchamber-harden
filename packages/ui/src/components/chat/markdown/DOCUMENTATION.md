@@ -49,6 +49,7 @@ This module owns shared Markdown parsing, sanitization, presentation, code highl
 - Whole-document readers such as find and heading navigation hold all blocks mounted. Selections retain their ends and mount every block when they cross placeholders, otherwise copying would read empty boxes. Detaching releases selection holds because the collapse event will no longer be observed; synchronous holds run only from event handlers and are effective only after the window attaches.
 - User-toggled disclosures and playing media stay mounted to preserve state and playback position. Summary clicks identify user changes because `toggle` also fires when an open disclosure is inserted.
 - Tables measure only after streaming settles to avoid a forced layout on every update. Capped-column flags and their shared map change only with content or cap status, since rebuilding the map during resize rerenders every cell. Table copies preserve already escaped links without escaping them again.
+- Only settled, top-level assistant tables in the main transcript can expand. Each table keeps its own toggle and measures the nearest chat scroller that contains it, so retained timelines cannot read another session's scroller. Expansion widens only the table's scroll area inside the message gutters, anchored to the chat panel whatever the table's own text direction; tables inside quotes, list items or disclosures, prose, sibling tables, toolbar placement, exports, and other Markdown surfaces keep their existing measure. Settled chat tables show inline-edge fades while that side has hidden columns, even when collapsed. An expanded table records its message-width column widths, so the message image export, which clones the live DOM, draws it collapsed and without fades.
 - Header measurement preserves rendered cell styles and the longest unbroken word. Short columns keep natural width; once horizontal scrolling is required, squeezing long text to the minimum only makes cells taller.
 - Diff parsing loads only for settled, bounded patches. Headerless model snippets receive parser-only coordinates; copy retains the original source. Suggestion fences use review context and its excerpt, show additions when no excerpt exists, and stay ordinary code outside a review comment; an empty hunk side names the preceding line.
 
@@ -95,9 +96,23 @@ Highlights runs on the main thread so synchronous consumers can paint highlighte
 
 Persisted table widths use headings for identity because inserting a preceding table changes ordinal positions.
 
+### Why table expansion widens the scroller and not the Markdown root
+
+The expanded scroller can use the transcript's spare width without changing the message column's measure. Its toolbar stays anchored to that column, and the prose and other tables keep their existing layout. A right-to-left table's frame grows leftward from its own start edge, so its offset is measured from that edge; a direction change remeasures, because no size an observer sees changes with it.
+
+### Why nested tables keep the message-width layout
+
+A table inside a Markdown quote, list item or disclosure stays within that container's indentation. Only a top-level assistant table can reach into spare transcript width; chat tables in either state still show fades for hidden columns.
+
 ### Why document windowing and not mounting the whole document
 
 A full 340 KB document costs 470 ms to open in the recorded measurement. Windowing limits the nodes laid out and serialized for accessibility during panel resize while the first 24 blocks can paint before viewport attachment.
+
+### Why read-only previews opt in to hosting the diagram viewer
+
+Mermaid clicks report through `onShowPopup`, which chat messages pass down from their message-level `ToolOutputDialog`. The Files Markdown preview, plan view, reference preview and skills page host no dialog, so they pass `hostsDiagramPreview` and `SimpleMarkdownRenderer` hosts the viewer for them. An implicit fallback for every caller was rejected: form Markdown, the reasoning and subagent output inside the tool-output dialog, the viewer's own diagram and the standalone `.mmd` preview would each open a modal of their own, so a click there stays inert. A caller's own `onShowPopup` always wins and the hosted viewer never mounts.
+
+The viewer module loads through `useOnDemandComponent`, not `React.lazy`: a rejected `lazy` import reaches the document's error boundary and replaces the Markdown, while here a failed load drops the preview, releases `isImagePreviewOpen` and the next click loads again. The viewer is the topmost dismissible layer (`usePreviewDismissLayer`): it sits above mobile sheets, registers with `mobileBackLayers` so the phone's Back closes it before the sheet or file under it, and takes Escape on the window in the capture phase so a Base UI dialog or sheet beneath it does not close on the same key. `useMarkdownRendererToolPopup` releases the global flag when the renderer unmounts with the viewer open, because nothing else resets it.
 
 # Markdown file references
 
@@ -114,6 +129,7 @@ The shared renderer classifies and confirms local references before opening them
 - Ordinary local hrefs bypass prose-only filename filters. External schemes and protocol-relative URLs are rejected before decoding.
 - An identifier an extension claims (`remarkGuestLinks`) is a link with no href and `data-oc-guest-link`, which only that parser sets (`rehypeMarkdownPolicy` drops it from authored HTML). `MarkdownLink` draws it before any file, anchor or browser branch, so it never reaches file-reference classification; a claimed https link is checked against the app's own link readers at click (`guestLinkClick.ts`). The contract is in `packages/sdk/DOCUMENTATION.md`, *Links in messages*.
 - Encoded edge spaces remain part of the filename during resolution, existence checks, and file-tab navigation.
+- A drag that starts on an inline-code or fenced-code file reference selects text as it does in surrounding prose, and the click at the end of that drag opens nothing (`activateMarkdownFile`), also when the pointer moved more than a few pixels at any point of the press but the browser selected nothing. Only a click a pointer produced ends a press (`detail > 0`), so `element.click()` and keyboard activation still open the file after a press released elsewhere. A file reference has no chip padding, so its edge starts a selection like the text around it. A plain click focuses the reference before opening it, as before, so Enter or Space works on it next. The code reference gives up its tab stop for the press (`releaseFileReferenceTabStop`), because Chromium moves focus to a tab stop on mousedown and a drag from a focused element never becomes a selection. A file reference drawn as a link keeps the browser's link behavior: a drag from it starts a link drag.
 
 ## Decisions
 
@@ -137,6 +153,18 @@ A link target can contain repeated spaces, angle brackets, or encoded `://` in i
 
 Text references are trimmed as prose, but an href's encoded edge spaces identify a different file. Href resolution opts out of trimming, and stat checks and absolute file-tab targets retain those spaces.
 
+### Why a code file reference drops its tab stop while the pointer is down
+
+The code reference keeps `role="button"` and Enter/Space activation, but Chromium focuses any tab stop on mousedown before it decides whether the gesture is a drag. A drag that starts inside the now-focused reference never becomes a text selection, so the release reads as a plain click and opens the file. Removing `tabindex` for the press and restoring it on the next task leaves keyboard access intact while the browser starts the selection as it would in ordinary prose. A reference drawn as a link keeps its `href`: the browser owns a link drag from it, and disarming the link for the press would take that away.
+
+### Why a flow construct plus a block merge and not a text construct
+
+Multiline bracket math uses a concrete micromark flow construct because text constructs end at paragraph breaks; concrete flow keeps blank lines and Markdown-looking formula content inside the equation, while rejecting lazy container continuation. The equation ends at the first line that is a standalone `\]` or ends in `\]`, the same close the text construct accepts, so prose after `x\]` never joins a formula that a later `\]` would otherwise close.
+
+`parseMarkdownBlocksWithMath` (`mathBlocks.ts`, free of the renderer's plugins so the chat timeline can import it eagerly) rejoins Streamdown chunks split inside a closed equation for streaming and windowed rendering and for the settled answer's row cuts; its opener, close and fence rules must agree with the tokenizer so splitting cannot change the rendered formula. It only needs to handle top-level equations: Streamdown keeps a whole list or blockquote, nested ones included, in one block, so an equation inside a container is never split. That is why a chunk that starts a fence, list, blockquote or indented code never opens a join, and the opener rule is document-level (a standalone `\[` indented at most three spaces).
+
+The flow construct interrupts a paragraph only when the equation crosses a blank line. One that closes inside the paragraph is left to the text construct, which keeps the inline precedence of code spans around delimiter lines.
+
 # Commands run from a reply
 
 ## Ownership
@@ -152,6 +180,10 @@ A `bash`, `sh`, `shell` or `zsh` fence in a finished assistant reply has a run b
 - A run started here is watched from the event stream, because its block can scroll away or its session can close. After a reload the block continues any run still owed one.
 - The block shows the run instead of the shell row. A run whose reply is outside the loaded history keeps its row (`dropReplyCommandRows`).
 - Run controls require a finished reply on a surface with controls because a streaming command could execute an incomplete source.
+
+The separate terminal action (`replyTerminal.ts`) starts a command-mode runtime terminal in the reply's directory. It never adds transcript messages or continues the agent. It is available on web, desktop, hosted mobile and Capacitor; VS Code has no integrated terminal and Mini Chat has no terminal panel, so neither shows it. A `bash`, `sh` or `zsh` fence runs in that shell, and the server refuses one it cannot find, which the action shows as a start error instead of running the text in the wrong shell; a `shell` fence uses the user's terminal shell. Control characters a fence can carry are stripped the way project actions strip them, because the text reaches the shell as an argument.
+
+The session is created before its tab is published, so the terminal view cannot auto-create an interactive shell for the new tab, and its id doubles as the tab id, so the server's listing adopts it into that same tab, whether it arrives before the create response or after a reload. A response without command mode comes from an older server that opened an interactive shell instead: the action closes it, drops any tab the listing already adopted for it, and shows the start error. The action opens the mobile workspace when mounted, otherwise the desktop context panel, and opens neither when the user switched to another conversation meanwhile: the mobile drawer shows the current conversation's terminal, not the one the command runs in. The tab never closes on its own (`components/views/DOCUMENTATION.md`, *Terminal tabs whose shell exits*), and interactive Restart is disabled because the server cannot restart command-mode sessions.
 
 ## Decisions
 
