@@ -1,5 +1,3 @@
-// Bundled-OpenCode probe for a managed remote. Kept out of ssh-manager.mjs so
-// that large file does not grow past the repository's 800-line file-size gate.
 export async function probeRemoteBundledOpenCode(manager, parsed, controlPath, binPath, remotePathPrefix, shellQuote) {
   if (!binPath) return false;
   const probeScript = [

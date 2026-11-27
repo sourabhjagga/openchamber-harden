@@ -4,10 +4,8 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-
 import { readJsonObjectForUpdate, replaceFileWithRetry } from './windows-file-replace.mjs';
 import { probeRemoteBundledOpenCode } from './ssh-bundled-opencode.mjs';
-
 const LOCAL_HOST_ID = 'local';
 const DEFAULT_CONNECTION_TIMEOUT_SEC = 60;
 const DEFAULT_LOCAL_BIND_HOST = '127.0.0.1';
@@ -33,7 +31,6 @@ const DEFAULT_CONTROL_PERSIST_SEC = 300;
 const DEFAULT_READY_TIMEOUT_SEC = 30;
 const DEFAULT_RECONNECT_MAX_ATTEMPTS = 5;
 const MAX_LOG_LINES_PER_INSTANCE = 1200;
-
 const MONITOR_INITIAL_POLL_MS = 2000;
 const MONITOR_STEADY_POLL_MS = 10000;
 const MONITOR_STABILIZE_TICKS = 5;
@@ -44,7 +41,6 @@ const childProcessDiagnostics = new WeakMap();
 const nowMillis = () => Date.now();
 const shellQuote = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
 const hasGlobWildcard = (value) => /[*?]/.test(value);
-
 const expandSshIncludeToken = (token, baseDir) => {
   const trimmed = String(token || '').trim();
   if (!trimmed) return [];
@@ -1215,8 +1211,12 @@ export class ElectronSshManager {
     }
   }
 
+  async remoteHasBundledOpenCode(parsed, controlPath, binPath) {
+    return probeRemoteBundledOpenCode(this, parsed, controlPath, binPath, REMOTE_PATH_PREFIX, shellQuote);
+  }
+
   async startRemoteServerManaged(parsed, controlPath, instance, desiredPort, binPath) {
-    const hasBundledOpenCode = await probeRemoteBundledOpenCode(this, parsed, controlPath, binPath, REMOTE_PATH_PREFIX, shellQuote);
+    const hasBundledOpenCode = await this.remoteHasBundledOpenCode(parsed, controlPath, binPath);
     const opencodePath = hasBundledOpenCode
       ? null
       : await this.resolveRemoteTool(parsed, controlPath, 'opencode', REMOTE_OPENCODE_CANDIDATES);
