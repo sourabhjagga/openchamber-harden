@@ -6,6 +6,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 
 import { readJsonObjectForUpdate, replaceFileWithRetry } from './windows-file-replace.mjs';
+import { probeRemoteBundledOpenCode } from './ssh-bundled-opencode.mjs';
 
 const LOCAL_HOST_ID = 'local';
 const DEFAULT_CONNECTION_TIMEOUT_SEC = 60;
@@ -40,11 +41,8 @@ const SSH_STATUS_EVENT = 'openchamber:ssh-instance-status';
 const MAX_PROCESS_ERROR_CHARS = 2000;
 const MAX_PROCESS_ERROR_CAPTURE_CHARS = MAX_PROCESS_ERROR_CHARS * 2;
 const childProcessDiagnostics = new WeakMap();
-
 const nowMillis = () => Date.now();
-
 const shellQuote = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
-
 const hasGlobWildcard = (value) => /[*?]/.test(value);
 
 const expandSshIncludeToken = (token, baseDir) => {
@@ -1217,32 +1215,8 @@ export class ElectronSshManager {
     }
   }
 
-  async remoteHasBundledOpenCode(parsed, controlPath, binPath) {
-    if (!binPath) return false;
-    const probeScript = [
-      `PATH="${REMOTE_PATH_PREFIX}:$PATH"`,
-      `node -e 'const fs=require("node:fs"),path=require("node:path");`,
-      `if(process.versions.bun)process.exit(1);`,
-      `const[maj,min]=(process.versions.node||"").split(".").map(Number);`,
-      `if(!(maj>=24||(maj===22&&min>=16)))process.exit(1);`,
-      `if(process.platform==="linux"&&!process.report?.getReport?.()?.header?.glibcVersionRuntime)process.exit(1);`,
-      `const real=fs.realpathSync(process.argv[1]);`,
-      `const dir=path.resolve(path.dirname(real),"..","opencode-server");`,
-      `if(!fs.existsSync(path.join(dir,"serve.mjs"))||!fs.existsSync(path.join(dir,"assets","manifest.json")))process.exit(1);`,
-      `process.stdout.write("bundled\\n");'`,
-      shellQuote(binPath),
-      '2>/dev/null || true',
-    ].join(' ');
-    try {
-      const output = await this.runRemoteCommand(parsed, controlPath, probeScript);
-      return output.trim() === 'bundled';
-    } catch {
-      return false;
-    }
-  }
-
   async startRemoteServerManaged(parsed, controlPath, instance, desiredPort, binPath) {
-    const hasBundledOpenCode = await this.remoteHasBundledOpenCode(parsed, controlPath, binPath);
+    const hasBundledOpenCode = await probeRemoteBundledOpenCode(this, parsed, controlPath, binPath, REMOTE_PATH_PREFIX, shellQuote);
     const opencodePath = hasBundledOpenCode
       ? null
       : await this.resolveRemoteTool(parsed, controlPath, 'opencode', REMOTE_OPENCODE_CANDIDATES);
