@@ -499,6 +499,11 @@ commit that lands upstream v2.5.1 sits on top of these and is not counted.
 
 ---
 
+
+## 12. Known upstream regressions
+
+- **v2.8.1 — `agents.edit.autosave`**: behavior-net scenario "Description, prompt and mode save and survive switching to another agent" fails at step 11; `.opencode/agents/net-helper.md` keeps the original description instead of the edited one. Confirmed on a hosted runner, retry also failed (not flaky). This is upstream code, not a fork customization. Deployed anyway with the regression tracked; re-check when syncing a later release.
+
 ## Checklist (copy into the PR body)
 
 - [ ] `git status` clean before starting; prod healthy before starting
