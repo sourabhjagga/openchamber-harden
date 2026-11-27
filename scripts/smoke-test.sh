@@ -237,7 +237,7 @@ def resolve(from_file, spec):
 # Only what the server actually loads counts. Walking the directory instead
 # would pull in test suites nothing imports, and their vitest/vite imports are
 # absent from a production install by design.
-entries = ['/home/openchamber/packages/web/bin/cli.js', '/home/openchamber/packages/web/server/index.js']
+entries = [p for p in ['/home/openchamber/packages/web/bin/cli.js', '/home/openchamber/packages/web/server/index.js', '/home/openchamber/packages/web/build/bin/cli.js', '/home/openchamber/packages/web/build/server/index.js'] if os.path.isfile(p)]
 seen, queue, found = set(), [e for e in entries if os.path.isfile(e)], set()
 while queue:
     current = queue.pop()
