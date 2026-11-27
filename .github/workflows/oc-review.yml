@@ -76,7 +76,7 @@ jobs:
   # required check: a scenario that fails and then passes is reported as flaky.
   behavior-net:
     name: behavior-net (${{ matrix.part }}/4)
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 40
     strategy:
       fail-fast: false

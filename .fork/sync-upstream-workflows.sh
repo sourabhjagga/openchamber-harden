@@ -66,6 +66,7 @@ oc-review.yml
 "
 
 UPSTREAM_RUNNER="blacksmith-4vcpu-ubuntu-2404"
+UPSTREAM_RUNNER_8="blacksmith-8vcpu-ubuntu-2404"
 FORK_RUNNER="ubuntu-latest"
 
 # Upstream tests that read a workflow this fork deletes. They throw on import
@@ -108,6 +109,10 @@ apply() {
         if grep -q "$UPSTREAM_RUNNER" "$wf"; then
           sed -i "s|$UPSTREAM_RUNNER|$FORK_RUNNER|g" "$wf"
           echo "repointed $name: $UPSTREAM_RUNNER -> $FORK_RUNNER"
+        fi
+        if grep -q "$UPSTREAM_RUNNER_8" "$wf"; then
+          sed -i "s|$UPSTREAM_RUNNER_8|$FORK_RUNNER|g" "$wf"
+          echo "repointed $name: $UPSTREAM_RUNNER_8 -> $FORK_RUNNER"
         fi
         git add "$wf" 2>/dev/null || true
         ;;
